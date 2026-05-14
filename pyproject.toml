@@ -12,6 +12,7 @@ authors = [{ name = "meta-agent contributors" }]
 dependencies = [
     "alembic>=1.18.4",
     "asyncpg>=0.31.0",
+    "greenlet>=3.5.0",
     "opentelemetry-api>=1.41.1",
     "opentelemetry-sdk>=1.41.1",
     "pydantic>=2.7",
@@ -72,10 +73,14 @@ disallow_untyped_decorators = false
 module = ["asyncpg", "asyncpg.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["testcontainers", "testcontainers.*", "docker", "docker.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-ra --strict-markers --strict-config"
+addopts = "-ra --strict-markers --strict-config -m 'not integration'"
 markers = [
     "integration: requires external services (postgres, redis); skipped in unit-only CI",
 ]

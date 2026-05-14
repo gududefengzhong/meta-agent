@@ -1,0 +1,42 @@
+# Local-only dev dependencies (Postgres + Redis).
+#
+# 【用途】开发者本机起开发依赖；不被 CI / 测试直接使用（CI 使用
+# testcontainers 在 job 内拉起独立实例）。
+# 【启动】docker compose -f docker-compose.dev.yml up -d
+# 【迁移】META_AGENT_DB_URL=postgresql+asyncpg://meta_agent:dev-only@localhost:5432/meta_agent \
+#         alembic upgrade head
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: meta_agent_postgres_dev
+    environment:
+      POSTGRES_DB: meta_agent
+      POSTGRES_USER: meta_agent
+      POSTGRES_PASSWORD: dev-only
+    ports:
+      - "5432:5432"
+    volumes:
+      - meta_agent_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meta_agent -d meta_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: meta_agent_redis_dev
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - meta_agent_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  meta_agent_pg_data:
+  meta_agent_redis_data:

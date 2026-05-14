@@ -38,5 +38,58 @@ jobs:
       - name: Mypy type check
         run: mypy
 
-      - name: Pytest
+      - name: Pytest (unit)
         run: pytest
+
+  integration:
+    # 集成测试单独成 job，与 quality 并行；使用 GitHub Actions 自带
+    # service containers 直接暴露 Postgres / Redis 端口，避免在
+    # testcontainers 之上再嵌一层 docker-in-docker。
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: meta_agent
+          POSTGRES_USER: meta_agent
+          POSTGRES_PASSWORD: ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U meta_agent -d meta_agent"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      META_AGENT_CI_PG_DSN: postgresql://meta_agent:ci-only@localhost:5432/meta_agent
+      META_AGENT_CI_REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project (with dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Apply migrations
+        env:
+          META_AGENT_DB_URL: postgresql+asyncpg://meta_agent:ci-only@localhost:5432/meta_agent
+        run: alembic upgrade head
+
+      - name: Pytest (integration)
+        run: pytest -m integration -v tests/integration/
