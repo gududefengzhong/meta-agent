@@ -10,9 +10,12 @@ requires-python = ">=3.11"
 license = { text = "Proprietary" }
 authors = [{ name = "meta-agent contributors" }]
 dependencies = [
+    "alembic>=1.18.4",
+    "asyncpg>=0.31.0",
     "opentelemetry-api>=1.41.1",
     "opentelemetry-sdk>=1.41.1",
     "pydantic>=2.7",
+    "redis>=7.4.0",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +24,7 @@ dev = [
     "mypy>=1.10",
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "testcontainers>=4.14",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -64,7 +68,14 @@ plugins = ["pydantic.mypy"]
 module = "tests.*"
 disallow_untyped_decorators = false
 
+[[tool.mypy.overrides]]
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "integration: requires external services (postgres, redis); skipped in unit-only CI",
+]
