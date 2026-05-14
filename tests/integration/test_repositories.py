@@ -1,0 +1,177 @@
+"""Integration tests for the PG repository adapters.
+
+These tests exercise the real asyncpg path against a containerised
+Postgres. They focus on the multi-tenant guard, idempotent upsert
+semantics, and cross-tenant isolation; deeper edge cases live in the
+unit tests.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+
+from meta_agent.core.domain.audit import AuditEvent
+from meta_agent.core.domain.checkpoint import TaskCheckpoint
+from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
+from meta_agent.core.domain.session import Session
+from meta_agent.core.domain.task import Task, TaskState, TaskType
+from meta_agent.core.ports.repository import TenantIsolationError
+from meta_agent.infra.persistence import (
+    DatabasePool,
+    PgAuditRepository,
+    PgCheckpointRepository,
+    PgOutboxRepository,
+    PgSessionRepository,
+    PgTaskRepository,
+)
+from meta_agent.infra.security.context import RequestContext, bind_context
+
+pytestmark = pytest.mark.integration
+
+
+def _ctx(tenant_id: str = "tenant-A") -> RequestContext:
+    return RequestContext(
+        tenant_id=tenant_id,
+        principal_id="user-1",
+        trace_id="trace-1",
+        request_id="req-1",
+    )
+
+
+def _task(task_id: str, tenant_id: str = "tenant-A") -> Task:
+    now = datetime(2026, 5, 14, tzinfo=UTC)
+    return Task(
+        task_id=task_id,
+        tenant_id=tenant_id,
+        session_id=None,
+        principal_id="user-1",
+        trace_id="trace-1",
+        idempotency_key=f"idem-{task_id}",
+        task_type=TaskType.BUG_FIX,
+        state=TaskState.PENDING,
+        input_payload={"goal": "test"},
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def test_task_upsert_and_get_roundtrip(db_pool: DatabasePool) -> None:
+    repo = PgTaskRepository(db_pool)
+    task = _task("t-1")
+    with bind_context(_ctx()):
+        await repo.upsert(task)
+        fetched = await repo.get("tenant-A", "t-1")
+    assert fetched == task
+
+
+async def test_task_get_returns_none_for_other_tenant_isolation(
+    db_pool: DatabasePool,
+) -> None:
+    repo = PgTaskRepository(db_pool)
+    with bind_context(_ctx("tenant-A")):
+        await repo.upsert(_task("t-1"))
+    with bind_context(_ctx("tenant-B")):
+        assert await repo.get("tenant-B", "t-1") is None
+
+
+async def test_task_repo_rejects_cross_tenant_write(db_pool: DatabasePool) -> None:
+    repo = PgTaskRepository(db_pool)
+    with bind_context(_ctx("tenant-A")), pytest.raises(TenantIsolationError):
+        await repo.upsert(_task("t-1", tenant_id="tenant-B"))
+
+
+async def test_task_list_by_state_filters_by_tenant(db_pool: DatabasePool) -> None:
+    repo = PgTaskRepository(db_pool)
+    with bind_context(_ctx("tenant-A")):
+        await repo.upsert(_task("t-A1"))
+        await repo.upsert(_task("t-A2"))
+    with bind_context(_ctx("tenant-B")):
+        await repo.upsert(_task("t-B1", tenant_id="tenant-B"))
+    with bind_context(_ctx("tenant-A")):
+        rows = await repo.list_by_state("tenant-A", TaskState.PENDING)
+    assert {t.task_id for t in rows} == {"t-A1", "t-A2"}
+
+
+async def test_session_upsert_and_touch(db_pool: DatabasePool) -> None:
+    repo = PgSessionRepository(db_pool)
+    now = datetime(2026, 5, 14, tzinfo=UTC)
+    session = Session(
+        session_id="s-1",
+        tenant_id="tenant-A",
+        principal_id="user-1",
+        created_at=now,
+        last_active_at=now,
+    )
+    later = datetime(2026, 5, 14, 1, tzinfo=UTC)
+    with bind_context(_ctx()):
+        await repo.upsert(session)
+        await repo.touch("tenant-A", "s-1", later)
+        fetched = await repo.get("tenant-A", "s-1")
+    assert fetched is not None
+    assert fetched.last_active_at == later
+
+
+async def test_outbox_enqueue_claim_and_dispatch(db_pool: DatabasePool) -> None:
+    repo = PgOutboxRepository(db_pool)
+    now = datetime(2026, 5, 14, tzinfo=UTC)
+    event = OutboxEvent(
+        event_id="e-1",
+        tenant_id="tenant-A",
+        trace_id="trace-1",
+        aggregate_type="task",
+        aggregate_id="t-1",
+        topic="task.events",
+        payload={"k": "v"},
+        idempotency_key="idem-e-1",
+        created_at=now,
+    )
+    with bind_context(_ctx()):
+        await repo.enqueue(event)
+    claimed = await repo.claim_pending(batch_size=10, now=now)
+    assert [e.event_id for e in claimed] == ["e-1"]
+    await repo.mark_dispatched("e-1", dispatched_at=now)
+    fetched = await repo.get("e-1")
+    assert fetched is not None
+    assert fetched.status is OutboxStatus.DISPATCHED
+
+
+async def test_audit_append_and_list_recent(db_pool: DatabasePool) -> None:
+    repo = PgAuditRepository(db_pool)
+    now = datetime(2026, 5, 14, tzinfo=UTC)
+    event = AuditEvent(
+        event_id="a-1",
+        tenant_id="tenant-A",
+        principal_id="user-1",
+        trace_id="trace-1",
+        action="task.submitted",
+        payload={"task_id": "t-1"},
+        occurred_at=now,
+    )
+    with bind_context(_ctx()):
+        await repo.append(event)
+        rows = await repo.list_recent("tenant-A")
+    assert rows == [event]
+
+
+async def test_checkpoint_append_and_latest(db_pool: DatabasePool) -> None:
+    repo = PgCheckpointRepository(db_pool)
+    now = datetime(2026, 5, 14, tzinfo=UTC)
+    for seq in (0, 1, 2):
+        cp = TaskCheckpoint(
+            checkpoint_id=f"cp-{seq}",
+            task_id="t-1",
+            tenant_id="tenant-A",
+            trace_id="trace-1",
+            node_name="planner",
+            sequence=seq,
+            state_snapshot={"step": seq},
+            created_at=now,
+        )
+        with bind_context(_ctx()):
+            await repo.append(cp)
+    with bind_context(_ctx()):
+        latest = await repo.latest("tenant-A", "t-1")
+    assert latest is not None
+    assert latest.sequence == 2
