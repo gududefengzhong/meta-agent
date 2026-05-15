@@ -14,9 +14,12 @@ from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.domain.checkpoint import TaskCheckpoint
 from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import Task, TaskState
+from meta_agent.core.orchestration.result import TaskResult
 from meta_agent.core.ports.repository import (
+    TERMINAL_TASK_STATES,
     AuditRepository,
     CheckpointRepository,
+    IllegalTaskTransitionError,
     SessionRepository,
     TaskRepository,
 )
@@ -26,6 +29,7 @@ from meta_agent.infra.queue.redis_consumer import DeliveredMessage
 class FakeTaskRepo(TaskRepository):
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], Task] = {}
+        self.results: dict[tuple[str, str], TaskResult] = {}
 
     async def upsert(self, task: Task) -> None:
         self.rows[(task.tenant_id, task.task_id)] = task
@@ -50,6 +54,34 @@ class FakeTaskRepo(TaskRepository):
             return
         existing = self.rows[key]
         self.rows[key] = existing.model_copy(update={"state": new_state, "updated_at": updated_at})
+
+    async def complete(
+        self,
+        tenant_id: str,
+        task_id: str,
+        *,
+        result: TaskResult,
+        terminal_state: TaskState,
+        updated_at: datetime,
+    ) -> None:
+        if terminal_state not in TERMINAL_TASK_STATES:
+            raise IllegalTaskTransitionError(
+                f"complete() requires a terminal state, got {terminal_state.value!r}"
+            )
+        key = (tenant_id, task_id)
+        existing = self.rows.get(key)
+        if existing is None or existing.state in TERMINAL_TASK_STATES:
+            raise IllegalTaskTransitionError(
+                f"task {task_id!r} cannot transition to {terminal_state.value!r}: "
+                "row missing or already in a terminal state"
+            )
+        self.rows[key] = existing.model_copy(
+            update={"state": terminal_state, "updated_at": updated_at}
+        )
+        self.results[key] = result
+
+    async def get_result(self, tenant_id: str, task_id: str) -> TaskResult | None:
+        return self.results.get((tenant_id, task_id))
 
 
 class FakeCheckpointRepo(CheckpointRepository):

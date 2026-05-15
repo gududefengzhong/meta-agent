@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from collections.abc import Callable
@@ -14,10 +15,18 @@ from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.domain.checkpoint import TaskCheckpoint
 from meta_agent.core.domain.task import Task, TaskState
 from meta_agent.core.orchestration import Graph, GraphRegistry, TaskRunState
+from meta_agent.core.orchestration.result import (
+    TaskError,
+    TaskErrorCode,
+    TaskResult,
+    TaskResultStatus,
+)
 from meta_agent.core.ports.message import MessageEnvelope
 from meta_agent.core.ports.repository import (
+    TERMINAL_TASK_STATES,
     AuditRepository,
     CheckpointRepository,
+    IllegalTaskTransitionError,
     TaskRepository,
 )
 from meta_agent.infra.queue.redis_consumer import DeliveredMessage
@@ -134,23 +143,93 @@ class WorkerLoop:
             await self._audit(ctx, "worker.task_missing", payload={"task_id": envelope.task_id})
             await self._stream.ack(msg.entry_id)
             return
+        # Redelivery after a finalised run (ack lost between
+        # ``complete()`` and ``ack``): drain the message and audit,
+        # never revive the row or run the graph again.
+        if task.state in TERMINAL_TASK_STATES:
+            await self._audit(
+                ctx,
+                "worker.task_already_terminal",
+                payload={"task_id": task.task_id, "state": task.state.value},
+            )
+            await self._stream.ack(msg.entry_id)
+            return
         graph = self._registry.resolve(task.task_type, task.graph_id)
         state = await self._load_state(task, graph)
+        # ``started_at`` for the result anchors on the first time this
+        # task entered ``RUNNING``. For a redelivered message we trust
+        # the task row's existing ``updated_at``; for the first run we
+        # capture the clock right at the transition.
+        started_at = task.updated_at
         if task.state != TaskState.RUNNING:
+            started_at = self._clock()
             await self._tasks.update_state(
-                task.tenant_id, task.task_id, TaskState.RUNNING, self._clock()
+                task.tenant_id, task.task_id, TaskState.RUNNING, started_at
             )
         while not state.finished:
             state = await graph.step(state)
             await self._persist_step(task, state)
-        final = TaskState.FAILED if state.error else TaskState.SUCCEEDED
-        await self._tasks.update_state(task.tenant_id, task.task_id, final, self._clock())
+        finished_at = self._clock()
+        result, terminal_state = self._build_result(task, graph, state, started_at, finished_at)
+        try:
+            await self._tasks.complete(
+                task.tenant_id,
+                task.task_id,
+                result=result,
+                terminal_state=terminal_state,
+                updated_at=finished_at,
+            )
+        except IllegalTaskTransitionError:
+            await self._audit(
+                ctx,
+                "worker.task_already_terminal",
+                payload={"task_id": task.task_id, "attempted": terminal_state.value},
+            )
+            await self._stream.ack(msg.entry_id)
+            return
         await self._audit(
             ctx,
-            f"task.{final.value}",
-            payload={"sequence": state.sequence, "output": state.data.get("output")},
+            f"task.{terminal_state.value}",
+            payload={"sequence": state.sequence, "output": result.output},
         )
         await self._stream.ack(msg.entry_id)
+
+    @staticmethod
+    def _build_result(
+        task: Task,
+        graph: Graph,
+        state: TaskRunState,
+        started_at: datetime,
+        finished_at: datetime,
+    ) -> tuple[TaskResult, TaskState]:
+        raw_output = state.data.get("output")
+        output = raw_output if isinstance(raw_output, dict) else None
+        status: TaskResultStatus
+        err: TaskError | None
+        terminal: TaskState
+        if state.error is not None:
+            terminal = TaskState.FAILED
+            err = TaskError(code=TaskErrorCode.GRAPH_ERROR, message=state.error)
+            status = "failed"
+        else:
+            terminal = TaskState.SUCCEEDED
+            err = None
+            status = "succeeded"
+        return (
+            TaskResult(
+                task_id=task.task_id,
+                tenant_id=task.tenant_id,
+                trace_id=task.trace_id,
+                graph_id=graph.graph_id,
+                status=status,
+                output=output,
+                error=err,
+                node_sequence=state.sequence,
+                started_at=started_at,
+                finished_at=finished_at,
+            ),
+            terminal,
+        )
 
     async def _load_state(self, task: Task, graph: Graph) -> TaskRunState:
         latest = await self._checkpoints.latest(task.tenant_id, task.task_id)
@@ -189,9 +268,47 @@ class WorkerLoop:
             "task.abandoned",
             payload={"delivery_count": msg.delivery_count, "reason": reason},
         )
-        if envelope.task_id is not None:
-            await self._tasks.update_state(
-                envelope.tenant_id, envelope.task_id, TaskState.FAILED, self._clock()
+        if envelope.task_id is None:
+            await self._stream.ack(msg.entry_id)
+            return
+        task = await self._tasks.get(envelope.tenant_id, envelope.task_id)
+        if task is None:
+            await self._stream.ack(msg.entry_id)
+            return
+        # If the task already reached a terminal state (e.g. a parallel
+        # worker finalised it before this redelivery), don't disturb
+        # the result row.
+        if task.state in {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED}:
+            await self._stream.ack(msg.entry_id)
+            return
+        graph = self._registry.resolve(task.task_type, task.graph_id)
+        latest = await self._checkpoints.latest(task.tenant_id, task.task_id)
+        finished_at = self._clock()
+        result = TaskResult(
+            task_id=task.task_id,
+            tenant_id=task.tenant_id,
+            trace_id=task.trace_id,
+            graph_id=graph.graph_id,
+            status="failed",
+            output=None,
+            error=TaskError(
+                code=TaskErrorCode.ABANDONED,
+                message=f"delivery_count exceeded: {reason}",
+                details={"delivery_count": msg.delivery_count},
+            ),
+            node_sequence=latest.sequence if latest is not None else 0,
+            started_at=task.updated_at,
+            finished_at=finished_at,
+        )
+        # Lost the race to another finaliser? The existing result is
+        # authoritative — nothing more to do here.
+        with contextlib.suppress(IllegalTaskTransitionError):
+            await self._tasks.complete(
+                task.tenant_id,
+                task.task_id,
+                result=result,
+                terminal_state=TaskState.FAILED,
+                updated_at=finished_at,
             )
         await self._stream.ack(msg.entry_id)
 

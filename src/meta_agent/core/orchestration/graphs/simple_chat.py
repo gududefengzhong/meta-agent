@@ -80,6 +80,13 @@ def _build_request(state: TaskRunState) -> LLMRequest:
 
 
 def _response_summary(response: LLMResponse) -> dict[str, object]:
+    """Build the public dict written under ``state.data["output"]``.
+
+    This is the only projection that ends up in :class:`TaskResult`;
+    internal scratch keys (``_llm_request`` / ``_llm_response``) stay
+    in ``state.data`` for checkpoint resume but never leak outward.
+    """
+
     return {
         "assistant_message": response.content,
         "model_used": response.model,
@@ -111,7 +118,7 @@ def build_simple_chat_graph(deps: GraphDeps) -> Graph:
         if not isinstance(raw, dict):
             raise GraphError("simple_chat: call_llm node did not persist _llm_response")
         response = LLMResponse.model_validate(raw)
-        return NodeResult(data_update=_response_summary(response))
+        return NodeResult(data_update={"output": _response_summary(response)})
 
     g = Graph(SIMPLE_CHAT_GRAPH_ID)
     g.add_node("prepare", prepare)

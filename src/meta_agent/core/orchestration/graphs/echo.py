@@ -37,7 +37,7 @@ async def _execute(state: TaskRunState) -> NodeResult:
     return NodeResult(
         data_update={
             "transcript": [*_transcript(state), line],
-            "output": _message(state),
+            "output": {"echo": _message(state)},
         }
     )
 

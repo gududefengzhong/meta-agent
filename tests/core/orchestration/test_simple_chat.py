@@ -38,9 +38,11 @@ async def test_happy_path_sends_user_prompt_and_records_response() -> None:
     final = await graph.run(_state(user_prompt="hello"))
 
     assert final.finished is True
-    assert final.data["assistant_message"] == "hello back"
-    assert final.data["model_used"] == "fake/m1"
-    assert final.data["finish_reason"] == "stop"
+    output = final.data["output"]
+    assert isinstance(output, dict)
+    assert output["assistant_message"] == "hello back"
+    assert output["model_used"] == "fake/m1"
+    assert output["finish_reason"] == "stop"
     assert len(client.calls) == 1
     req = client.calls[0]
     assert [m.role for m in req.messages] == [MessageRole.USER]
@@ -134,7 +136,9 @@ async def test_response_summary_includes_usage_dict() -> None:
     graph = build_simple_chat_graph(fake_deps(client))
     final = await graph.run(_state(user_prompt="hi"))
 
-    usage = final.data["usage"]
+    output = final.data["output"]
+    assert isinstance(output, dict)
+    usage = output["usage"]
     assert isinstance(usage, dict)
     assert usage["total_tokens"] == 2
 

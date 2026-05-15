@@ -59,8 +59,10 @@ async def test_bootstrap_registers_materializes_and_runs_simple_chat() -> None:
     )
 
     assert final.finished is True
-    assert final.data["assistant_message"] == "hi from llm"
-    assert final.data["model_used"] == "fake/m1"
+    output = final.data["output"]
+    assert isinstance(output, dict)
+    assert output["assistant_message"] == "hi from llm"
+    assert output["model_used"] == "fake/m1"
     assert len(client.calls) == 1
 
 

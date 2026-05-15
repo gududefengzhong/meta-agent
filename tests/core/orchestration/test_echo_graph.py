@@ -29,7 +29,7 @@ async def test_echo_graph_produces_three_step_transcript() -> None:
         "execute: echo 'hi'",
         "review: ok",
     ]
-    assert final.data["output"] == "hi"
+    assert final.data["output"] == {"echo": "hi"}
 
 
 async def test_echo_graph_id_is_stable() -> None:

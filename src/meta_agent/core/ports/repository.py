@@ -18,6 +18,7 @@ from meta_agent.core.domain.errors import AgentError, ErrorCategory
 from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
 from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import Task, TaskState
+from meta_agent.core.orchestration.result import TaskResult
 
 
 class RepositoryError(AgentError):
@@ -39,6 +40,28 @@ class TenantIsolationError(RepositoryError):
     """
 
     category = ErrorCategory.PERMISSION
+
+
+class IllegalTaskTransitionError(RepositoryError):
+    """Raised when :meth:`TaskRepository.complete` is called on a task
+    that has already reached a terminal state, or that does not exist.
+
+    Categorised as :class:`ErrorCategory.LOGIC` because the caller has
+    a stale view of the lifecycle; retrying the same write blindly is
+    never the right answer.
+    """
+
+    category = ErrorCategory.LOGIC
+
+
+# Lifecycle states from which :meth:`TaskRepository.complete` will
+# refuse to transition. Kept here (rather than on :class:`TaskState`)
+# because the rule lives at the persistence boundary: it is what makes
+# "state + result_json" atomic write idempotent under concurrent
+# redelivery.
+TERMINAL_TASK_STATES: frozenset[TaskState] = frozenset(
+    {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED}
+)
 
 
 class TaskRepository(ABC):
@@ -66,6 +89,29 @@ class TaskRepository(ABC):
         new_state: TaskState,
         updated_at: datetime,
     ) -> None: ...
+
+    @abstractmethod
+    async def complete(
+        self,
+        tenant_id: str,
+        task_id: str,
+        *,
+        result: TaskResult,
+        terminal_state: TaskState,
+        updated_at: datetime,
+    ) -> None:
+        """Atomically write ``state``, ``result_json`` and ``updated_at``.
+
+        ``terminal_state`` must be one of :data:`TERMINAL_TASK_STATES`.
+        The write is guarded by ``WHERE state NOT IN terminal_states``
+        so a concurrent writer (e.g. redelivered message after a crash
+        between graph-finish and ack) cannot overwrite a finished
+        result. A guard miss raises :class:`IllegalTaskTransitionError`.
+        """
+
+    @abstractmethod
+    async def get_result(self, tenant_id: str, task_id: str) -> TaskResult | None:
+        """Return the persisted :class:`TaskResult`, or ``None`` if absent."""
 
 
 class SessionRepository(ABC):

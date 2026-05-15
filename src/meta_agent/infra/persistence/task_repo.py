@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 
 from meta_agent.core.domain.task import Task, TaskState, TaskType
-from meta_agent.core.ports.repository import TaskRepository
+from meta_agent.core.orchestration.result import TaskResult
+from meta_agent.core.ports.repository import (
+    TERMINAL_TASK_STATES,
+    IllegalTaskTransitionError,
+    TaskRepository,
+)
 from meta_agent.infra.persistence._guard import check_tenant
 from meta_agent.infra.persistence.pool import DatabasePool
 
@@ -55,6 +61,19 @@ class PgTaskRepository(TaskRepository):
     _UPDATE_STATE = (
         "UPDATE tasks SET state = $3, updated_at = $4 WHERE tenant_id = $1 AND task_id = $2"
     )
+
+    # Atomic terminal write. The guard ``state NOT IN ('succeeded',
+    # 'failed', 'cancelled')`` prevents a redelivered worker from
+    # overwriting a result, and lets us treat ``complete()`` as a true
+    # state-machine transition rather than a blind upsert.
+    _COMPLETE = (
+        "UPDATE tasks "
+        "SET state = $3, result_json = $4::jsonb, updated_at = $5 "
+        "WHERE tenant_id = $1 AND task_id = $2 "
+        "AND state NOT IN ('succeeded', 'failed', 'cancelled')"
+    )
+
+    _GET_RESULT = "SELECT result_json FROM tasks WHERE tenant_id = $1 AND task_id = $2"
 
     def __init__(self, pool: DatabasePool) -> None:
         self._pool = pool
@@ -105,3 +124,47 @@ class PgTaskRepository(TaskRepository):
         check_tenant(tenant_id)
         async with self._pool.acquire() as conn:
             await conn.execute(self._UPDATE_STATE, tenant_id, task_id, new_state.value, updated_at)
+
+    async def complete(
+        self,
+        tenant_id: str,
+        task_id: str,
+        *,
+        result: TaskResult,
+        terminal_state: TaskState,
+        updated_at: datetime,
+    ) -> None:
+        check_tenant(tenant_id)
+        if terminal_state not in TERMINAL_TASK_STATES:
+            raise IllegalTaskTransitionError(
+                f"complete() requires a terminal state, got {terminal_state.value!r}"
+            )
+        payload = json.dumps(result.model_dump(mode="json"))
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                self._COMPLETE,
+                tenant_id,
+                task_id,
+                terminal_state.value,
+                payload,
+                updated_at,
+            )
+        # asyncpg returns "UPDATE <n>"; 0 means the WHERE-guard rejected
+        # the write (already terminal, or row missing for this tenant).
+        if status.endswith(" 0"):
+            raise IllegalTaskTransitionError(
+                f"task {task_id!r} cannot transition to {terminal_state.value!r}: "
+                "row missing or already in a terminal state"
+            )
+
+    async def get_result(self, tenant_id: str, task_id: str) -> TaskResult | None:
+        check_tenant(tenant_id)
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(self._GET_RESULT, tenant_id, task_id)
+        if row is None or row["result_json"] is None:
+            return None
+        raw = row["result_json"]
+        # asyncpg may surface JSONB as ``str`` depending on codecs.
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        return TaskResult.model_validate(raw)

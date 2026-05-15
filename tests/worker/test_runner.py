@@ -24,8 +24,10 @@ from meta_agent.core.orchestration import (
     TaskRunState,
 )
 from meta_agent.core.orchestration.graphs.echo import ECHO_GRAPH_ID, build_echo_graph
+from meta_agent.core.orchestration.result import TaskErrorCode
 from meta_agent.core.orchestration.state import END
 from meta_agent.core.ports.message import MessageEnvelope
+from meta_agent.core.ports.repository import IllegalTaskTransitionError
 from meta_agent.infra.queue.redis_consumer import DeliveredMessage
 from meta_agent.worker.runner import WorkerConfig, WorkerLoop
 from tests.core.orchestration._fakes import fake_deps
@@ -159,6 +161,15 @@ async def test_run_once_executes_echo_graph_end_to_end() -> None:
     assert "task.succeeded" in audits.actions()
     assert audits.actions().count("task.node_completed") == 3
 
+    result = await tasks.get_result(TENANT, "task-1")
+    assert result is not None
+    assert result.status == "succeeded"
+    assert result.error is None
+    assert result.output == {"echo": "hello"}
+    assert result.graph_id == ECHO_GRAPH_ID
+    assert result.node_sequence == 3
+    assert result.finished_at >= result.started_at
+
 
 async def test_run_once_resumes_from_checkpoint() -> None:
     loop, tasks, checkpoints, _audits, stream = _build_loop()
@@ -213,6 +224,15 @@ async def test_run_once_abandons_after_max_attempts_exceeded() -> None:
     assert task is not None and task.state == TaskState.FAILED
     assert "task.abandoned" in audits.actions()
     assert stream.acked == ["1-0"]
+
+    result = await tasks.get_result(TENANT, "task-1")
+    assert result is not None
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.code == TaskErrorCode.ABANDONED
+    assert result.error.details == {"delivery_count": 4}
+    assert result.output is None
+    assert result.node_sequence == 0
 
 
 async def test_run_once_leaves_message_in_pel_on_node_failure() -> None:
@@ -288,3 +308,106 @@ async def test_run_once_uses_explicit_graph_id_override() -> None:
 async def test_run_once_returns_zero_on_empty_batch() -> None:
     loop, *_ = _build_loop()
     assert await loop.run_once() == 0
+
+
+async def test_build_result_projects_graph_error_to_failed_status() -> None:
+    """Static projection: ``state.error`` -> ``failed`` ``TaskResult``.
+
+    The current graph runtime doesn't expose a typed error channel
+    through :class:`NodeResult`, so end-to-end failure is exercised via
+    the abandon path. This test pins the projection contract so a later
+    typed-error signal lands as ``code=graph_error`` automatically.
+    """
+
+    task = _make_task()
+    graph = build_echo_graph()
+    state = TaskRunState(
+        task_id=task.task_id,
+        tenant_id=task.tenant_id,
+        trace_id=task.trace_id,
+        graph_id=graph.graph_id,
+        sequence=2,
+        data={"transcript": ["x"]},
+        finished=True,
+        error="boom",
+    )
+    started = datetime(2026, 5, 15, 12, 0, 0, tzinfo=UTC)
+    finished = datetime(2026, 5, 15, 12, 0, 1, tzinfo=UTC)
+
+    result, terminal = WorkerLoop._build_result(task, graph, state, started, finished)
+
+    assert terminal == TaskState.FAILED
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.code == TaskErrorCode.GRAPH_ERROR
+    assert result.error.message == "boom"
+    assert result.output is None
+    assert result.node_sequence == 2
+
+
+async def test_redelivered_message_after_terminal_state_skips_complete() -> None:
+    """A redelivered message for an already-terminal task must drain
+    without re-running the graph or touching the result row."""
+
+    loop, tasks, checkpoints, audits, stream = _build_loop()
+    await tasks.upsert(_make_task(state=TaskState.SUCCEEDED))
+    stream.push([_delivered()])
+
+    await loop.run_once()
+
+    assert stream.acked == ["1-0"]
+    task = await tasks.get(TENANT, "task-1")
+    assert task is not None and task.state == TaskState.SUCCEEDED
+    assert await tasks.get_result(TENANT, "task-1") is None
+    assert "worker.task_already_terminal" in audits.actions()
+    # Graph never executed: no checkpoints and no terminal audit.
+    assert checkpoints.rows == []
+    assert "task.succeeded" not in audits.actions()
+    assert "task.node_completed" not in audits.actions()
+
+
+async def test_abandon_is_noop_when_task_already_terminal() -> None:
+    """Redelivery of an already-terminal task on the abandon path must
+    leave the existing result untouched."""
+
+    config = WorkerConfig(max_attempts=3)
+    loop, tasks, _checkpoints, _audits, stream = _build_loop(config=config)
+    await tasks.upsert(_make_task(state=TaskState.SUCCEEDED))
+    stream.push([_delivered(count=4)])
+
+    await loop.run_once()
+
+    task = await tasks.get(TENANT, "task-1")
+    assert task is not None and task.state == TaskState.SUCCEEDED
+    assert await tasks.get_result(TENANT, "task-1") is None
+    assert stream.acked == ["1-0"]
+
+
+async def test_fake_repo_complete_rejects_non_terminal_state() -> None:
+    """Defensive: the fake mirrors the PG guard against non-terminal
+    ``terminal_state`` values so worker bugs surface in unit tests."""
+
+    from meta_agent.core.orchestration.result import TaskResult
+
+    repo = FakeTaskRepo()
+    await repo.upsert(_make_task())
+    bogus = TaskResult(
+        task_id="task-1",
+        tenant_id=TENANT,
+        trace_id=TRACE,
+        graph_id=ECHO_GRAPH_ID,
+        status="succeeded",
+        output={"echo": "hi"},
+        error=None,
+        node_sequence=3,
+        started_at=datetime(2026, 5, 15, tzinfo=UTC),
+        finished_at=datetime(2026, 5, 15, tzinfo=UTC),
+    )
+    with pytest.raises(IllegalTaskTransitionError):
+        await repo.complete(
+            TENANT,
+            "task-1",
+            result=bogus,
+            terminal_state=TaskState.RUNNING,
+            updated_at=datetime(2026, 5, 15, tzinfo=UTC),
+        )
