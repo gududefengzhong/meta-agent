@@ -33,6 +33,7 @@ def test_task_defaults_to_pending() -> None:
     assert task.state is TaskState.PENDING
     assert task.session_id is None
     assert task.idempotency_key is None
+    assert task.graph_id is None
     assert task.input_payload == {}
 
 
@@ -42,8 +43,22 @@ def test_task_requires_trace_id() -> None:
 
 
 def test_task_accepts_known_task_types() -> None:
-    for task_type in (TaskType.BUG_FIX, TaskType.CODE_REVIEW, TaskType.AUTO_PR):
+    for task_type in (
+        TaskType.BUG_FIX,
+        TaskType.CODE_REVIEW,
+        TaskType.AUTO_PR,
+        TaskType.SYSTEM_ECHO,
+    ):
         assert _task(task_type=task_type).task_type is task_type
+
+
+def test_task_rejects_empty_graph_id() -> None:
+    with pytest.raises(ValidationError):
+        _task(graph_id="")
+
+
+def test_task_accepts_explicit_graph_id() -> None:
+    assert _task(graph_id="builtin.echo").graph_id == "builtin.echo"
 
 
 def test_task_state_set_contains_expected_members() -> None:
@@ -56,3 +71,12 @@ def test_task_state_set_contains_expected_members() -> None:
         "cancelled",
     }
     assert {s.value for s in TaskState} == expected
+
+
+def test_task_type_set_contains_expected_members() -> None:
+    assert {t.value for t in TaskType} == {
+        "bug_fix",
+        "code_review",
+        "auto_pr",
+        "system_echo",
+    }

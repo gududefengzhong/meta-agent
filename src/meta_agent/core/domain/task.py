@@ -14,15 +14,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class TaskType(StrEnum):
-    """First-class task families.
+    """Task families.
 
-    Additional task families (e.g. benchmark) join later phases. The
-    enum is open for extension but closed for renaming.
+    First-class business families (``BUG_FIX`` / ``CODE_REVIEW`` /
+    ``AUTO_PR``) are defined in ``docs/specs/AGENT_SPEC.md`` §L1.
+    System families (prefixed ``system_``) are reserved for built-in
+    self-tests / smoke flows and never carry customer-facing semantics.
+    The enum is open for extension but closed for renaming.
     """
 
     BUG_FIX = "bug_fix"
     CODE_REVIEW = "code_review"
     AUTO_PR = "auto_pr"
+    SYSTEM_ECHO = "system_echo"
 
 
 class TaskState(StrEnum):
@@ -57,6 +61,10 @@ class Task(BaseModel):
     trace_id: str = Field(..., min_length=1)
     idempotency_key: str | None = None
     task_type: TaskType
+    # Explicit graph override. ``None`` lets the worker resolve the
+    # default graph for ``task_type`` via the orchestration registry;
+    # a non-empty string pins this run to a specific graph_id.
+    graph_id: str | None = Field(default=None, min_length=1)
     state: TaskState = TaskState.PENDING
     input_payload: dict[str, object] = Field(default_factory=dict)
     created_at: datetime

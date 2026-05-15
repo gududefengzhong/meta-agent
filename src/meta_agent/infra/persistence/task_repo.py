@@ -20,6 +20,7 @@ def _row_to_task(row: dict[str, Any]) -> Task:
         trace_id=row["trace_id"],
         idempotency_key=row["idempotency_key"],
         task_type=TaskType(row["task_type"]),
+        graph_id=row["graph_id"],
         state=TaskState(row["state"]),
         input_payload=row["input_payload"],
         created_at=row["created_at"],
@@ -33,12 +34,13 @@ class PgTaskRepository(TaskRepository):
     _UPSERT = """
         INSERT INTO tasks (
             task_id, tenant_id, session_id, principal_id, trace_id,
-            idempotency_key, task_type, state, input_payload,
+            idempotency_key, task_type, graph_id, state, input_payload,
             created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
         ON CONFLICT (task_id) DO UPDATE SET
             session_id = EXCLUDED.session_id,
+            graph_id = EXCLUDED.graph_id,
             state = EXCLUDED.state,
             input_payload = EXCLUDED.input_payload,
             updated_at = EXCLUDED.updated_at
@@ -69,6 +71,7 @@ class PgTaskRepository(TaskRepository):
                 task.trace_id,
                 task.idempotency_key,
                 task.task_type.value,
+                task.graph_id,
                 task.state.value,
                 task.input_payload,
                 task.created_at,

@@ -12,6 +12,7 @@ from meta_agent.core.orchestration.graph import (
     NodeResult,
     RouterFn,
 )
+from meta_agent.core.orchestration.registry import GraphRegistry
 from meta_agent.core.orchestration.state import END, START, TaskRunState
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "START",
     "Graph",
     "GraphError",
+    "GraphRegistry",
     "NodeFn",
     "NodeResult",
     "RouterFn",

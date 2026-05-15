@@ -66,6 +66,17 @@ async def test_task_upsert_and_get_roundtrip(db_pool: DatabasePool) -> None:
     assert fetched == task
 
 
+async def test_task_graph_id_round_trips(db_pool: DatabasePool) -> None:
+    repo = PgTaskRepository(db_pool)
+    base = _task("t-graph")
+    pinned = base.model_copy(update={"graph_id": "builtin.echo"})
+    with bind_context(_ctx()):
+        await repo.upsert(pinned)
+        fetched = await repo.get("tenant-A", "t-graph")
+    assert fetched is not None
+    assert fetched.graph_id == "builtin.echo"
+
+
 async def test_task_get_returns_none_for_other_tenant_isolation(
     db_pool: DatabasePool,
 ) -> None:
