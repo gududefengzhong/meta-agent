@@ -141,6 +141,11 @@ class OutboxDispatcher:
 
 
 def _event_to_envelope(event: OutboxEvent, *, enqueued_at: datetime) -> MessageEnvelope:
+    # When the row carries a task aggregate, surface ``aggregate_id``
+    # as ``task_id`` too so worker dispatch (which keys off
+    # ``envelope.task_id``) sees the same shape it gets from any
+    # producer that publishes envelopes directly.
+    task_id = event.aggregate_id if event.aggregate_type == "task" else None
     return MessageEnvelope(
         message_id=event.event_id,
         topic=event.topic,
@@ -149,6 +154,7 @@ def _event_to_envelope(event: OutboxEvent, *, enqueued_at: datetime) -> MessageE
         idempotency_key=event.idempotency_key,
         aggregate_type=event.aggregate_type,
         aggregate_id=event.aggregate_id,
+        task_id=task_id,
         event_type=event.aggregate_type,
         payload=event.payload,
         attempts=event.attempts,

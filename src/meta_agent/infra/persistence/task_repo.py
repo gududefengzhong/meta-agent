@@ -6,6 +6,8 @@ import json
 from datetime import datetime
 from typing import Any
 
+import asyncpg
+
 from meta_agent.core.domain.task import Task, TaskState, TaskType
 from meta_agent.core.orchestration.result import TaskResult
 from meta_agent.core.ports.repository import (
@@ -81,21 +83,35 @@ class PgTaskRepository(TaskRepository):
     async def upsert(self, task: Task) -> None:
         check_tenant(task.tenant_id)
         async with self._pool.acquire() as conn:
-            await conn.execute(
-                self._UPSERT,
-                task.task_id,
-                task.tenant_id,
-                task.session_id,
-                task.principal_id,
-                task.trace_id,
-                task.idempotency_key,
-                task.task_type.value,
-                task.graph_id,
-                task.state.value,
-                task.input_payload,
-                task.created_at,
-                task.updated_at,
-            )
+            await self.upsert_in_conn(task, conn)
+
+    async def upsert_in_conn(
+        self,
+        task: Task,
+        conn: asyncpg.Connection[Any],
+    ) -> None:
+        """Run :sql:`UPSERT` on an externally-supplied connection.
+
+        Lets callers compose the task write with another statement inside
+        a single PG transaction (e.g. the outbox row that makes submit
+        atomic). The tenant guard still applies.
+        """
+        check_tenant(task.tenant_id)
+        await conn.execute(
+            self._UPSERT,
+            task.task_id,
+            task.tenant_id,
+            task.session_id,
+            task.principal_id,
+            task.trace_id,
+            task.idempotency_key,
+            task.task_type.value,
+            task.graph_id,
+            task.state.value,
+            task.input_payload,
+            task.created_at,
+            task.updated_at,
+        )
 
     async def get(self, tenant_id: str, task_id: str) -> Task | None:
         check_tenant(tenant_id)

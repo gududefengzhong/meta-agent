@@ -16,12 +16,17 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from meta_agent.api.deps import get_publisher, get_request_ctx, get_task_repo, get_task_topic
+from meta_agent.api.deps import (
+    get_db_pool,
+    get_outbox_repo,
+    get_request_ctx,
+    get_task_repo,
+    get_task_topic,
+)
 from meta_agent.api.schemas import SubmitTaskRequest, TaskResponse, TaskResultResponse
+from meta_agent.core.domain.outbox import OutboxEvent
 from meta_agent.core.domain.task import Task, TaskState
-from meta_agent.core.ports.message import MessageEnvelope
-from meta_agent.infra.persistence import PgTaskRepository
-from meta_agent.infra.queue import RedisStreamPublisher
+from meta_agent.infra.persistence import DatabasePool, PgOutboxRepository, PgTaskRepository
 from meta_agent.infra.security.context import RequestContext, bind_context
 
 router = APIRouter(tags=["tasks"])
@@ -36,8 +41,9 @@ router = APIRouter(tags=["tasks"])
 async def submit_task(
     body: SubmitTaskRequest,
     ctx: RequestContext = Depends(get_request_ctx),
+    pool: DatabasePool = Depends(get_db_pool),
     task_repo: PgTaskRepository = Depends(get_task_repo),
-    publisher: RedisStreamPublisher = Depends(get_publisher),
+    outbox_repo: PgOutboxRepository = Depends(get_outbox_repo),
     topic: str = Depends(get_task_topic),
 ) -> TaskResponse:
     task_id = str(uuid.uuid4())
@@ -57,22 +63,24 @@ async def submit_task(
         created_at=now,
         updated_at=now,
     )
-    envelope = MessageEnvelope(
-        message_id=task_id,
-        topic=topic,
+    # The outbox row carries the command that the dispatcher will relay
+    # to the queue. Writing it in the same PG transaction as the task
+    # row is what makes submit atomic and closes the dual-write gap.
+    event = OutboxEvent(
+        event_id=str(uuid.uuid4()),
         tenant_id=ctx.tenant_id,
         trace_id=ctx.trace_id,
-        idempotency_key=body.idempotency_key or task_id,
-        principal_id=ctx.principal_id,
-        task_id=task_id,
-        event_type="task.submitted",
+        aggregate_type="task",
+        aggregate_id=task_id,
+        topic=topic,
         payload=dict(body.input_payload),
-        occurred_at=now,
-        enqueued_at=now,
+        idempotency_key=body.idempotency_key or task_id,
+        created_at=now,
     )
     with bind_context(ctx):
-        await task_repo.upsert(task)
-        await publisher.publish(envelope)
+        async with pool.transaction() as conn:
+            await task_repo.upsert_in_conn(task, conn)
+            await outbox_repo.enqueue_in_conn(event, conn)
 
     return TaskResponse(
         task_id=task.task_id,

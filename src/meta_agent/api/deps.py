@@ -12,7 +12,7 @@ import uuid
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
-from meta_agent.infra.persistence import DatabasePool, PgTaskRepository
+from meta_agent.infra.persistence import DatabasePool, PgOutboxRepository, PgTaskRepository
 from meta_agent.infra.queue import RedisStreamPublisher
 from meta_agent.infra.security.context import RequestContext
 
@@ -40,6 +40,11 @@ def get_task_topic(request: Request) -> str:
 def get_task_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgTaskRepository:
     """Construct a :class:`PgTaskRepository` from the shared pool."""
     return PgTaskRepository(pool)
+
+
+def get_outbox_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgOutboxRepository:
+    """Construct a :class:`PgOutboxRepository` from the shared pool."""
+    return PgOutboxRepository(pool)
 
 
 # ── Request context ───────────────────────────────────────────────────────────

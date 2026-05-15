@@ -7,6 +7,8 @@ an in-memory fake so the tests are fast and fully offline.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -14,12 +16,18 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from meta_agent.api.app import create_app
-from meta_agent.api.deps import get_publisher, get_request_ctx, get_task_repo, get_task_topic
+from meta_agent.api.deps import (
+    get_db_pool,
+    get_outbox_repo,
+    get_request_ctx,
+    get_task_repo,
+    get_task_topic,
+)
+from meta_agent.core.domain.outbox import OutboxStatus
 from meta_agent.core.domain.task import Task, TaskState, TaskType
 from meta_agent.core.orchestration.result import TaskError, TaskErrorCode, TaskResult
-from meta_agent.core.ports.message import MessageEnvelope
 from meta_agent.infra.security.context import RequestContext
-from tests.worker._fakes import FakeTaskRepo
+from tests.worker._fakes import FakeOutboxRepo, FakeTaskRepo
 
 # ── Shared fakes ──────────────────────────────────────────────────────────────
 
@@ -29,12 +37,17 @@ _PRINCIPAL = "user-test"
 _HEADERS = {"X-Tenant-Id": _TENANT, "X-Principal-Id": _PRINCIPAL}
 
 
-class FakePublisher:
-    def __init__(self) -> None:
-        self.published: list[MessageEnvelope] = []
+class FakeDbPool:
+    """Minimal stand-in that only implements ``transaction()``.
 
-    async def publish(self, envelope: MessageEnvelope) -> None:
-        self.published.append(envelope)
+    The submit handler composes the task and outbox writes inside a
+    single ``async with pool.transaction()`` block. The fake yields a
+    sentinel connection that both fakes accept and ignore.
+    """
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[object]:
+        yield object()
 
 
 def _fixed_ctx() -> RequestContext:
@@ -48,11 +61,12 @@ def _fixed_ctx() -> RequestContext:
 
 def _make_app(
     fake_repo: FakeTaskRepo,
-    fake_publisher: FakePublisher,
+    fake_outbox: FakeOutboxRepo,
 ) -> Any:
     app = create_app(lifespan=None)
     app.dependency_overrides[get_task_repo] = lambda: fake_repo
-    app.dependency_overrides[get_publisher] = lambda: fake_publisher
+    app.dependency_overrides[get_outbox_repo] = lambda: fake_outbox
+    app.dependency_overrides[get_db_pool] = FakeDbPool
     app.dependency_overrides[get_task_topic] = lambda: _TOPIC
     app.dependency_overrides[get_request_ctx] = _fixed_ctx
     return app
@@ -64,17 +78,17 @@ def fake_repo() -> FakeTaskRepo:
 
 
 @pytest.fixture
-def fake_publisher() -> FakePublisher:
-    return FakePublisher()
+def fake_outbox() -> FakeOutboxRepo:
+    return FakeOutboxRepo()
 
 
 # ── POST /v1/tasks ────────────────────────────────────────────────────────────
 
 
 async def test_submit_task_returns_201(
-    fake_repo: FakeTaskRepo, fake_publisher: FakePublisher
+    fake_repo: FakeTaskRepo, fake_outbox: FakeOutboxRepo
 ) -> None:
-    app = _make_app(fake_repo, fake_publisher)
+    app = _make_app(fake_repo, fake_outbox)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             "/v1/tasks",
@@ -88,25 +102,30 @@ async def test_submit_task_returns_201(
     assert body["tenant_id"] == _TENANT
     task_id = body["task_id"]
 
-    # Task persisted in fake repo
-    assert (task_id in {k[1] for k in fake_repo.rows}) or True  # task stored
+    # Task row persisted in fake repo
+    assert (_TENANT, task_id) in fake_repo.rows
     assert len(fake_repo.rows) == 1
 
-    # Envelope published to stream
-    assert len(fake_publisher.published) == 1
-    env = fake_publisher.published[0]
-    assert env.task_id == task_id
-    assert env.topic == _TOPIC
-    assert env.tenant_id == _TENANT
+    # Outbox row enqueued in the same transaction — the dispatcher will
+    # later relay it to the queue.
+    assert len(fake_outbox.rows) == 1
+    event = next(iter(fake_outbox.rows.values()))
+    assert event.aggregate_type == "task"
+    assert event.aggregate_id == task_id
+    assert event.topic == _TOPIC
+    assert event.tenant_id == _TENANT
+    assert event.status is OutboxStatus.PENDING
+    assert event.payload == {"message": "hi"}
 
 
 async def test_submit_task_missing_tenant_returns_401(
-    fake_repo: FakeTaskRepo, fake_publisher: FakePublisher
+    fake_repo: FakeTaskRepo, fake_outbox: FakeOutboxRepo
 ) -> None:
     # Override ctx dep so it reads headers for this test
     app = create_app(lifespan=None)
     app.dependency_overrides[get_task_repo] = lambda: fake_repo
-    app.dependency_overrides[get_publisher] = lambda: fake_publisher
+    app.dependency_overrides[get_outbox_repo] = lambda: fake_outbox
+    app.dependency_overrides[get_db_pool] = FakeDbPool
     app.dependency_overrides[get_task_topic] = lambda: _TOPIC
     # No get_request_ctx override → uses real header-reading dep
 
@@ -122,7 +141,7 @@ async def test_submit_task_missing_tenant_returns_401(
 # ── GET /v1/tasks/{task_id} ───────────────────────────────────────────────────
 
 
-async def test_get_task_found(fake_repo: FakeTaskRepo, fake_publisher: FakePublisher) -> None:
+async def test_get_task_found(fake_repo: FakeTaskRepo, fake_outbox: FakeOutboxRepo) -> None:
     now = datetime(2026, 5, 15, tzinfo=UTC)
     task = Task(
         task_id="t-1",
@@ -137,15 +156,15 @@ async def test_get_task_found(fake_repo: FakeTaskRepo, fake_publisher: FakePubli
     )
     fake_repo.rows[(_TENANT, "t-1")] = task
 
-    app = _make_app(fake_repo, fake_publisher)
+    app = _make_app(fake_repo, fake_outbox)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/v1/tasks/t-1", headers=_HEADERS)
     assert resp.status_code == 200
     assert resp.json()["state"] == "succeeded"
 
 
-async def test_get_task_not_found(fake_repo: FakeTaskRepo, fake_publisher: FakePublisher) -> None:
-    app = _make_app(fake_repo, fake_publisher)
+async def test_get_task_not_found(fake_repo: FakeTaskRepo, fake_outbox: FakeOutboxRepo) -> None:
+    app = _make_app(fake_repo, fake_outbox)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/v1/tasks/nonexistent", headers=_HEADERS)
     assert resp.status_code == 404
@@ -155,7 +174,7 @@ async def test_get_task_not_found(fake_repo: FakeTaskRepo, fake_publisher: FakeP
 
 
 async def test_get_result_not_yet_available(
-    fake_repo: FakeTaskRepo, fake_publisher: FakePublisher
+    fake_repo: FakeTaskRepo, fake_outbox: FakeOutboxRepo
 ) -> None:
     """Task exists but has no result yet → 404."""
     now = datetime(2026, 5, 15, tzinfo=UTC)
@@ -173,14 +192,14 @@ async def test_get_result_not_yet_available(
     fake_repo.rows[(_TENANT, "t-2")] = task
     # No result stored yet
 
-    app = _make_app(fake_repo, fake_publisher)
+    app = _make_app(fake_repo, fake_outbox)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/v1/tasks/t-2/result", headers=_HEADERS)
     assert resp.status_code == 404
     assert "not yet available" in resp.json()["detail"]
 
 
-async def test_get_result_succeeded(fake_repo: FakeTaskRepo, fake_publisher: FakePublisher) -> None:
+async def test_get_result_succeeded(fake_repo: FakeTaskRepo, fake_outbox: FakeOutboxRepo) -> None:
     now = datetime(2026, 5, 15, tzinfo=UTC)
     task = Task(
         task_id="t-3",
@@ -207,7 +226,7 @@ async def test_get_result_succeeded(fake_repo: FakeTaskRepo, fake_publisher: Fak
     fake_repo.rows[(_TENANT, "t-3")] = task
     fake_repo.results[(_TENANT, "t-3")] = result
 
-    app = _make_app(fake_repo, fake_publisher)
+    app = _make_app(fake_repo, fake_outbox)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/v1/tasks/t-3/result", headers=_HEADERS)
     assert resp.status_code == 200
@@ -218,7 +237,7 @@ async def test_get_result_succeeded(fake_repo: FakeTaskRepo, fake_publisher: Fak
     assert body["error"] is None
 
 
-async def test_get_result_failed(fake_repo: FakeTaskRepo, fake_publisher: FakePublisher) -> None:
+async def test_get_result_failed(fake_repo: FakeTaskRepo, fake_outbox: FakeOutboxRepo) -> None:
     now = datetime(2026, 5, 15, tzinfo=UTC)
     task = Task(
         task_id="t-4",
@@ -245,7 +264,7 @@ async def test_get_result_failed(fake_repo: FakeTaskRepo, fake_publisher: FakePu
     fake_repo.rows[(_TENANT, "t-4")] = task
     fake_repo.results[(_TENANT, "t-4")] = result
 
-    app = _make_app(fake_repo, fake_publisher)
+    app = _make_app(fake_repo, fake_outbox)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/v1/tasks/t-4/result", headers=_HEADERS)
     assert resp.status_code == 200
@@ -258,8 +277,8 @@ async def test_get_result_failed(fake_repo: FakeTaskRepo, fake_publisher: FakePu
 # ── Health ────────────────────────────────────────────────────────────────────
 
 
-async def test_health(fake_repo: FakeTaskRepo, fake_publisher: FakePublisher) -> None:
-    app = _make_app(fake_repo, fake_publisher)
+async def test_health(fake_repo: FakeTaskRepo, fake_outbox: FakeOutboxRepo) -> None:
+    app = _make_app(fake_repo, fake_outbox)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/health")
     assert resp.status_code == 200

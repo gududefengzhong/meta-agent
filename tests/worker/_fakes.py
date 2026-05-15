@@ -12,6 +12,7 @@ from datetime import datetime
 
 from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.domain.checkpoint import TaskCheckpoint
+from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
 from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import Task, TaskState
 from meta_agent.core.orchestration.result import TaskResult
@@ -20,6 +21,7 @@ from meta_agent.core.ports.repository import (
     AuditRepository,
     CheckpointRepository,
     IllegalTaskTransitionError,
+    OutboxRepository,
     SessionRepository,
     TaskRepository,
 )
@@ -32,6 +34,11 @@ class FakeTaskRepo(TaskRepository):
         self.results: dict[tuple[str, str], TaskResult] = {}
 
     async def upsert(self, task: Task) -> None:
+        self.rows[(task.tenant_id, task.task_id)] = task
+
+    async def upsert_in_conn(self, task: Task, conn: object) -> None:
+        # ``conn`` is ignored by the in-memory fake; signature matches
+        # the SQL adapter so router tests exercise the same call site.
         self.rows[(task.tenant_id, task.task_id)] = task
 
     async def get(self, tenant_id: str, task_id: str) -> Task | None:
@@ -112,6 +119,67 @@ class FakeAuditRepo(AuditRepository):
 
     def actions(self) -> list[str]:
         return [e.action for e in self.rows]
+
+
+class FakeOutboxRepo(OutboxRepository):
+    """In-memory :class:`OutboxRepository` for API / submit-path tests.
+
+    Mirrors the SQL adapter contract (``enqueue`` / ``enqueue_in_conn``
+    both append a row) so router tests can assert that the transactional
+    submit really wrote an outbox event.
+    """
+
+    def __init__(self) -> None:
+        self.rows: dict[str, OutboxEvent] = {}
+
+    async def enqueue(self, event: OutboxEvent) -> None:
+        self.rows[event.event_id] = event
+
+    async def enqueue_in_conn(self, event: OutboxEvent, conn: object) -> None:
+        # ``conn`` is ignored by the fake; the test pool produces a
+        # sentinel object whose only purpose is to satisfy the API.
+        self.rows[event.event_id] = event
+
+    async def claim_pending(
+        self,
+        *,
+        batch_size: int,
+        now: datetime,
+    ) -> list[OutboxEvent]:
+        pending = [e for e in self.rows.values() if e.status is OutboxStatus.PENDING]
+        return pending[:batch_size]
+
+    async def mark_dispatched(self, event_id: str, *, dispatched_at: datetime) -> None:
+        existing = self.rows.get(event_id)
+        if existing is None:
+            return
+        self.rows[event_id] = existing.model_copy(
+            update={"status": OutboxStatus.DISPATCHED, "dispatched_at": dispatched_at},
+        )
+
+    async def mark_failed(
+        self,
+        event_id: str,
+        *,
+        error: str,
+        next_attempt_at: datetime | None,
+        terminal: bool,
+    ) -> None:
+        existing = self.rows.get(event_id)
+        if existing is None:
+            return
+        new_status = OutboxStatus.FAILED if terminal else OutboxStatus.PENDING
+        self.rows[event_id] = existing.model_copy(
+            update={"status": new_status, "attempts": existing.attempts + 1},
+        )
+
+    async def get(self, event_id: str) -> OutboxEvent | None:
+        return self.rows.get(event_id)
+
+    async def count_by_status(self, tenant_id: str, status: OutboxStatus) -> int:
+        return sum(
+            1 for e in self.rows.values() if e.tenant_id == tenant_id and e.status is status
+        )
 
 
 class FakeSessionRepo(SessionRepository):
