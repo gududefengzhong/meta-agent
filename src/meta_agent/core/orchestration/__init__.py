@@ -5,6 +5,7 @@
 【当前】最小 runtime：``TaskRunState`` 不可变快照 + ``Graph`` 节点/边模型。
 """
 
+from meta_agent.core.orchestration.deps import GraphDeps, GraphFactory
 from meta_agent.core.orchestration.graph import (
     Graph,
     GraphError,
@@ -19,7 +20,9 @@ __all__ = [
     "END",
     "START",
     "Graph",
+    "GraphDeps",
     "GraphError",
+    "GraphFactory",
     "GraphRegistry",
     "NodeFn",
     "NodeResult",

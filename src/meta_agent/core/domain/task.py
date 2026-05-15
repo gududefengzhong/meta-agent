@@ -27,6 +27,7 @@ class TaskType(StrEnum):
     CODE_REVIEW = "code_review"
     AUTO_PR = "auto_pr"
     SYSTEM_ECHO = "system_echo"
+    SYSTEM_CHAT = "system_chat"
 
 
 class TaskState(StrEnum):

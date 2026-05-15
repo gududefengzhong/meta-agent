@@ -79,4 +79,5 @@ def test_task_type_set_contains_expected_members() -> None:
         "code_review",
         "auto_pr",
         "system_echo",
+        "system_chat",
     }

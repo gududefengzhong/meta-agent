@@ -18,6 +18,7 @@ from meta_agent.core.domain.checkpoint import TaskCheckpoint
 from meta_agent.core.domain.task import Task, TaskState, TaskType
 from meta_agent.core.orchestration import (
     Graph,
+    GraphDeps,
     GraphRegistry,
     NodeResult,
     TaskRunState,
@@ -27,6 +28,7 @@ from meta_agent.core.orchestration.state import END
 from meta_agent.core.ports.message import MessageEnvelope
 from meta_agent.infra.queue.redis_consumer import DeliveredMessage
 from meta_agent.worker.runner import WorkerConfig, WorkerLoop
+from tests.core.orchestration._fakes import fake_deps
 
 from ._fakes import FakeAuditRepo, FakeCheckpointRepo, FakeStream, FakeTaskRepo
 
@@ -98,7 +100,12 @@ def _delivered(
 
 def _registry_with_echo() -> GraphRegistry:
     registry = GraphRegistry()
-    registry.register(build_echo_graph(), default_for=TaskType.SYSTEM_ECHO)
+    registry.register(
+        ECHO_GRAPH_ID,
+        lambda _deps: build_echo_graph(),
+        default_for=TaskType.SYSTEM_ECHO,
+    )
+    registry.materialize(fake_deps())
     return registry
 
 
@@ -209,18 +216,19 @@ async def test_run_once_abandons_after_max_attempts_exceeded() -> None:
 
 
 async def test_run_once_leaves_message_in_pel_on_node_failure() -> None:
-    boom = Graph("builtin.boom")
-
     async def explode(state: TaskRunState) -> NodeResult:
         raise RuntimeError("boom")
 
-    boom.add_node("explode", explode)
-    boom.set_entry("explode")
-    boom.add_edge("explode", END)
-    boom.compile()
+    def boom_factory(_deps: GraphDeps) -> Graph:
+        boom = Graph("builtin.boom")
+        boom.add_node("explode", explode)
+        boom.set_entry("explode")
+        boom.add_edge("explode", END)
+        return boom
 
     registry = GraphRegistry()
-    registry.register(boom, default_for=TaskType.SYSTEM_ECHO)
+    registry.register("builtin.boom", boom_factory, default_for=TaskType.SYSTEM_ECHO)
+    registry.materialize(fake_deps())
 
     loop, tasks, _checkpoints, audits, stream = _build_loop(registry=registry)
     await tasks.upsert(_make_task())
@@ -261,7 +269,9 @@ async def test_run_once_acks_when_envelope_lacks_task_id() -> None:
 
 async def test_run_once_uses_explicit_graph_id_override() -> None:
     registry = GraphRegistry()
-    registry.register(build_echo_graph())  # not default for any task_type
+    # Registered, but not default for any task_type — only graph_id override resolves.
+    registry.register(ECHO_GRAPH_ID, lambda _deps: build_echo_graph())
+    registry.materialize(fake_deps())
 
     loop, tasks, _checkpoints, _audits, stream = _build_loop(registry=registry)
     # task_type has no default graph; only graph_id override resolves
