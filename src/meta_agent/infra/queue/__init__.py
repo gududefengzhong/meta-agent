@@ -6,11 +6,12 @@ at-least-once 传递与 PEL（pending entries list）支撑下的重投。
 代码只依赖 :mod:`meta_agent.core.ports.queue` 中的 Port。
 """
 
-from meta_agent.infra.queue.redis_consumer import RedisStreamConsumer
+from meta_agent.infra.queue.redis_consumer import DeliveredMessage, RedisStreamConsumer
 from meta_agent.infra.queue.redis_publisher import RedisStreamPublisher
 from meta_agent.infra.queue.topic import stream_name_for_topic
 
 __all__ = [
+    "DeliveredMessage",
     "RedisStreamConsumer",
     "RedisStreamPublisher",
     "stream_name_for_topic",

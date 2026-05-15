@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from redis.asyncio import Redis
@@ -36,6 +37,21 @@ from meta_agent.infra.queue.topic import (
 from meta_agent.infra.security.context import RequestContext, bind_context
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveredMessage:
+    """One in-flight entry with its Redis-Streams PEL metadata.
+
+    ``delivery_count`` reflects how many times Redis has delivered this
+    entry to a consumer in the group; it starts at 1 on first delivery
+    and grows whenever a previously-unacked entry is redelivered. The
+    worker uses it to bound retries before declaring the task abandoned.
+    """
+
+    envelope: MessageEnvelope
+    entry_id: str
+    delivery_count: int
 
 
 class RedisStreamConsumer(MessageConsumer):
@@ -145,6 +161,95 @@ class RedisStreamConsumer(MessageConsumer):
             await self._client.xack(self._stream, self._group, entry_id)
         except RedisError:
             logger.exception("queue.ack_failed", extra={"entry_id": str(entry_id)})
+
+    async def claim_batch(
+        self,
+        *,
+        block_ms: int | None = None,
+    ) -> list[DeliveredMessage]:
+        """Pull a batch of entries with their PEL delivery counts.
+
+        Reads previously-claimed-but-unacked entries first (own PEL via
+        ``XREADGROUP`` with id ``"0"``) and then new entries (id
+        ``">"``). For each returned entry, ``delivery_count`` is read
+        from ``XPENDING``; entries that have been XACK'd between the
+        read and the pending lookup are skipped silently.
+        """
+
+        await self._ensure_group()
+        block = self._block_ms if block_ms is None else block_ms
+        delivered: list[DeliveredMessage] = []
+        for stream_id in ("0", ">"):
+            entries = await self._read_for_id(stream_id, block_ms=block)
+            for entry_id, fields in entries:
+                try:
+                    envelope = fields_to_envelope(fields)
+                except Exception as exc:
+                    logger.exception(
+                        "queue.poison_message",
+                        extra={"entry_id": str(entry_id), "error": str(exc)},
+                    )
+                    await self._safe_ack(entry_id)
+                    continue
+                count = await self._delivery_count(entry_id)
+                delivered.append(
+                    DeliveredMessage(
+                        envelope=envelope,
+                        entry_id=_to_str(entry_id),
+                        delivery_count=count,
+                    )
+                )
+        return delivered
+
+    async def ack(self, entry_id: str) -> None:
+        """Acknowledge ``entry_id`` so Redis removes it from the PEL."""
+
+        await self._safe_ack(entry_id)
+
+    async def _read_for_id(
+        self,
+        stream_id: str,
+        *,
+        block_ms: int,
+    ) -> list[tuple[bytes | str, dict[bytes | str, bytes | str]]]:
+        try:
+            entries: Any = await self._client.xreadgroup(
+                groupname=self._group,
+                consumername=self._consumer_name,
+                streams={self._stream: stream_id},
+                count=self._batch_size,
+                block=block_ms,
+            )
+        except RedisError as exc:
+            raise QueueError("redis xreadgroup failed") from exc
+        if not entries:
+            return []
+        out: list[tuple[bytes | str, dict[bytes | str, bytes | str]]] = []
+        for _stream, batch in entries:
+            out.extend(batch)
+        return out
+
+    async def _delivery_count(self, entry_id: bytes | str) -> int:
+        try:
+            pending: Any = await self._client.xpending_range(
+                name=self._stream,
+                groupname=self._group,
+                min=entry_id,
+                max=entry_id,
+                count=1,
+            )
+        except RedisError as exc:
+            raise QueueError("redis xpending failed") from exc
+        if not pending:
+            return 1
+        record = pending[0]
+        # redis-py returns either a dict-like or tuple, normalise to int
+        raw = record["times_delivered"] if isinstance(record, dict) else record[3]
+        return int(raw)
+
+
+def _to_str(entry_id: bytes | str) -> str:
+    return entry_id.decode() if isinstance(entry_id, bytes) else entry_id
 
 
 def _envelope_to_context(envelope: MessageEnvelope) -> RequestContext:
