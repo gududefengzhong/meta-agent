@@ -39,8 +39,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH="/app/src"
 
+# ``git`` is a runtime dependency: the worker shells out to it for
+# workspace provisioning (LocalGitWorkspaceManager) and for the
+# built-in ``builtin.git_inspect`` smoke graph. Pin to the bookworm
+# stable line so the layer cache stays valid across patch releases.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --system --gid 1001 app \
-    && useradd --system --uid 1001 --gid app --home-dir /app --shell /usr/sbin/nologin app
+    && useradd --system --uid 1001 --gid app --home-dir /app --shell /usr/sbin/nologin app \
+    && mkdir -p /var/lib/meta-agent/workspaces \
+    && chown -R app:app /var/lib/meta-agent
 
 WORKDIR /app
 

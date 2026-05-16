@@ -80,4 +80,5 @@ def test_task_type_set_contains_expected_members() -> None:
         "auto_pr",
         "system_echo",
         "system_chat",
+        "system_git_inspect",
     }

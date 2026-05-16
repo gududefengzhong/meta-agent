@@ -28,6 +28,7 @@ class TaskType(StrEnum):
     AUTO_PR = "auto_pr"
     SYSTEM_ECHO = "system_echo"
     SYSTEM_CHAT = "system_chat"
+    SYSTEM_GIT_INSPECT = "system_git_inspect"
 
 
 class TaskState(StrEnum):

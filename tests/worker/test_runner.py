@@ -32,7 +32,13 @@ from meta_agent.infra.queue.redis_consumer import DeliveredMessage
 from meta_agent.worker.runner import WorkerConfig, WorkerLoop
 from tests.core.orchestration._fakes import fake_deps
 
-from ._fakes import FakeAuditRepo, FakeCheckpointRepo, FakeStream, FakeTaskRepo
+from ._fakes import (
+    FakeAuditRepo,
+    FakeCheckpointRepo,
+    FakeStream,
+    FakeTaskRepo,
+    FakeWorkspaceManager,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -411,3 +417,161 @@ async def test_fake_repo_complete_rejects_non_terminal_state() -> None:
             terminal_state=TaskState.RUNNING,
             updated_at=datetime(2026, 5, 15, tzinfo=UTC),
         )
+
+
+# --- A.3.1: workspace dispatch ---------------------------------------------
+
+_WS_GRAPH_ID = "test.requires_workspace"
+
+
+def _build_ws_graph() -> Graph:
+    """One-node graph that copies workspace data into ``output``."""
+
+    async def only(state: TaskRunState) -> NodeResult:
+        return NodeResult(
+            data_update={
+                "output": {
+                    "workspace_path": state.data.get("_workspace_path"),
+                    "workspace_branch": state.data.get("_workspace_branch"),
+                }
+            }
+        )
+
+    g = Graph(_WS_GRAPH_ID)
+    g.add_node("only", only)
+    g.set_entry("only")
+    g.add_edge("only", END)
+    g.compile()
+    return g
+
+
+def _registry_with_ws() -> GraphRegistry:
+    registry = GraphRegistry()
+    registry.register(
+        _WS_GRAPH_ID,
+        lambda _deps: _build_ws_graph(),
+        requires_workspace=True,
+    )
+    registry.materialize(fake_deps())
+    return registry
+
+
+def _build_loop_ws(
+    *,
+    workspaces: FakeWorkspaceManager | None,
+) -> tuple[WorkerLoop, FakeTaskRepo, FakeAuditRepo, FakeStream]:
+    tasks = FakeTaskRepo()
+    audits = FakeAuditRepo()
+    stream = FakeStream()
+    loop = WorkerLoop(
+        stream=stream,
+        tasks=tasks,
+        checkpoints=FakeCheckpointRepo(),
+        audits=audits,
+        registry=_registry_with_ws(),
+        workspaces=workspaces,
+        clock=_fixed_clock(),
+        id_factory=_id_factory(),
+    )
+    return loop, tasks, audits, stream
+
+
+async def test_workspace_required_graph_provisions_runs_and_cleans() -> None:
+    wm = FakeWorkspaceManager()
+    loop, tasks, audits, stream = _build_loop_ws(workspaces=wm)
+    task = _make_task(
+        graph_id=_WS_GRAPH_ID,
+        payload={"repo_url": "https://example.invalid/repo.git", "base_ref": "main"},
+    )
+    await tasks.upsert(task)
+    stream.push([_delivered()])
+
+    await loop.run_once()
+
+    # Both lifecycle hooks fired exactly once.
+    assert len(wm.provisioned) == 1
+    assert len(wm.cleaned) == 1
+    ws = wm.provisioned[0]
+    assert wm.cleaned[0] is ws
+    assert ws.branch == "agent/task-1"
+    assert ws.repo_url == "https://example.invalid/repo.git"
+    assert ws.base_ref == "main"
+
+    # Workspace info reached graph state.
+    result = await tasks.get_result(TENANT, "task-1")
+    assert result is not None
+    assert result.output == {
+        "workspace_path": ws.worktree_path,
+        "workspace_branch": "agent/task-1",
+    }
+
+    actions = audits.actions()
+    assert actions.count("workspace.provisioned") == 1
+    assert actions.count("workspace.cleaned") == 1
+    # Provision audit precedes the terminal task event, cleanup follows it.
+    assert actions.index("workspace.provisioned") < actions.index("task.succeeded")
+    assert actions.index("task.succeeded") < actions.index("workspace.cleaned")
+    assert stream.acked == ["1-0"]
+
+
+async def test_workspace_required_graph_without_manager_aborts_gracefully() -> None:
+    loop, tasks, audits, stream = _build_loop_ws(workspaces=None)
+    await tasks.upsert(_make_task(graph_id=_WS_GRAPH_ID))
+    stream.push([_delivered()])
+
+    await loop.run_once()
+
+    assert audits.actions() == ["worker.workspace_unavailable"]
+    assert stream.acked == ["1-0"]
+    # No state transition: task stays pending.
+    task = await tasks.get(TENANT, "task-1")
+    assert task is not None and task.state == TaskState.PENDING
+
+
+async def test_workspace_provision_failure_keeps_message_in_pel() -> None:
+    wm = FakeWorkspaceManager(fail_provision=True)
+    loop, tasks, audits, stream = _build_loop_ws(workspaces=wm)
+    await tasks.upsert(_make_task(graph_id=_WS_GRAPH_ID))
+    stream.push([_delivered()])
+
+    # _handle swallows the exception (PEL retry), so run_once returns normally.
+    await loop.run_once()
+
+    assert "workspace.provision_failed" in audits.actions()
+    assert wm.cleaned == []  # nothing to clean
+    assert stream.acked == []  # left in PEL for redelivery
+
+
+async def test_workspace_cleanup_failure_does_not_block_terminal_write() -> None:
+    wm = FakeWorkspaceManager(fail_cleanup=True)
+    loop, tasks, audits, stream = _build_loop_ws(workspaces=wm)
+    await tasks.upsert(_make_task(graph_id=_WS_GRAPH_ID))
+    stream.push([_delivered()])
+
+    await loop.run_once()
+
+    actions = audits.actions()
+    assert "task.succeeded" in actions
+    assert "workspace.cleanup_failed" in actions
+    assert "workspace.cleaned" not in actions
+    # Terminal state recorded despite cleanup failure.
+    task = await tasks.get(TENANT, "task-1")
+    assert task is not None and task.state == TaskState.SUCCEEDED
+    assert stream.acked == ["1-0"]
+
+
+async def test_non_workspace_graph_skips_provision_and_cleanup() -> None:
+    wm = FakeWorkspaceManager()
+    loop, tasks, _ckpt, _audits, stream = _build_loop(registry=_registry_with_echo())
+    # Inject the workspace manager on the already-built loop: a
+    # non-workspace graph must not call into it at all.
+    loop._workspaces = wm
+    await tasks.upsert(_make_task())
+    stream.push([_delivered()])
+
+    await loop.run_once()
+
+    assert wm.provisioned == []
+    assert wm.cleaned == []
+    task = await tasks.get(TENANT, "task-1")
+    assert task is not None and task.state == TaskState.SUCCEEDED

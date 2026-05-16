@@ -13,6 +13,7 @@ from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
 from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import Task, TaskState, TaskType
 from meta_agent.core.domain.tenant import Tenant
+from meta_agent.core.domain.workspace import Workspace
 
 __all__ = [
     "AgentError",
@@ -29,4 +30,5 @@ __all__ = [
     "TaskState",
     "TaskType",
     "Tenant",
+    "Workspace",
 ]

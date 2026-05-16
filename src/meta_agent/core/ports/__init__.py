@@ -38,6 +38,7 @@ from meta_agent.core.ports.repository import (
     TaskRepository,
     TenantIsolationError,
 )
+from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 
 __all__ = [
     "AuditRepository",
@@ -65,4 +66,6 @@ __all__ = [
     "SessionRepository",
     "TaskRepository",
     "TenantIsolationError",
+    "WorkspaceError",
+    "WorkspaceManager",
 ]
