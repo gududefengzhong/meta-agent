@@ -75,6 +75,7 @@
 
 ## 当前状态
 <!-- 架构 / 模式 / 已冻结决策在 ji___；新 session 先 ji___ 回忆 /Users/mudimu/mudi/web2/meta-agent -->
-- HEAD：`feat/phase-1` @ `06e40cd`
-- 本轮：**P1-H 待规划**（建议候选见 ji___ context 或会话首轮规划）
-- 已完成：P0, P1-A, P1-B, P1-C, P1-D, P1-E, P1-F.1, P1-F.2, P1-G
+- HEAD：`main` @ `52741ac`（Merge PR #2 from feat/phase-1）
+- 本轮：**P1 完整闭环已合入 main，下一里程碑待规划**
+- 已完成：P0 + P1（全部，含 P1-A → P1-H + C1 / C2 / C3 + Plan A: L0 git worktree 隔离）
+- L0 硬约束全部闭环；docker-compose 全栈端到端 smoke 通过
