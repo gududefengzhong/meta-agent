@@ -9,11 +9,17 @@ compose`` smoke flow rather than by mocking every adapter here.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from meta_agent.core.domain.task import TaskType
 from meta_agent.core.orchestration import GraphDeps
-from meta_agent.core.orchestration.graphs import ECHO_GRAPH_ID, SIMPLE_CHAT_GRAPH_ID
+from meta_agent.core.orchestration.graphs import (
+    ECHO_GRAPH_ID,
+    GIT_INSPECT_GRAPH_ID,
+    SIMPLE_CHAT_GRAPH_ID,
+)
 from meta_agent.worker.bootstrap import (
     WorkerSettings,
     build_registry,
@@ -39,6 +45,7 @@ def test_settings_from_env_uses_documented_defaults() -> None:
     assert settings.max_attempts == 3
     assert settings.block_ms == 1_000
     assert settings.openrouter.api_key == "sk-or-test-1234"
+    assert settings.workspace_root == Path("/var/lib/meta-agent/workspaces")
 
 
 def test_settings_from_env_overrides_each_knob() -> None:
@@ -53,6 +60,7 @@ def test_settings_from_env_overrides_each_knob() -> None:
             META_AGENT_WORKER_BLOCK_MS="250",
             META_AGENT_WORKER_DB_MIN_SIZE="2",
             META_AGENT_WORKER_DB_MAX_SIZE="20",
+            META_AGENT_WORKSPACE_ROOT="/tmp/custom-ws",
         )
     )
     assert settings.db_url == "postgresql://u:p@db:5432/x"
@@ -64,6 +72,7 @@ def test_settings_from_env_overrides_each_knob() -> None:
     assert settings.block_ms == 250
     assert settings.db_min_size == 2
     assert settings.db_max_size == 20
+    assert settings.workspace_root == Path("/tmp/custom-ws")
 
 
 def test_settings_from_env_requires_openrouter_key() -> None:
@@ -76,5 +85,12 @@ def test_build_registry_registers_builtin_graphs_and_routes_defaults() -> None:
     assert registry.is_materialized
     assert registry.get(ECHO_GRAPH_ID).graph_id == ECHO_GRAPH_ID
     assert registry.get(SIMPLE_CHAT_GRAPH_ID).graph_id == SIMPLE_CHAT_GRAPH_ID
+    assert registry.get(GIT_INSPECT_GRAPH_ID).graph_id == GIT_INSPECT_GRAPH_ID
     assert registry.resolve(TaskType.SYSTEM_ECHO).graph_id == ECHO_GRAPH_ID
     assert registry.resolve(TaskType.SYSTEM_CHAT).graph_id == SIMPLE_CHAT_GRAPH_ID
+    assert registry.resolve(TaskType.SYSTEM_GIT_INSPECT).graph_id == GIT_INSPECT_GRAPH_ID
+    # Only the git-inspect graph requires a workspace; the other two
+    # built-ins must not pull the worker into provisioning a worktree.
+    assert registry.requires_workspace(GIT_INSPECT_GRAPH_ID) is True
+    assert registry.requires_workspace(ECHO_GRAPH_ID) is False
+    assert registry.requires_workspace(SIMPLE_CHAT_GRAPH_ID) is False

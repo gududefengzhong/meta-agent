@@ -19,6 +19,7 @@ import os
 import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from redis.asyncio import Redis
 
@@ -26,8 +27,10 @@ from meta_agent.core.domain.task import TaskType
 from meta_agent.core.orchestration import GraphDeps, GraphRegistry
 from meta_agent.core.orchestration.graphs import (
     ECHO_GRAPH_ID,
+    GIT_INSPECT_GRAPH_ID,
     SIMPLE_CHAT_GRAPH_ID,
     build_echo_graph,
+    build_git_inspect_graph,
     build_simple_chat_graph,
 )
 from meta_agent.core.ports.llm import LLMClient
@@ -41,6 +44,7 @@ from meta_agent.infra.persistence import (
 )
 from meta_agent.infra.persistence.pool import PoolConfig
 from meta_agent.infra.queue import RedisStreamConsumer
+from meta_agent.infra.workspace import LocalGitConfig, LocalGitWorkspaceManager
 from meta_agent.worker.runner import WorkerConfig, WorkerLoop
 
 _DB_URL_ENV = "META_AGENT_DB_URL"
@@ -52,12 +56,14 @@ _MAX_ATTEMPTS_ENV = "META_AGENT_WORKER_MAX_ATTEMPTS"
 _BLOCK_MS_ENV = "META_AGENT_WORKER_BLOCK_MS"
 _DB_MIN_SIZE_ENV = "META_AGENT_WORKER_DB_MIN_SIZE"
 _DB_MAX_SIZE_ENV = "META_AGENT_WORKER_DB_MAX_SIZE"
+_WORKSPACE_ROOT_ENV = "META_AGENT_WORKSPACE_ROOT"
 
 _DEFAULT_DB_URL = "postgresql://meta_agent:dev-only@localhost:5432/meta_agent"
 _DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 _DEFAULT_TASK_TOPIC = "task.commands"
 _DEFAULT_GROUP = "workers"
 _DEFAULT_LLM_PROVIDER = "openrouter"
+_DEFAULT_WORKSPACE_ROOT = "/var/lib/meta-agent/workspaces"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +76,7 @@ class WorkerSettings:
     consumer_group: str
     consumer_name: str
     openrouter: OpenRouterConfig
+    workspace_root: Path
     db_min_size: int = 1
     db_max_size: int = 5
     max_attempts: int = 3
@@ -85,6 +92,7 @@ class WorkerSettings:
             consumer_group=source.get(_GROUP_ENV, _DEFAULT_GROUP),
             consumer_name=source.get(_NAME_ENV, "") or socket.gethostname(),
             openrouter=OpenRouterConfig.from_env(source),
+            workspace_root=Path(source.get(_WORKSPACE_ROOT_ENV, _DEFAULT_WORKSPACE_ROOT)),
             db_min_size=int(source.get(_DB_MIN_SIZE_ENV, "1")),
             db_max_size=int(source.get(_DB_MAX_SIZE_ENV, "5")),
             max_attempts=int(source.get(_MAX_ATTEMPTS_ENV, "3")),
@@ -114,6 +122,12 @@ def build_registry(deps: GraphDeps) -> GraphRegistry:
         SIMPLE_CHAT_GRAPH_ID,
         build_simple_chat_graph,
         default_for=TaskType.SYSTEM_CHAT,
+    )
+    registry.register(
+        GIT_INSPECT_GRAPH_ID,
+        lambda _deps: build_git_inspect_graph(),
+        default_for=TaskType.SYSTEM_GIT_INSPECT,
+        requires_workspace=True,
     )
     registry.materialize(deps)
     return registry
@@ -155,12 +169,17 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     inner_llm = OpenRouterClient(settings.openrouter)
     metered_llm = build_metered_llm(inner_llm, usage_repo)
     registry = build_registry(GraphDeps(llm=metered_llm))
+    # Ensure the workspace root exists; the local-git adapter requires
+    # the directory to be present so it can ``mkdir`` per-task subdirs.
+    settings.workspace_root.mkdir(parents=True, exist_ok=True)
+    workspaces = LocalGitWorkspaceManager(LocalGitConfig(root_dir=settings.workspace_root))
     worker = WorkerLoop(
         stream=consumer,
         tasks=task_repo,
         checkpoints=checkpoint_repo,
         audits=audit_repo,
         registry=registry,
+        workspaces=workspaces,
         config=WorkerConfig(max_attempts=settings.max_attempts, block_ms=settings.block_ms),
     )
 
