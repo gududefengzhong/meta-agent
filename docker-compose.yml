@@ -1,0 +1,101 @@
+# End-to-end local stack: postgres + redis + alembic migrations + api + worker.
+#
+# 【用途】完整跑起 meta-agent 的 L0 形态；docker-compose.dev.yml 是单独的「只起依赖」开发变体。
+# 【启动】docker compose up --build
+# 【先决条件】.env 必须存在，且至少含 OPENROUTER_API_KEY；可由 .env.example 复制。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: meta_agent
+      POSTGRES_USER: meta_agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev-only}
+    volumes:
+      - meta_agent_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meta_agent -d meta_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - meta_agent_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot job: bring the schema to head. Both api and worker block on it via
+  # `service_completed_successfully` so they never see a half-migrated db.
+  migrations:
+    build:
+      context: .
+    image: meta-agent:local
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      META_AGENT_DB_URL: postgresql://meta_agent:${POSTGRES_PASSWORD:-dev-only}@postgres:5432/meta_agent
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: meta-agent:local
+    command:
+      - uvicorn
+      - meta_agent.api.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    env_file:
+      - .env
+    environment:
+      META_AGENT_DB_URL: postgresql://meta_agent:${POSTGRES_PASSWORD:-dev-only}@postgres:5432/meta_agent
+      META_AGENT_REDIS_URL: redis://redis:6379/0
+      META_AGENT_TASK_TOPIC: task.commands
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=2).status==200 else 1)"
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+  worker:
+    image: meta-agent:local
+    env_file:
+      - .env
+    environment:
+      META_AGENT_DB_URL: postgresql://meta_agent:${POSTGRES_PASSWORD:-dev-only}@postgres:5432/meta_agent
+      META_AGENT_REDIS_URL: redis://redis:6379/0
+      META_AGENT_TASK_TOPIC: task.commands
+      META_AGENT_WORKER_GROUP: workers
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+
+volumes:
+  meta_agent_pg_data:
+  meta_agent_redis_data:
