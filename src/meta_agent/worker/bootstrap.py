@@ -27,10 +27,12 @@ from meta_agent.core.domain.task import TaskType
 from meta_agent.core.orchestration import GraphDeps, GraphRegistry
 from meta_agent.core.orchestration.graphs import (
     BUG_FIX_GRAPH_ID,
+    CODE_REVIEW_GRAPH_ID,
     ECHO_GRAPH_ID,
     GIT_INSPECT_GRAPH_ID,
     SIMPLE_CHAT_GRAPH_ID,
     build_bug_fix_graph,
+    build_code_review_graph,
     build_echo_graph,
     build_git_inspect_graph,
     build_simple_chat_graph,
@@ -136,6 +138,11 @@ def build_registry(deps: GraphDeps) -> GraphRegistry:
         build_bug_fix_graph,
         default_for=TaskType.BUG_FIX,
         requires_workspace=True,
+    )
+    registry.register(
+        CODE_REVIEW_GRAPH_ID,
+        build_code_review_graph,
+        default_for=TaskType.CODE_REVIEW,
     )
     registry.materialize(deps)
     return registry
