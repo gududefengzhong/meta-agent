@@ -26,9 +26,11 @@ from redis.asyncio import Redis
 from meta_agent.core.domain.task import TaskType
 from meta_agent.core.orchestration import GraphDeps, GraphRegistry
 from meta_agent.core.orchestration.graphs import (
+    BUG_FIX_GRAPH_ID,
     ECHO_GRAPH_ID,
     GIT_INSPECT_GRAPH_ID,
     SIMPLE_CHAT_GRAPH_ID,
+    build_bug_fix_graph,
     build_echo_graph,
     build_git_inspect_graph,
     build_simple_chat_graph,
@@ -127,6 +129,12 @@ def build_registry(deps: GraphDeps) -> GraphRegistry:
         GIT_INSPECT_GRAPH_ID,
         lambda _deps: build_git_inspect_graph(),
         default_for=TaskType.SYSTEM_GIT_INSPECT,
+        requires_workspace=True,
+    )
+    registry.register(
+        BUG_FIX_GRAPH_ID,
+        build_bug_fix_graph,
+        default_for=TaskType.BUG_FIX,
         requires_workspace=True,
     )
     registry.materialize(deps)
