@@ -22,6 +22,7 @@ from meta_agent.core.ports.llm import (
     LLMUsage,
     MessageRole,
 )
+from meta_agent.core.ports.llm_usage import LLMUsageRepository
 from meta_agent.core.ports.message import MessageEnvelope, MessageHandler
 from meta_agent.core.ports.queue import (
     MessageConsumer,
@@ -52,6 +53,7 @@ __all__ = [
     "LLMResponse",
     "LLMTransientError",
     "LLMUsage",
+    "LLMUsageRepository",
     "MessageConsumer",
     "MessageEnvelope",
     "MessageHandler",

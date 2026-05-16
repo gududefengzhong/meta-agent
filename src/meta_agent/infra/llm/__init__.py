@@ -6,6 +6,7 @@ Currently ships only the OpenRouter HTTP adapter; future providers
 """
 
 from meta_agent.infra.llm.config import OpenRouterConfig
+from meta_agent.infra.llm.metered import MeteredLLMClient
 from meta_agent.infra.llm.openrouter import OpenRouterClient
 
-__all__ = ["OpenRouterClient", "OpenRouterConfig"]
+__all__ = ["MeteredLLMClient", "OpenRouterClient", "OpenRouterConfig"]
