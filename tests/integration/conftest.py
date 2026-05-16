@@ -124,7 +124,7 @@ async def db_pool(pg_dsn: str) -> AsyncIterator[DatabasePool]:
         async with pool.acquire() as conn:
             await conn.execute(
                 "TRUNCATE tasks, sessions, outbox_events, audit_events, "
-                "task_checkpoints RESTART IDENTITY CASCADE"
+                "task_checkpoints, llm_usage_logs RESTART IDENTITY CASCADE"
             )
         yield pool
     finally:

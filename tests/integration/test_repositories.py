@@ -14,6 +14,8 @@ import pytest
 
 from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.domain.checkpoint import TaskCheckpoint
+from meta_agent.core.domain.errors import ErrorCategory
+from meta_agent.core.domain.llm_usage import LLMUsageRecord, LLMUsageStatus
 from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
 from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import Task, TaskState, TaskType
@@ -22,6 +24,7 @@ from meta_agent.infra.persistence import (
     DatabasePool,
     PgAuditRepository,
     PgCheckpointRepository,
+    PgLLMUsageRepository,
     PgOutboxRepository,
     PgSessionRepository,
     PgTaskRepository,
@@ -164,6 +167,81 @@ async def test_audit_append_and_list_recent(db_pool: DatabasePool) -> None:
         await repo.append(event)
         rows = await repo.list_recent("tenant-A")
     assert rows == [event]
+
+
+def _usage(
+    record_id: str,
+    *,
+    tenant_id: str = "tenant-A",
+    task_id: str | None = "t-1",
+    status: LLMUsageStatus = LLMUsageStatus.OK,
+    created_at: datetime | None = None,
+) -> LLMUsageRecord:
+    return LLMUsageRecord(
+        record_id=record_id,
+        tenant_id=tenant_id,
+        trace_id="trace-1",
+        request_id="req-1",
+        principal_id="user-1",
+        task_id=task_id,
+        provider="openrouter",
+        model="openai/gpt-4o" if status is LLMUsageStatus.OK else None,
+        requested_model="openai/gpt-4o",
+        prompt_tokens=12 if status is LLMUsageStatus.OK else None,
+        completion_tokens=34 if status is LLMUsageStatus.OK else None,
+        total_tokens=46 if status is LLMUsageStatus.OK else None,
+        finish_reason="stop" if status is LLMUsageStatus.OK else None,
+        provider_response_id="gen_abc" if status is LLMUsageStatus.OK else None,
+        cost_usd_micros=None,
+        latency_ms=210,
+        status=status,
+        error_category=None if status is LLMUsageStatus.OK else ErrorCategory.TRANSIENT,
+        error_message=None if status is LLMUsageStatus.OK else "upstream 503",
+        created_at=created_at or datetime(2026, 5, 16, tzinfo=UTC),
+    )
+
+
+async def test_llm_usage_record_and_list_for_task(db_pool: DatabasePool) -> None:
+    repo = PgLLMUsageRepository(db_pool)
+    first = _usage("llmu-1", created_at=datetime(2026, 5, 16, 12, 0, tzinfo=UTC))
+    second = _usage(
+        "llmu-2",
+        status=LLMUsageStatus.ERROR,
+        created_at=datetime(2026, 5, 16, 12, 1, tzinfo=UTC),
+    )
+    with bind_context(_ctx()):
+        await repo.record(first)
+        await repo.record(second)
+        rows = await repo.list_for_task("tenant-A", "t-1")
+    assert [r.record_id for r in rows] == ["llmu-1", "llmu-2"]
+    assert rows[1].status is LLMUsageStatus.ERROR
+    assert rows[1].error_category is ErrorCategory.TRANSIENT
+
+
+async def test_llm_usage_record_is_idempotent_on_record_id(db_pool: DatabasePool) -> None:
+    repo = PgLLMUsageRepository(db_pool)
+    record = _usage("llmu-dup")
+    with bind_context(_ctx()):
+        await repo.record(record)
+        await repo.record(record)
+        rows = await repo.list_for_task("tenant-A", "t-1")
+    assert sum(1 for r in rows if r.record_id == "llmu-dup") == 1
+
+
+async def test_llm_usage_rejects_cross_tenant_write(db_pool: DatabasePool) -> None:
+    repo = PgLLMUsageRepository(db_pool)
+    with bind_context(_ctx("tenant-A")), pytest.raises(TenantIsolationError):
+        await repo.record(_usage("llmu-x", tenant_id="tenant-B"))
+
+
+async def test_llm_usage_list_isolates_tenants(db_pool: DatabasePool) -> None:
+    repo = PgLLMUsageRepository(db_pool)
+    with bind_context(_ctx("tenant-A")):
+        await repo.record(_usage("llmu-iso-A"))
+    with bind_context(_ctx("tenant-B")):
+        await repo.record(_usage("llmu-iso-B", tenant_id="tenant-B"))
+        rows = await repo.list_for_task("tenant-B", "t-1")
+    assert {r.record_id for r in rows} == {"llmu-iso-B"}
 
 
 async def test_checkpoint_append_and_latest(db_pool: DatabasePool) -> None:
