@@ -177,9 +177,7 @@ class FakeOutboxRepo(OutboxRepository):
         return self.rows.get(event_id)
 
     async def count_by_status(self, tenant_id: str, status: OutboxStatus) -> int:
-        return sum(
-            1 for e in self.rows.values() if e.tenant_id == tenant_id and e.status is status
-        )
+        return sum(1 for e in self.rows.values() if e.tenant_id == tenant_id and e.status is status)
 
 
 class FakeSessionRepo(SessionRepository):

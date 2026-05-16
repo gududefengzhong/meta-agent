@@ -1,10 +1,14 @@
 """End-to-end echo graph integration test.
 
-Flow:
-1. Create a SYSTEM_ECHO task in PG (PENDING, graph_id=builtin.echo).
-2. Publish a MessageEnvelope to the Redis task-commands stream.
+Flow (P1-H closes the outbox path so submission and relay are split):
+1. Create a SYSTEM_ECHO task in PG (PENDING, graph_id=builtin.echo)
+   AND enqueue the matching outbox event in the SAME transaction —
+   mirroring exactly what the ``POST /v1/tasks`` router does.
+2. Run :class:`OutboxDispatcher` once to relay the outbox row to the
+   Redis task-commands stream.
 3. Run WorkerLoop.run_once() with real Postgres repos and the echo GraphRegistry.
 4. Assert:
+   - the outbox row transitions to ``dispatched``.
    - tasks.result_json is populated with status=succeeded and
      output={"echo": <message>}.
    - task.state is SUCCEEDED in the DB.
@@ -24,15 +28,17 @@ from datetime import UTC, datetime
 import pytest
 from redis.asyncio import Redis
 
+from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
 from meta_agent.core.domain.task import Task, TaskState, TaskType
 from meta_agent.core.orchestration import GraphDeps, GraphRegistry
 from meta_agent.core.orchestration.graphs.echo import ECHO_GRAPH_ID, build_echo_graph
 from meta_agent.core.ports.llm import LLMClient, LLMRequest, LLMResponse
-from meta_agent.core.ports.message import MessageEnvelope
 from meta_agent.infra.persistence import (
     DatabasePool,
+    OutboxDispatcher,
     PgAuditRepository,
     PgCheckpointRepository,
+    PgOutboxRepository,
     PgTaskRepository,
 )
 from meta_agent.infra.queue import RedisStreamConsumer, RedisStreamPublisher, stream_name_for_topic
@@ -82,7 +88,7 @@ async def test_echo_graph_end_to_end(db_pool: DatabasePool, redis_client: Redis)
         request_id=task_id,
     )
 
-    # ── 1. Persist task to Postgres ──────────────────────────────────────────
+    # ── 1. Persist task + outbox row atomically (mirrors POST /v1/tasks) ────
     task = Task(
         task_id=task_id,
         tenant_id=_TENANT,
@@ -96,26 +102,29 @@ async def test_echo_graph_end_to_end(db_pool: DatabasePool, redis_client: Redis)
         created_at=now,
         updated_at=now,
     )
-    task_repo = PgTaskRepository(db_pool)
-    with bind_context(ctx):
-        await task_repo.upsert(task)
-
-    # ── 2. Publish envelope to Redis stream ──────────────────────────────────
-    publisher = RedisStreamPublisher(redis_client)
-    envelope = MessageEnvelope(
-        message_id=f"msg-{task_id}",
-        topic=_TOPIC,
+    event = OutboxEvent(
+        event_id=f"evt-{uuid.uuid4().hex[:8]}",
         tenant_id=_TENANT,
         trace_id=trace_id,
-        idempotency_key=f"idem-msg-{task_id}",
-        principal_id=_PRINCIPAL,
-        task_id=task_id,
-        event_type="task.execute",
+        aggregate_type="task",
+        aggregate_id=task_id,
+        topic=_TOPIC,
         payload={"message": message},
-        occurred_at=now,
-        enqueued_at=now,
+        idempotency_key=f"idem-{task_id}",
+        created_at=now,
     )
-    await publisher.publish(envelope)
+    task_repo = PgTaskRepository(db_pool)
+    outbox_repo = PgOutboxRepository(db_pool)
+    with bind_context(ctx):
+        async with db_pool.transaction() as conn:
+            await task_repo.upsert_in_conn(task, conn)
+            await outbox_repo.enqueue_in_conn(event, conn)
+
+    # ── 2. Dispatcher relays outbox row → Redis stream ──────────────────────
+    publisher = RedisStreamPublisher(redis_client)
+    dispatcher = OutboxDispatcher(outbox_repo, publisher)
+    drained = await dispatcher.run_once()
+    assert drained == 1, f"expected 1 outbox row dispatched, got {drained}"
 
     # ── 3. Bootstrap worker (group unique per run to avoid cross-test leakage) ──
     group = f"echo-workers-{uuid.uuid4().hex[:6]}"
@@ -176,3 +185,8 @@ async def test_echo_graph_end_to_end(db_pool: DatabasePool, redis_client: Redis)
     # Sequences must be strictly increasing
     seqs = [cp.sequence for cp in checkpoints]
     assert seqs == sorted(seqs) and len(set(seqs)) == 3
+
+    # ── 9. Outbox row transitioned to DISPATCHED ────────────────────────────
+    relayed = await outbox_repo.get(event.event_id)
+    assert relayed is not None
+    assert relayed.status == OutboxStatus.DISPATCHED

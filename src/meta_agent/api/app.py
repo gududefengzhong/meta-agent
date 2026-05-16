@@ -12,6 +12,8 @@ Environment variables read by the default lifespan:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -22,7 +24,7 @@ from fastapi import FastAPI
 from redis.asyncio import Redis
 
 from meta_agent.api.routers import tasks as tasks_router
-from meta_agent.infra.persistence import build_pool
+from meta_agent.infra.persistence import OutboxDispatcher, PgOutboxRepository, build_pool
 from meta_agent.infra.persistence.pool import PoolConfig
 from meta_agent.infra.queue import RedisStreamPublisher
 
@@ -36,10 +38,27 @@ _DEFAULT_DB_URL = "postgresql://meta_agent:dev-only@localhost:5432/meta_agent"
 _DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 _DEFAULT_TASK_TOPIC = "task.commands"
 
+_DISPATCHER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
+
+def _log_dispatcher_done(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    if (exc := task.exception()) is not None:
+        logger.error("outbox.dispatcher_crashed", exc_info=exc)
+
 
 @asynccontextmanager
 async def _default_lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Open shared Postgres pool and Redis client; close on shutdown."""
+    """Open shared infra; relay outbox in the background until shutdown.
+
+    The outbox dispatcher runs as a background task inside the API
+    process so that ``POST /v1/tasks`` — which writes the task row and
+    the outbox row atomically — is followed by an asynchronous relay
+    onto the Redis stream without requiring a separate worker
+    deployment. Multi-replica deployments are still safe because the
+    dispatcher claims rows via ``SELECT ... FOR UPDATE SKIP LOCKED``.
+    """
     db_url = os.environ.get(_DB_URL_ENV, _DEFAULT_DB_URL)
     redis_url = os.environ.get(_REDIS_URL_ENV, _DEFAULT_REDIS_URL)
     task_topic = os.environ.get(_TOPIC_ENV, _DEFAULT_TASK_TOPIC)
@@ -49,16 +68,37 @@ async def _default_lifespan(app: FastAPI) -> AsyncIterator[None]:
     pool = await build_pool(PoolConfig(dsn=db_url, min_size=1, max_size=10))
     redis_client: Redis = Redis.from_url(redis_url, decode_responses=False)
     publisher = RedisStreamPublisher(redis_client)
+    outbox_repo = PgOutboxRepository(pool)
+    dispatcher = OutboxDispatcher(outbox_repo, publisher)
+    dispatcher_task = asyncio.create_task(
+        dispatcher.run_forever(),
+        name="outbox-dispatcher",
+    )
+    dispatcher_task.add_done_callback(_log_dispatcher_done)
 
     app.state.db_pool = pool
     app.state.redis = redis_client
     app.state.publisher = publisher
     app.state.task_topic = task_topic
+    app.state.outbox_repo = outbox_repo
+    app.state.dispatcher = dispatcher
+    app.state.dispatcher_task = dispatcher_task
 
     try:
         yield
     finally:
         logger.info("api.shutdown")
+        await dispatcher.stop()
+        try:
+            await asyncio.wait_for(
+                dispatcher_task,
+                timeout=_DISPATCHER_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning("outbox.dispatcher_shutdown_timeout, cancelling")
+            dispatcher_task.cancel()
+            with contextlib.suppress(BaseException):
+                await dispatcher_task
         await pool.close()
         await redis_client.aclose()
 
