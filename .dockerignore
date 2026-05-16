@@ -1,0 +1,48 @@
+# Keep the build context lean: copy only what the Dockerfile actually needs.
+# Pulling in .venv / .git / caches has historically caused image bloat plus
+# accidental secret exfiltration via copied .env files.
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Local environments and secrets — production secrets reach the container
+# through env vars, never through the image.
+.env
+.env.*
+!.env.example
+.venv
+venv
+env
+
+# Python build / cache artefacts
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.cache
+
+# Tests — they are exercised in CI before the image is built; shipping them
+# in production images adds attack surface and weight.
+tests
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Tooling & docs not needed at runtime
+docs
+CLAUDE.md
+.cunzhi-memory
+
+# Compose files (built outside the image)
+docker-compose*.yml
+Dockerfile*
+.dockerignore

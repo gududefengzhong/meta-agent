@@ -7,6 +7,7 @@
 
 from meta_agent.infra.persistence.audit_repo import PgAuditRepository
 from meta_agent.infra.persistence.checkpoint_repo import PgCheckpointRepository
+from meta_agent.infra.persistence.llm_usage_repo import PgLLMUsageRepository
 from meta_agent.infra.persistence.outbox_dispatcher import (
     DispatcherConfig,
     OutboxDispatcher,
@@ -22,6 +23,7 @@ __all__ = [
     "OutboxDispatcher",
     "PgAuditRepository",
     "PgCheckpointRepository",
+    "PgLLMUsageRepository",
     "PgOutboxRepository",
     "PgSessionRepository",
     "PgTaskRepository",

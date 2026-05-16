@@ -56,3 +56,6 @@ coverage.xml
 /tmp/
 /var/
 worktrees/
+
+# Agent tool local storage (ji___ memory backing store)
+.cunzhi-memory/

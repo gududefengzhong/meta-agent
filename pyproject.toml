@@ -12,11 +12,14 @@ authors = [{ name = "meta-agent contributors" }]
 dependencies = [
     "alembic>=1.18.4",
     "asyncpg>=0.31.0",
+    "fastapi>=0.136.1",
     "greenlet>=3.5.0",
+    "httpx>=0.28.1",
     "opentelemetry-api>=1.41.1",
     "opentelemetry-sdk>=1.41.1",
     "pydantic>=2.7",
     "redis>=7.4.0",
+    "uvicorn[standard]>=0.47.0",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +57,10 @@ ignore = [
     "RUF002", # allow Chinese full-width punctuation in docstrings
     "RUF003", # allow Chinese full-width punctuation in comments
 ]
+
+[tool.ruff.lint.flake8-bugbear]
+# fastapi.Depends() is a sentinel, not a side-effect call; same for Query/Body/...
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body", "fastapi.Header"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["N802", "N803"]

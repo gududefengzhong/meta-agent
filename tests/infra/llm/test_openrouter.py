@@ -1,0 +1,297 @@
+"""Unit tests for :class:`OpenRouterClient`.
+
+The adapter is exercised against an :class:`httpx.MockTransport` so the
+tests stay fast, deterministic, and never touch the network. A live
+integration test against OpenRouter lives in
+``tests/integration/test_openrouter_live.py`` and is skipped unless
+``OPENROUTER_API_KEY`` is set.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+import httpx
+import pytest
+
+from meta_agent.core.ports.llm import (
+    ChatMessage,
+    LLMAuthError,
+    LLMInvalidRequestError,
+    LLMRateLimitedError,
+    LLMRequest,
+    LLMTransientError,
+    MessageRole,
+)
+from meta_agent.infra.llm.config import OpenRouterConfig
+from meta_agent.infra.llm.openrouter import OpenRouterClient
+
+
+def _config(**overrides: object) -> OpenRouterConfig:
+    base = {
+        "api_key": "test-key",
+        "default_model": "deepseek/deepseek-chat",
+        "max_retries": 2,
+        "initial_backoff_seconds": 0.01,
+        "max_backoff_seconds": 0.05,
+    }
+    base.update(overrides)
+    return OpenRouterConfig(**base)  # type: ignore[arg-type]
+
+
+def _request() -> LLMRequest:
+    return LLMRequest(
+        messages=(ChatMessage(role=MessageRole.USER, content="hello"),),
+        temperature=0.2,
+        max_tokens=64,
+    )
+
+
+def _success_body(
+    *, model: str = "deepseek/deepseek-chat", content: str = "hi"
+) -> dict[str, object]:
+    return {
+        "id": "resp-1",
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 2,
+            "total_tokens": 7,
+        },
+    }
+
+
+def _client(
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    config: OpenRouterConfig | None = None,
+    sleeps: list[float] | None = None,
+) -> OpenRouterClient:
+    transport = httpx.MockTransport(handler)
+    captured: list[float] = sleeps if sleeps is not None else []
+
+    async def fake_sleep(delay: float) -> None:
+        captured.append(delay)
+
+    return OpenRouterClient(config or _config(), transport=transport, sleep=fake_sleep)
+
+
+async def test_complete_success_path_parses_response() -> None:
+    received: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        received.append(req)
+        return httpx.Response(200, json=_success_body(content="ok"))
+
+    client = _client(handler)
+    try:
+        response = await client.complete(_request())
+    finally:
+        await client.close()
+
+    assert response.content == "ok"
+    assert response.model == "deepseek/deepseek-chat"
+    assert response.finish_reason == "stop"
+    assert response.usage.prompt_tokens == 5
+    assert response.usage.total_tokens == 7
+    assert response.provider_response_id == "resp-1"
+
+    assert len(received) == 1
+    req = received[0]
+    assert req.url.path == "/api/v1/chat/completions"
+    assert req.headers["authorization"] == "Bearer test-key"
+    body = req.content.decode()
+    assert '"model":"deepseek/deepseek-chat"' in body
+    assert '"temperature":0.2' in body
+
+
+async def test_complete_retries_on_5xx_then_succeeds() -> None:
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": "upstream"})
+        return httpx.Response(200, json=_success_body())
+
+    client = _client(handler, sleeps=sleeps)
+    try:
+        response = await client.complete(_request())
+    finally:
+        await client.close()
+
+    assert calls["n"] == 2
+    assert response.content == "hi"
+    assert sleeps == [0.01]  # exponential backoff first step
+
+
+async def test_complete_429_uses_retry_after_then_succeeds() -> None:
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"error": "rate"}, headers={"retry-after": "0.03"})
+        return httpx.Response(200, json=_success_body())
+
+    client = _client(handler, sleeps=sleeps)
+    try:
+        await client.complete(_request())
+    finally:
+        await client.close()
+
+    assert calls["n"] == 2
+    assert sleeps == [0.03]
+
+
+async def test_complete_gives_up_after_max_retries_on_5xx() -> None:
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(500, json={"error": "boom"})
+
+    client = _client(handler, config=_config(max_retries=2))
+    try:
+        with pytest.raises(LLMTransientError):
+            await client.complete(_request())
+    finally:
+        await client.close()
+    assert calls["n"] == 3  # 1 initial + 2 retries
+
+
+async def test_complete_does_not_retry_client_errors() -> None:
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(400, json={"error": "bad request"})
+
+    client = _client(handler)
+    try:
+        with pytest.raises(LLMInvalidRequestError):
+            await client.complete(_request())
+    finally:
+        await client.close()
+    assert calls["n"] == 1
+
+
+async def test_complete_auth_error_is_not_retried() -> None:
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    client = _client(handler)
+    try:
+        with pytest.raises(LLMAuthError):
+            await client.complete(_request())
+    finally:
+        await client.close()
+    assert calls["n"] == 1
+
+
+async def test_complete_timeout_is_classified_transient_and_retried() -> None:
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise httpx.ConnectTimeout("simulated timeout", request=req)
+        return httpx.Response(200, json=_success_body())
+
+    client = _client(handler, config=_config(max_retries=3))
+    try:
+        await client.complete(_request())
+    finally:
+        await client.close()
+    assert calls["n"] == 3
+
+
+async def test_complete_persistent_timeout_raises_transient_error() -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("simulated", request=req)
+
+    client = _client(handler, config=_config(max_retries=1))
+    try:
+        with pytest.raises(LLMTransientError) as ei:
+            await client.complete(_request())
+    finally:
+        await client.close()
+    # Auth / RateLimited / InvalidRequest are NOT raised for transport faults.
+    assert not isinstance(ei.value, LLMRateLimitedError)
+
+
+async def test_complete_invalid_json_triggers_transient_retry() -> None:
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                200, content=b"not json", headers={"content-type": "application/json"}
+            )
+        return httpx.Response(200, json=_success_body())
+
+    client = _client(handler)
+    try:
+        response = await client.complete(_request())
+    finally:
+        await client.close()
+    assert calls["n"] == 2
+    assert response.content == "hi"
+
+
+async def test_request_model_override_takes_precedence_over_config_default() -> None:
+    captured: list[bytes] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(req.content)
+        return httpx.Response(200, json=_success_body(model="qwen/qwen3"))
+
+    client = _client(handler)
+    try:
+        request = LLMRequest(
+            messages=(ChatMessage(role=MessageRole.USER, content="x"),),
+            model="qwen/qwen3",
+        )
+        response = await client.complete(request)
+    finally:
+        await client.close()
+    assert response.model == "qwen/qwen3"
+    assert b'"model":"qwen/qwen3"' in captured[0]
+
+
+def test_config_from_env_requires_api_key() -> None:
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        OpenRouterConfig.from_env(env={}, required=True)
+
+
+def test_config_from_env_reads_overrides() -> None:
+    cfg = OpenRouterConfig.from_env(
+        env={
+            "OPENROUTER_API_KEY": "k",
+            "OPENROUTER_BASE_URL": "https://example.test/v1/",
+            "OPENROUTER_DEFAULT_MODEL": "qwen/qwen3",
+            "OPENROUTER_MAX_RETRIES": "5",
+        }
+    )
+    assert cfg.api_key == "k"
+    assert cfg.base_url == "https://example.test/v1"
+    assert cfg.default_model == "qwen/qwen3"
+    assert cfg.max_retries == 5
+
+
+def test_construct_rejects_empty_api_key() -> None:
+    with pytest.raises(ValueError, match="api_key"):
+        OpenRouterClient(_config(api_key=""))

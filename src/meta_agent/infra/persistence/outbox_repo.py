@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import asyncpg
+
 from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
 from meta_agent.core.ports.repository import OutboxRepository
 from meta_agent.infra.persistence._guard import check_tenant
@@ -79,21 +81,36 @@ class PgOutboxRepository(OutboxRepository):
     async def enqueue(self, event: OutboxEvent) -> None:
         check_tenant(event.tenant_id)
         async with self._pool.acquire() as conn:
-            await conn.execute(
-                self._ENQUEUE,
-                event.event_id,
-                event.tenant_id,
-                event.trace_id,
-                event.aggregate_type,
-                event.aggregate_id,
-                event.topic,
-                event.payload,
-                event.idempotency_key,
-                event.status.value,
-                event.attempts,
-                event.created_at,
-                event.dispatched_at,
-            )
+            await self.enqueue_in_conn(event, conn)
+
+    async def enqueue_in_conn(
+        self,
+        event: OutboxEvent,
+        conn: asyncpg.Connection[Any],
+    ) -> None:
+        """Run :sql:`INSERT` on an externally-supplied connection.
+
+        Used by the submit path so the task row and the outbox row are
+        written in the same PG transaction; without this the producer
+        would be exposed to the dual-write inconsistency the outbox
+        pattern is meant to eliminate.
+        """
+        check_tenant(event.tenant_id)
+        await conn.execute(
+            self._ENQUEUE,
+            event.event_id,
+            event.tenant_id,
+            event.trace_id,
+            event.aggregate_type,
+            event.aggregate_id,
+            event.topic,
+            event.payload,
+            event.idempotency_key,
+            event.status.value,
+            event.attempts,
+            event.created_at,
+            event.dispatched_at,
+        )
 
     async def claim_pending(
         self,
