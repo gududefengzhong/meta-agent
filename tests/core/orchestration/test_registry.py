@@ -162,3 +162,14 @@ def test_is_materialized_flag() -> None:
     assert reg.is_materialized is False
     reg.materialize(fake_deps())
     assert reg.is_materialized is True
+
+
+def test_requires_workspace_flag_tracks_registration() -> None:
+    reg = GraphRegistry()
+    reg.register("g.plain", _graph_factory("g.plain"))
+    reg.register("g.ws", _graph_factory("g.ws"), requires_workspace=True)
+    assert reg.requires_workspace("g.plain") is False
+    assert reg.requires_workspace("g.ws") is True
+    # Unknown graph_id reads as not-required rather than raising; the
+    # worker uses this to gate provisioning, not to validate identity.
+    assert reg.requires_workspace("g.unknown") is False

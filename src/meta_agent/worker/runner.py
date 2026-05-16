@@ -14,6 +14,7 @@ from typing import Protocol
 from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.domain.checkpoint import TaskCheckpoint
 from meta_agent.core.domain.task import Task, TaskState
+from meta_agent.core.domain.workspace import Workspace
 from meta_agent.core.orchestration import Graph, GraphRegistry, TaskRunState
 from meta_agent.core.orchestration.result import (
     TaskError,
@@ -29,6 +30,7 @@ from meta_agent.core.ports.repository import (
     IllegalTaskTransitionError,
     TaskRepository,
 )
+from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 from meta_agent.infra.queue.redis_consumer import DeliveredMessage
 from meta_agent.infra.security.context import RequestContext, bind_context
 
@@ -75,6 +77,7 @@ class WorkerLoop:
         checkpoints: CheckpointRepository,
         audits: AuditRepository,
         registry: GraphRegistry,
+        workspaces: WorkspaceManager | None = None,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], str] | None = None,
         config: WorkerConfig | None = None,
@@ -84,6 +87,7 @@ class WorkerLoop:
         self._checkpoints = checkpoints
         self._audits = audits
         self._registry = registry
+        self._workspaces = workspaces
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._config = config or WorkerConfig()
@@ -155,7 +159,59 @@ class WorkerLoop:
             await self._stream.ack(msg.entry_id)
             return
         graph = self._registry.resolve(task.task_type, task.graph_id)
+        # Workspace lifecycle bookends the graph run: provision before
+        # the first step so node code can see ``_workspace_path`` in
+        # ``state.data``, cleanup in ``finally`` so a step failure or a
+        # terminal-write race still releases the worktree.
+        if self._registry.requires_workspace(graph.graph_id):
+            if self._workspaces is None:
+                await self._audit(
+                    ctx,
+                    "worker.workspace_unavailable",
+                    payload={"task_id": task.task_id, "graph_id": graph.graph_id},
+                )
+                await self._stream.ack(msg.entry_id)
+                return
+            try:
+                workspace = await self._provision_workspace(task, ctx, graph.graph_id)
+            except WorkspaceError as exc:
+                await self._audit(
+                    ctx,
+                    "workspace.provision_failed",
+                    payload={"task_id": task.task_id, "error": str(exc)},
+                )
+                # Surface to ``_handle`` so the message stays in the
+                # PEL and delivery_count increments on retry.
+                raise
+            try:
+                await self._run_graph(msg, ctx, task, graph, workspace=workspace)
+            finally:
+                await self._cleanup_workspace(workspace, ctx)
+        else:
+            await self._run_graph(msg, ctx, task, graph, workspace=None)
+
+    async def _run_graph(
+        self,
+        msg: DeliveredMessage,
+        ctx: RequestContext,
+        task: Task,
+        graph: Graph,
+        *,
+        workspace: Workspace | None,
+    ) -> None:
         state = await self._load_state(task, graph)
+        if workspace is not None:
+            # Re-seed each run; checkpoint snapshots from prior runs carry
+            # a stale path (workspaces are ephemeral, never reused).
+            state = state.model_copy(
+                update={
+                    "data": {
+                        **state.data,
+                        "_workspace_path": workspace.worktree_path,
+                        "_workspace_branch": workspace.branch,
+                    }
+                }
+            )
         # ``started_at`` for the result anchors on the first time this
         # task entered ``RUNNING``. For a redelivered message we trust
         # the task row's existing ``updated_at``; for the first run we
@@ -193,6 +249,57 @@ class WorkerLoop:
             payload={"sequence": state.sequence, "output": result.output},
         )
         await self._stream.ack(msg.entry_id)
+
+    async def _provision_workspace(
+        self, task: Task, ctx: RequestContext, graph_id: str
+    ) -> Workspace:
+        assert self._workspaces is not None  # caller guards
+        repo_url = task.input_payload.get("repo_url")
+        base_ref = task.input_payload.get("base_ref")
+        workspace = await self._workspaces.provision(
+            tenant_id=task.tenant_id,
+            task_id=task.task_id,
+            trace_id=task.trace_id,
+            branch=f"agent/{task.task_id}",
+            repo_url=repo_url if isinstance(repo_url, str) else None,
+            base_ref=base_ref if isinstance(base_ref, str) else None,
+        )
+        await self._audit(
+            ctx,
+            "workspace.provisioned",
+            payload={
+                "task_id": task.task_id,
+                "graph_id": graph_id,
+                "workspace_id": workspace.workspace_id,
+                "branch": workspace.branch,
+                "worktree_path": workspace.worktree_path,
+            },
+        )
+        return workspace
+
+    async def _cleanup_workspace(self, workspace: Workspace, ctx: RequestContext) -> None:
+        assert self._workspaces is not None  # caller guards
+        try:
+            await self._workspaces.cleanup(workspace)
+        except WorkspaceError as exc:
+            # Best-effort: a failed cleanup must not roll back the
+            # terminal state or block ack; surface it via audit and
+            # leave the janitor / operator to reconcile on disk.
+            await self._audit(
+                ctx,
+                "workspace.cleanup_failed",
+                payload={
+                    "workspace_id": workspace.workspace_id,
+                    "worktree_path": workspace.worktree_path,
+                    "error": str(exc),
+                },
+            )
+            return
+        await self._audit(
+            ctx,
+            "workspace.cleaned",
+            payload={"workspace_id": workspace.workspace_id},
+        )
 
     @staticmethod
     def _build_result(

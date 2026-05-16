@@ -15,6 +15,7 @@ from meta_agent.core.domain.checkpoint import TaskCheckpoint
 from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
 from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import Task, TaskState
+from meta_agent.core.domain.workspace import Workspace
 from meta_agent.core.orchestration.result import TaskResult
 from meta_agent.core.ports.repository import (
     TERMINAL_TASK_STATES,
@@ -25,6 +26,7 @@ from meta_agent.core.ports.repository import (
     SessionRepository,
     TaskRepository,
 )
+from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 from meta_agent.infra.queue.redis_consumer import DeliveredMessage
 
 
@@ -194,6 +196,61 @@ class FakeSessionRepo(SessionRepository):
         key = (tenant_id, session_id)
         if key in self.rows:
             self.rows[key] = self.rows[key].model_copy(update={"last_active_at": last_active_at})
+
+
+class FakeWorkspaceManager(WorkspaceManager):
+    """In-memory :class:`WorkspaceManager` for worker dispatch tests.
+
+    Tracks every provision / cleanup call and exposes hooks to force
+    failures on either side so the dispatcher's audit and retry
+    behaviour can be asserted without invoking ``git``.
+    """
+
+    def __init__(
+        self,
+        *,
+        fail_provision: bool = False,
+        fail_cleanup: bool = False,
+    ) -> None:
+        self.provisioned: list[Workspace] = []
+        self.cleaned: list[Workspace] = []
+        self._fail_provision = fail_provision
+        self._fail_cleanup = fail_cleanup
+        self._counter = 0
+
+    async def provision(
+        self,
+        *,
+        tenant_id: str,
+        task_id: str,
+        trace_id: str,
+        branch: str,
+        repo_url: str | None = None,
+        base_ref: str | None = None,
+    ) -> Workspace:
+        if self._fail_provision:
+            raise WorkspaceError("provision boom")
+        self._counter += 1
+        from datetime import UTC, datetime
+
+        ws = Workspace(
+            workspace_id=f"ws-{self._counter}",
+            tenant_id=tenant_id,
+            task_id=task_id,
+            trace_id=trace_id,
+            repo_url=repo_url,
+            base_ref=base_ref,
+            branch=branch,
+            worktree_path=f"/tmp/fake-ws/{self._counter}/feature",
+            created_at=datetime(2026, 5, 15, 12, 0, 0, tzinfo=UTC),
+        )
+        self.provisioned.append(ws)
+        return ws
+
+    async def cleanup(self, workspace: Workspace) -> None:
+        if self._fail_cleanup:
+            raise WorkspaceError("cleanup boom")
+        self.cleaned.append(workspace)
 
 
 class FakeStream:

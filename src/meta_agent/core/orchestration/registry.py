@@ -42,6 +42,7 @@ class GraphRegistry:
         self._factories: dict[str, GraphFactory] = {}
         self._defaults: dict[TaskType, str] = {}
         self._graphs: dict[str, Graph] = {}
+        self._requires_workspace: set[str] = set()
         self._materialized: bool = False
 
     def register(
@@ -50,10 +51,14 @@ class GraphRegistry:
         factory: GraphFactory,
         *,
         default_for: TaskType | None = None,
+        requires_workspace: bool = False,
     ) -> None:
         """Register a graph factory under ``graph_id``.
 
         Optionally pin this graph as the default for ``default_for``.
+        Set ``requires_workspace`` for graphs that mutate a working tree;
+        the worker provisions a per-task git worktree before running
+        them and tears it down after the terminal state is recorded.
         Raises :class:`GraphError` on duplicate ``graph_id``, conflicting
         defaults, or registration after materialization.
         """
@@ -65,6 +70,8 @@ class GraphRegistry:
         if graph_id in self._factories:
             raise GraphError(f"graph {graph_id!r} already registered")
         self._factories[graph_id] = factory
+        if requires_workspace:
+            self._requires_workspace.add(graph_id)
         if default_for is not None:
             if default_for in self._defaults:
                 raise GraphError(
@@ -117,6 +124,11 @@ class GraphRegistry:
 
     def default_graph_id(self, task_type: TaskType) -> str | None:
         return self._defaults.get(task_type)
+
+    def requires_workspace(self, graph_id: str) -> bool:
+        """Return whether ``graph_id`` needs a per-task git workspace."""
+
+        return graph_id in self._requires_workspace
 
     @property
     def is_materialized(self) -> bool:
