@@ -29,9 +29,9 @@
 
 ### L1 - 第一阶段核心产品价值
 这是最先要做实的用户价值层：
-1. Bug 修复（Bug Fix）
-2. 代码审查（Code Review）
-3. 自动 PR 生成与更新（Auto PR）
+1. Bug 修复（Bug Fix） — **首版已落地**：`builtin.bug_fix` graph（plan/patch/verify/finalize），在 per-task git worktree 内修改文件并提交，ruff 校验；端到端 docker-compose smoke 已验证（含 Scheme X 失败用例）。未做：push / PR、多语言 verifier、plan 循环与重试。
+2. 代码审查（Code Review） — 未实现
+3. 自动 PR 生成与更新（Auto PR） — 未实现
 
 原则：
 - 优先把单条主链路打通，而不是先铺大而全的平台外壳
