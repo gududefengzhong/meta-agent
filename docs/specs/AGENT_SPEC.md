@@ -30,8 +30,8 @@
 ### L1 - 第一阶段核心产品价值
 这是最先要做实的用户价值层：
 1. Bug 修复（Bug Fix） — **首版已落地**：`builtin.bug_fix` graph（plan/patch/verify/finalize），在 per-task git worktree 内修改文件并提交，ruff 校验；端到端 docker-compose smoke 已验证（含 Scheme X 失败用例）。未做：push / PR、多语言 verifier、plan 循环与重试。
-2. 代码审查（Code Review） — 未实现
-3. 自动 PR 生成与更新（Auto PR） — 未实现
+2. 代码审查（Code Review） — **首版已落地**：`builtin.code_review` graph（prepare/review/finalize），pure-LLM，无 workspace，Pydantic schema 严格校验输出（verdict / findings / confidence）；端到端 docker-compose smoke 已验证。未做：跨多文件 diff 切片、规则化静态检查与 LLM 结合、与 auto_pr 的链路串接。
+3. 自动 PR 生成与更新（Auto PR） — **v1 已落地（FakeGitProvider）**：`builtin.auto_pr` graph（prepare/publish/finalize），首个带外部写副作用的 L1 port（`GitProvider.open_or_reuse_pr`），idempotency key = `(tenant_id, repo_url, head_branch, head_commit_sha)`，四类错误分类。当前仅接 `FakeGitProvider`（in-memory），目的是把 graph + 任务契约 + result contract 先稳下来。Skip 规则在 Scheme X 下落 `succeeded`：`no_repo_url` / `no_commit_sha` / `verifier_failed`；端到端 docker-compose smoke 已验证 created / skipped 两条主路径。**未做**：真实 `GitHubGitProvider`（凭据管理、限流、重试），与上游 `bug_fix` 输出的自动串联（当前 smoke 用手工 payload），PR update / comment / close。
 
 原则：
 - 优先把单条主链路打通，而不是先铺大而全的平台外壳

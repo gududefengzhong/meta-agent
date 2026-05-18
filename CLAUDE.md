@@ -75,7 +75,13 @@
 
 ## 当前状态
 <!-- 架构 / 模式 / 已冻结决策在 ji___；新 session 先 ji___ 回忆 /Users/mudimu/mudi/web2/meta-agent -->
-- HEAD：`main` @ `52741ac`（Merge PR #2 from feat/phase-1）
-- 本轮：**P1 完整闭环已合入 main，下一里程碑待规划**
-- 已完成：P0 + P1（全部，含 P1-A → P1-H + C1 / C2 / C3 + Plan A: L0 git worktree 隔离）
-- L0 硬约束全部闭环；docker-compose 全栈端到端 smoke 通过
+- HEAD：`main` @ `538fa35`（Merge PR #5 from feat/auto-pr-graph）
+- 当前工作树：干净（无活动分支 / 无 open PR）
+- 本轮里程碑：**L1 三条产品价值首版全部落地**
+  - L0：全部硬约束闭环（多租户 / worktree / 计费 / 审计）
+  - L1.1 BUG_FIX：`builtin.bug_fix` 首版（plan/patch/verify/finalize，per-task git worktree + ruff，无 push/PR）
+  - L1.2 CODE_REVIEW：`builtin.code_review` 首版（pure-LLM，prepare/review/finalize，Pydantic 结构化输出）
+  - L1.3 AUTO_PR v1：`builtin.auto_pr` 首版（prepare/publish/finalize），首个带外部写副作用的 L1 port `GitProvider`，仅接 `FakeGitProvider`（in-memory）；Scheme X 覆盖 `no_repo_url` / `no_commit_sha` / `verifier_failed`
+- 测试：232 passed，docker-compose 全栈 smoke 通过（三条 L1 链路 happy + skip 路径均验证）
+- L2 / L3：未启动
+- 下一里程碑：**待规划**。明显候选包括 ①真实 `GitHubGitProvider`（凭据 / 限流 / 重试）②`bug_fix → auto_pr` 链路串联（取消手工 payload）③outbound webhooks / 状态回调 ④orchestration 强化（NodeResult 错误模型、plan 循环、多语言 verifier）。新 session 建议先做最小化探索再选。
