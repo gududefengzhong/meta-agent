@@ -26,11 +26,13 @@ from redis.asyncio import Redis
 from meta_agent.core.domain.task import TaskType
 from meta_agent.core.orchestration import GraphDeps, GraphRegistry
 from meta_agent.core.orchestration.graphs import (
+    AUTO_PR_GRAPH_ID,
     BUG_FIX_GRAPH_ID,
     CODE_REVIEW_GRAPH_ID,
     ECHO_GRAPH_ID,
     GIT_INSPECT_GRAPH_ID,
     SIMPLE_CHAT_GRAPH_ID,
+    build_auto_pr_graph,
     build_bug_fix_graph,
     build_code_review_graph,
     build_echo_graph,
@@ -38,6 +40,7 @@ from meta_agent.core.orchestration.graphs import (
     build_simple_chat_graph,
 )
 from meta_agent.core.ports.llm import LLMClient
+from meta_agent.infra.git_provider import FakeGitProvider
 from meta_agent.infra.llm import MeteredLLMClient, OpenRouterClient, OpenRouterConfig
 from meta_agent.infra.persistence import (
     PgAuditRepository,
@@ -144,6 +147,11 @@ def build_registry(deps: GraphDeps) -> GraphRegistry:
         build_code_review_graph,
         default_for=TaskType.CODE_REVIEW,
     )
+    registry.register(
+        AUTO_PR_GRAPH_ID,
+        build_auto_pr_graph,
+        default_for=TaskType.AUTO_PR,
+    )
     registry.materialize(deps)
     return registry
 
@@ -183,7 +191,11 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     usage_repo = PgLLMUsageRepository(pool)
     inner_llm = OpenRouterClient(settings.openrouter)
     metered_llm = build_metered_llm(inner_llm, usage_repo)
-    registry = build_registry(GraphDeps(llm=metered_llm))
+    # Wire the in-memory ``FakeGitProvider`` for v1; the real GitHub
+    # adapter (with credential management and rate limiting) is wired
+    # in a subsequent milestone without touching the orchestration core.
+    git_provider = FakeGitProvider()
+    registry = build_registry(GraphDeps(llm=metered_llm, git_provider=git_provider))
     # Ensure the workspace root exists; the local-git adapter requires
     # the directory to be present so it can ``mkdir`` per-task subdirs.
     settings.workspace_root.mkdir(parents=True, exist_ok=True)

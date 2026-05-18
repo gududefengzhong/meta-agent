@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from meta_agent.core.orchestration.graph import Graph
+from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
 
 
@@ -26,9 +27,14 @@ class GraphDeps:
     The container is frozen so that materialization is hash-stable and
     cannot be mutated underneath a graph mid-run. Graphs receive the
     same instance for the entire process lifetime.
+
+    Optional fields default to ``None`` so existing graphs that do not
+    need them stay constructable; graphs that *require* an optional
+    capability must guard for ``None`` and raise :class:`GraphError`.
     """
 
     llm: LLMClient
+    git_provider: GitProvider | None = None
 
 
 GraphFactory = Callable[[GraphDeps], Graph]

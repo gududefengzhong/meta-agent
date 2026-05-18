@@ -8,6 +8,15 @@ adapters live under ``meta_agent.infra``. Business code (orchestration,
 capabilities) only depends on ports, never on adapter modules.
 """
 
+from meta_agent.core.ports.git_provider import (
+    GitProvider,
+    GitProviderAuthError,
+    GitProviderError,
+    GitProviderInvalidRequestError,
+    GitProviderTransientError,
+    PullRequestAction,
+    PullRequestRef,
+)
 from meta_agent.core.ports.llm import (
     ChatMessage,
     FinishReason,
@@ -45,6 +54,11 @@ __all__ = [
     "ChatMessage",
     "CheckpointRepository",
     "FinishReason",
+    "GitProvider",
+    "GitProviderAuthError",
+    "GitProviderError",
+    "GitProviderInvalidRequestError",
+    "GitProviderTransientError",
     "LLMAuthError",
     "LLMClient",
     "LLMError",
@@ -61,6 +75,8 @@ __all__ = [
     "MessagePublisher",
     "MessageRole",
     "OutboxRepository",
+    "PullRequestAction",
+    "PullRequestRef",
     "QueueError",
     "RepositoryError",
     "SessionRepository",
