@@ -10,8 +10,14 @@
   / finalize over a per-task worktree.
 * ``builtin.code_review`` — second L1 business graph: structured LLM
   review of a caller-supplied unified diff, no workspace required.
+* ``builtin.auto_pr`` — third L1 business graph: publish a feature-branch
+  commit as a pull request via the :class:`GitProvider` port.
 """
 
+from meta_agent.core.orchestration.graphs.auto_pr import (
+    AUTO_PR_GRAPH_ID,
+    build_auto_pr_graph,
+)
 from meta_agent.core.orchestration.graphs.bug_fix import (
     BUG_FIX_GRAPH_ID,
     build_bug_fix_graph,
@@ -34,11 +40,13 @@ from meta_agent.core.orchestration.graphs.simple_chat import (
 )
 
 __all__ = [
+    "AUTO_PR_GRAPH_ID",
     "BUG_FIX_GRAPH_ID",
     "CODE_REVIEW_GRAPH_ID",
     "ECHO_GRAPH_ID",
     "GIT_INSPECT_GRAPH_ID",
     "SIMPLE_CHAT_GRAPH_ID",
+    "build_auto_pr_graph",
     "build_bug_fix_graph",
     "build_code_review_graph",
     "build_echo_graph",
