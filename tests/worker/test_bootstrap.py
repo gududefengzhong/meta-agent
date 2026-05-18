@@ -46,6 +46,34 @@ def test_settings_from_env_uses_documented_defaults() -> None:
     assert settings.block_ms == 1_000
     assert settings.openrouter.api_key == "sk-or-test-1234"
     assert settings.workspace_root == Path("/var/lib/meta-agent/workspaces")
+    # Default git provider must be ``fake`` so dev/smoke environments
+    # do not require a GitHub token to start the worker.
+    assert settings.git_provider == "fake"
+    assert settings.github is None
+
+
+def test_settings_from_env_selects_github_provider() -> None:
+    settings = WorkerSettings.from_env(
+        _env(
+            META_AGENT_GIT_PROVIDER="github",
+            META_AGENT_GITHUB_TOKEN="ghp_test_token",
+            META_AGENT_GITHUB_BASE_URL="https://ghe.example.com/api/v3",
+        )
+    )
+    assert settings.git_provider == "github"
+    assert settings.github is not None
+    assert settings.github.token == "ghp_test_token"
+    assert settings.github.base_url == "https://ghe.example.com/api/v3"
+
+
+def test_settings_from_env_github_requires_token() -> None:
+    with pytest.raises(ValueError, match="META_AGENT_GITHUB_TOKEN"):
+        WorkerSettings.from_env(_env(META_AGENT_GIT_PROVIDER="github"))
+
+
+def test_settings_from_env_rejects_unknown_git_provider() -> None:
+    with pytest.raises(ValueError, match="META_AGENT_GIT_PROVIDER"):
+        WorkerSettings.from_env(_env(META_AGENT_GIT_PROVIDER="gitlab"))
 
 
 def test_settings_from_env_overrides_each_knob() -> None:
