@@ -39,8 +39,13 @@ from meta_agent.core.orchestration.graphs import (
     build_git_inspect_graph,
     build_simple_chat_graph,
 )
+from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
-from meta_agent.infra.git_provider import FakeGitProvider
+from meta_agent.infra.git_provider import (
+    FakeGitProvider,
+    GitHubGitProvider,
+    GitHubGitProviderConfig,
+)
 from meta_agent.infra.llm import MeteredLLMClient, OpenRouterClient, OpenRouterConfig
 from meta_agent.infra.persistence import (
     PgAuditRepository,
@@ -64,6 +69,7 @@ _BLOCK_MS_ENV = "META_AGENT_WORKER_BLOCK_MS"
 _DB_MIN_SIZE_ENV = "META_AGENT_WORKER_DB_MIN_SIZE"
 _DB_MAX_SIZE_ENV = "META_AGENT_WORKER_DB_MAX_SIZE"
 _WORKSPACE_ROOT_ENV = "META_AGENT_WORKSPACE_ROOT"
+_GIT_PROVIDER_ENV = "META_AGENT_GIT_PROVIDER"
 
 _DEFAULT_DB_URL = "postgresql://meta_agent:dev-only@localhost:5432/meta_agent"
 _DEFAULT_REDIS_URL = "redis://localhost:6379/0"
@@ -71,6 +77,8 @@ _DEFAULT_TASK_TOPIC = "task.commands"
 _DEFAULT_GROUP = "workers"
 _DEFAULT_LLM_PROVIDER = "openrouter"
 _DEFAULT_WORKSPACE_ROOT = "/var/lib/meta-agent/workspaces"
+_DEFAULT_GIT_PROVIDER = "fake"
+_SUPPORTED_GIT_PROVIDERS = ("fake", "github")
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +92,8 @@ class WorkerSettings:
     consumer_name: str
     openrouter: OpenRouterConfig
     workspace_root: Path
+    git_provider: str
+    github: GitHubGitProviderConfig | None
     db_min_size: int = 1
     db_max_size: int = 5
     max_attempts: int = 3
@@ -92,6 +102,14 @@ class WorkerSettings:
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> WorkerSettings:
         source: dict[str, str] = dict(env if env is not None else os.environ)
+        git_provider = source.get(_GIT_PROVIDER_ENV, _DEFAULT_GIT_PROVIDER).strip().lower()
+        if git_provider not in _SUPPORTED_GIT_PROVIDERS:
+            raise ValueError(
+                f"{_GIT_PROVIDER_ENV}={git_provider!r} not in {_SUPPORTED_GIT_PROVIDERS}"
+            )
+        github_cfg = (
+            GitHubGitProviderConfig.from_env(source) if git_provider == "github" else None
+        )
         return cls(
             db_url=source.get(_DB_URL_ENV, _DEFAULT_DB_URL),
             redis_url=source.get(_REDIS_URL_ENV, _DEFAULT_REDIS_URL),
@@ -100,6 +118,8 @@ class WorkerSettings:
             consumer_name=source.get(_NAME_ENV, "") or socket.gethostname(),
             openrouter=OpenRouterConfig.from_env(source),
             workspace_root=Path(source.get(_WORKSPACE_ROOT_ENV, _DEFAULT_WORKSPACE_ROOT)),
+            git_provider=git_provider,
+            github=github_cfg,
             db_min_size=int(source.get(_DB_MIN_SIZE_ENV, "1")),
             db_max_size=int(source.get(_DB_MAX_SIZE_ENV, "5")),
             max_attempts=int(source.get(_MAX_ATTEMPTS_ENV, "3")),
@@ -162,12 +182,28 @@ def build_metered_llm(inner: LLMClient, recorder: PgLLMUsageRepository) -> Meter
     return MeteredLLMClient(inner, recorder, provider=_DEFAULT_LLM_PROVIDER)
 
 
+def build_git_provider(settings: WorkerSettings) -> GitProvider:
+    """Pick the git provider adapter based on ``settings.git_provider``.
+
+    Defaults to :class:`FakeGitProvider` so smoke / dev environments
+    do not require GitHub credentials. ``github`` requires the matching
+    :class:`GitHubGitProviderConfig` to have been built in ``from_env``.
+    """
+
+    if settings.git_provider == "github":
+        if settings.github is None:
+            raise ValueError("git_provider=github requires WorkerSettings.github")
+        return GitHubGitProvider(settings.github)
+    return FakeGitProvider()
+
+
 async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     """Open infra connections, wire :class:`WorkerLoop`, return runtime.
 
     Callers must invoke ``await runtime.aclose()`` exactly once during
-    shutdown to release the asyncpg pool, the Redis client and the
-    underlying ``httpx`` connection pool inside :class:`OpenRouterClient`.
+    shutdown to release the asyncpg pool, the Redis client, the
+    ``httpx`` pool inside :class:`OpenRouterClient`, and the
+    ``httpx`` pool inside the git provider adapter.
     """
 
     pool = await build_pool(
@@ -191,10 +227,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     usage_repo = PgLLMUsageRepository(pool)
     inner_llm = OpenRouterClient(settings.openrouter)
     metered_llm = build_metered_llm(inner_llm, usage_repo)
-    # Wire the in-memory ``FakeGitProvider`` for v1; the real GitHub
-    # adapter (with credential management and rate limiting) is wired
-    # in a subsequent milestone without touching the orchestration core.
-    git_provider = FakeGitProvider()
+    git_provider = build_git_provider(settings)
     registry = build_registry(GraphDeps(llm=metered_llm, git_provider=git_provider))
     # Ensure the workspace root exists; the local-git adapter requires
     # the directory to be present so it can ``mkdir`` per-task subdirs.
@@ -211,6 +244,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     )
 
     async def _aclose() -> None:
+        await git_provider.close()
         await metered_llm.close()
         await redis_client.aclose()
         await pool.close()
@@ -218,5 +252,10 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     return WorkerRuntime(
         worker=worker,
         aclose=_aclose,
-        resources={"pool": pool, "redis": redis_client, "llm": metered_llm},
+        resources={
+            "pool": pool,
+            "redis": redis_client,
+            "llm": metered_llm,
+            "git_provider": git_provider,
+        },
     )
