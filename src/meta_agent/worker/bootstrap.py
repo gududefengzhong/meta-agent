@@ -228,7 +228,14 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     inner_llm = OpenRouterClient(settings.openrouter)
     metered_llm = build_metered_llm(inner_llm, usage_repo)
     git_provider = build_git_provider(settings)
-    registry = build_registry(GraphDeps(llm=metered_llm, git_provider=git_provider))
+    # Reuse the GitHub adapter's token for ``git push`` so a single
+    # secret covers both PR creation (port-mediated) and pushing local
+    # commits (subprocess-mediated). With the fake provider there is no
+    # remote to push to, so ``None`` makes the push node skip cleanly.
+    push_token = settings.github.token if settings.github is not None else None
+    registry = build_registry(
+        GraphDeps(llm=metered_llm, git_provider=git_provider, git_push_token=push_token)
+    )
     # Ensure the workspace root exists; the local-git adapter requires
     # the directory to be present so it can ``mkdir`` per-task subdirs.
     settings.workspace_root.mkdir(parents=True, exist_ok=True)
