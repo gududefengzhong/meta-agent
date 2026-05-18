@@ -8,14 +8,17 @@ it is a build-time dependency, not an external service.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from meta_agent.core.orchestration import END, GraphError, TaskRunState
+from meta_agent.core.orchestration.graphs import bug_fix as bug_fix_mod
 from meta_agent.core.orchestration.graphs.bug_fix import (
     BUG_FIX_GRAPH_ID,
     build_bug_fix_graph,
@@ -108,6 +111,14 @@ async def test_happy_path_writes_patch_and_verifies(tiny_repo: Path) -> None:
     assert "buggy.py" in output["diff_stat"]
     assert output["verifier_passed"] is True
     assert output["verifier_output"] == ""
+    # Handoff fields populated even when no remote is configured; the
+    # push node skips cleanly and downstream graphs can observe why.
+    assert output["head_branch"] == "agent/task-1"
+    assert output["head_commit_sha"] == output["commit_sha"]
+    assert output["repo_url"] is None
+    assert output["base_ref"] is None
+    assert output["pushed"] is False
+    assert output["push_skip_reason"] == "no_repo_url"
     # File was actually rewritten on disk inside the worktree.
     assert (tiny_repo / "buggy.py").read_text() == patched
 
@@ -237,3 +248,201 @@ async def test_target_files_must_be_repo_relative(tiny_repo: Path) -> None:
 
     with pytest.raises(GraphError, match="must be repo-relative"):
         await graph.run(_state(tiny_repo, targets=["../escape.py"]))
+
+
+
+# ---------------------------------------------------------------------------
+# ``push`` node coverage: skip × 3, happy, failure.
+# ---------------------------------------------------------------------------
+
+
+_PATCHED_BODY = 'def greet(name: str) -> str:\n    return f"hi {name}!"\n'
+
+
+def _working_handler() -> Callable[[LLMRequest], LLMResponse]:
+    return _two_step_handler(
+        plan_text="add exclamation, annotate types",
+        patch_payload={"files": [{"path": "buggy.py", "content": _PATCHED_BODY}]},
+    )
+
+
+@pytest.fixture
+def tiny_repo_with_remote(tiny_repo: Path) -> tuple[Path, Path]:
+    """``tiny_repo`` augmented with a sibling bare repo wired as ``origin``.
+
+    Returning both paths lets tests assert on the remote independently
+    (e.g. that the feature branch reached it).
+    """
+
+    remote = tiny_repo.parent / "remote.git"
+    _run("git", "init", "--bare", "--initial-branch=main", str(remote))
+    _run("git", "-C", str(tiny_repo), "remote", "add", "origin", str(remote))
+    return tiny_repo, remote
+
+
+async def test_push_skips_when_no_repo_url(tiny_repo: Path) -> None:
+    client = FakeLLMClient(handler=_working_handler())
+    graph = build_bug_fix_graph(fake_deps(client, git_push_token="ghp_secret"))
+
+    final = await graph.run(_state(tiny_repo))
+
+    output = final.data["output"]
+    assert isinstance(output, dict)
+    assert output["pushed"] is False
+    assert output["push_skip_reason"] == "no_repo_url"
+    assert output["verifier_passed"] is True
+
+
+async def test_push_skips_when_verifier_failed(tiny_repo_with_remote: tuple[Path, Path]) -> None:
+    repo, remote = tiny_repo_with_remote
+    broken = "def greet(name):\n    return undef + name\n"
+    client = FakeLLMClient(
+        handler=_two_step_handler(
+            plan_text="break it",
+            patch_payload={"files": [{"path": "buggy.py", "content": broken}]},
+        )
+    )
+    graph = build_bug_fix_graph(fake_deps(client, git_push_token="ghp_secret"))
+
+    final = await graph.run(_state(repo, extra={"repo_url": str(remote), "base_ref": "main"}))
+
+    output = final.data["output"]
+    assert isinstance(output, dict)
+    assert output["verifier_passed"] is False
+    assert output["pushed"] is False
+    assert output["push_skip_reason"] == "verifier_failed"
+    # Remote must still have only the seed commit on ``main``.
+    branches = subprocess.run(
+        ["git", "-C", str(remote), "branch", "--list"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "agent/task-1" not in branches
+
+
+async def test_push_skips_when_no_token(tiny_repo_with_remote: tuple[Path, Path]) -> None:
+    repo, remote = tiny_repo_with_remote
+    client = FakeLLMClient(handler=_working_handler())
+    graph = build_bug_fix_graph(fake_deps(client, git_push_token=None))
+
+    final = await graph.run(_state(repo, extra={"repo_url": str(remote), "base_ref": "main"}))
+
+    output = final.data["output"]
+    assert isinstance(output, dict)
+    assert output["pushed"] is False
+    assert output["push_skip_reason"] == "no_token"
+    assert output["repo_url"] == str(remote)
+    assert output["base_ref"] == "main"
+
+
+async def test_push_invokes_git_with_token_only_in_env(
+    tiny_repo_with_remote: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The token value must never appear in subprocess argv."""
+
+    repo, remote = tiny_repo_with_remote
+    secret = "ghp_super_secret_should_not_leak"
+    captured: list[dict[str, Any]] = []
+    real_create = bug_fix_mod.asyncio.create_subprocess_exec
+
+    async def recorder(*args: Any, **kwargs: Any) -> Any:
+        if "push" in args:
+            captured.append({"argv": list(args), "env": dict(kwargs.get("env") or {})})
+        return await real_create(*args, **kwargs)
+
+    monkeypatch.setattr(bug_fix_mod.asyncio, "create_subprocess_exec", recorder)
+
+    client = FakeLLMClient(handler=_working_handler())
+    graph = build_bug_fix_graph(fake_deps(client, git_push_token=secret))
+
+    final = await graph.run(_state(repo, extra={"repo_url": str(remote), "base_ref": "main"}))
+
+    output = final.data["output"]
+    assert isinstance(output, dict)
+    assert output["pushed"] is True
+    assert output["push_skip_reason"] is None
+    assert len(captured) == 1
+    push_argv = captured[0]["argv"]
+    push_env = captured[0]["env"]
+    # The secret value must travel via the environment, never argv.
+    for token in push_argv:
+        assert secret not in str(token)
+    assert push_env.get("AGENT_GIT_PUSH_TOKEN") == secret
+    # The branch did reach the bare ``origin`` repo.
+    branches = subprocess.run(
+        ["git", "-C", str(remote), "branch", "--list"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "agent/task-1" in branches
+
+
+async def test_push_failure_raises_graph_error(
+    tiny_repo_with_remote: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-zero exit from ``git push`` surfaces as a graph error."""
+
+    repo, _remote = tiny_repo_with_remote
+    real_create = bug_fix_mod.asyncio.create_subprocess_exec
+
+    class _FailingProc:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"fatal: unable to access 'https://example/': not found\n"
+
+    async def patched(*args: Any, **kwargs: Any) -> Any:
+        if "push" in args:
+            return _FailingProc()
+        return await real_create(*args, **kwargs)
+
+    monkeypatch.setattr(bug_fix_mod.asyncio, "create_subprocess_exec", patched)
+
+    client = FakeLLMClient(handler=_working_handler())
+    graph = build_bug_fix_graph(fake_deps(client, git_push_token="ghp_secret"))
+
+    with pytest.raises(GraphError, match="git push failed"):
+        await graph.run(_state(repo, extra={"repo_url": "https://example/repo", "base_ref": "main"}))
+
+
+async def test_push_error_message_redacts_credentials_in_url(
+    tiny_repo_with_remote: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If git surfaces a URL with embedded credentials, they must be stripped."""
+
+    repo, _remote = tiny_repo_with_remote
+
+    class _FailingProc:
+        returncode = 128
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (
+                b"",
+                b"fatal: unable to access 'https://user:tok@example/repo/': boom\n",
+            )
+
+    real_create = asyncio.create_subprocess_exec
+
+    async def route(*args: Any, **kwargs: Any) -> Any:
+        if "push" in args:
+            return _FailingProc()
+        return await real_create(*args, **kwargs)
+
+    monkeypatch.setattr(bug_fix_mod.asyncio, "create_subprocess_exec", route)
+
+    client = FakeLLMClient(handler=_working_handler())
+    graph = build_bug_fix_graph(fake_deps(client, git_push_token="ghp_secret"))
+
+    with pytest.raises(GraphError) as exc_info:
+        await graph.run(
+            _state(repo, extra={"repo_url": "https://example/repo", "base_ref": "main"})
+        )
+
+    message = str(exc_info.value)
+    assert "user:tok" not in message
+    assert "<redacted>" in message

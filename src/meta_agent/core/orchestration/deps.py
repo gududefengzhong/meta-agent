@@ -35,6 +35,16 @@ class GraphDeps:
 
     llm: LLMClient
     git_provider: GitProvider | None = None
+    git_push_token: str | None = None
+    """Bearer token for ``git push`` over HTTPS.
+
+    Injected at boot from the same secret as the GitHub adapter token
+    so a single credential covers both PR creation (port-mediated) and
+    pushing local commits (subprocess-mediated). ``None`` disables push:
+    bug-fix-style graphs fall back to a local-only commit and emit a
+    ``push_skip_reason`` in their output. The token MUST be passed to
+    ``git`` via the environment, never on the command line.
+    """
 
 
 GraphFactory = Callable[[GraphDeps], Graph]

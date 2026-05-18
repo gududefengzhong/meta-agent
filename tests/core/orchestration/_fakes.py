@@ -68,7 +68,14 @@ def make_response(
     )
 
 
-def fake_deps(client: LLMClient | None = None) -> GraphDeps:
+def fake_deps(
+    client: LLMClient | None = None,
+    *,
+    git_push_token: str | None = None,
+) -> GraphDeps:
     """Build a :class:`GraphDeps` with an opinionated :class:`FakeLLMClient`."""
 
-    return GraphDeps(llm=client if client is not None else FakeLLMClient())
+    return GraphDeps(
+        llm=client if client is not None else FakeLLMClient(),
+        git_push_token=git_push_token,
+    )
