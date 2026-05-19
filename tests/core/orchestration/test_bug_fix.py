@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 
 from meta_agent.core.orchestration import END, GraphError, TaskRunState
-from meta_agent.core.orchestration.graphs import bug_fix as bug_fix_mod
 from meta_agent.core.orchestration.graphs.bug_fix import (
     BUG_FIX_GRAPH_ID,
     build_bug_fix_graph,
@@ -345,14 +344,14 @@ async def test_push_invokes_git_with_token_only_in_env(
     repo, remote = tiny_repo_with_remote
     secret = "ghp_super_secret_should_not_leak"
     captured: list[dict[str, Any]] = []
-    real_create = bug_fix_mod.asyncio.create_subprocess_exec
+    real_create = asyncio.create_subprocess_exec
 
     async def recorder(*args: Any, **kwargs: Any) -> Any:
         if "push" in args:
             captured.append({"argv": list(args), "env": dict(kwargs.get("env") or {})})
         return await real_create(*args, **kwargs)
 
-    monkeypatch.setattr(bug_fix_mod.asyncio, "create_subprocess_exec", recorder)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", recorder)
 
     client = FakeLLMClient(handler=_working_handler())
     graph = build_bug_fix_graph(fake_deps(client, git_push_token=secret))
@@ -387,7 +386,7 @@ async def test_push_failure_raises_graph_error(
     """A non-zero exit from ``git push`` surfaces as a graph error."""
 
     repo, _remote = tiny_repo_with_remote
-    real_create = bug_fix_mod.asyncio.create_subprocess_exec
+    real_create = asyncio.create_subprocess_exec
 
     class _FailingProc:
         returncode = 128
@@ -400,7 +399,7 @@ async def test_push_failure_raises_graph_error(
             return _FailingProc()
         return await real_create(*args, **kwargs)
 
-    monkeypatch.setattr(bug_fix_mod.asyncio, "create_subprocess_exec", patched)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", patched)
 
     client = FakeLLMClient(handler=_working_handler())
     graph = build_bug_fix_graph(fake_deps(client, git_push_token="ghp_secret"))
@@ -433,7 +432,7 @@ async def test_push_error_message_redacts_credentials_in_url(
             return _FailingProc()
         return await real_create(*args, **kwargs)
 
-    monkeypatch.setattr(bug_fix_mod.asyncio, "create_subprocess_exec", route)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", route)
 
     client = FakeLLMClient(handler=_working_handler())
     graph = build_bug_fix_graph(fake_deps(client, git_push_token="ghp_secret"))

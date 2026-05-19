@@ -24,7 +24,12 @@ from pathlib import Path
 from redis.asyncio import Redis
 
 from meta_agent.core.domain.task import TaskType
-from meta_agent.core.orchestration import GraphDeps, GraphRegistry
+from meta_agent.core.orchestration import (
+    GraphDeps,
+    GraphRegistry,
+    TaskChainRegistry,
+    bug_fix_to_auto_pr_policy,
+)
 from meta_agent.core.orchestration.graphs import (
     AUTO_PR_GRAPH_ID,
     BUG_FIX_GRAPH_ID,
@@ -51,7 +56,9 @@ from meta_agent.infra.persistence import (
     PgAuditRepository,
     PgCheckpointRepository,
     PgLLMUsageRepository,
+    PgOutboxRepository,
     PgTaskRepository,
+    PgTaskSubmitter,
     build_pool,
 )
 from meta_agent.infra.persistence.pool import PoolConfig
@@ -182,6 +189,21 @@ def build_metered_llm(inner: LLMClient, recorder: PgLLMUsageRepository) -> Meter
     return MeteredLLMClient(inner, recorder, provider=_DEFAULT_LLM_PROVIDER)
 
 
+def build_chain_registry() -> TaskChainRegistry:
+    """Register every built-in task-chain policy.
+
+    v1 ships a single edge: a successful ``BUG_FIX`` run that pushes
+    its commit triggers an ``AUTO_PR`` follow-up. The submitter and
+    runner only fire the chain when both halves of the hook are
+    wired, so leaving the registry empty (or omitting either side in
+    a unit-test bootstrap) cleanly disables chaining.
+    """
+
+    registry = TaskChainRegistry()
+    registry.register(TaskType.BUG_FIX, bug_fix_to_auto_pr_policy)
+    return registry
+
+
 def build_git_provider(settings: WorkerSettings) -> GitProvider:
     """Pick the git provider adapter based on ``settings.git_provider``.
 
@@ -224,6 +246,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     task_repo = PgTaskRepository(pool)
     checkpoint_repo = PgCheckpointRepository(pool)
     audit_repo = PgAuditRepository(pool)
+    outbox_repo = PgOutboxRepository(pool)
     usage_repo = PgLLMUsageRepository(pool)
     inner_llm = OpenRouterClient(settings.openrouter)
     metered_llm = build_metered_llm(inner_llm, usage_repo)
@@ -240,6 +263,8 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     # the directory to be present so it can ``mkdir`` per-task subdirs.
     settings.workspace_root.mkdir(parents=True, exist_ok=True)
     workspaces = LocalGitWorkspaceManager(LocalGitConfig(root_dir=settings.workspace_root))
+    submitter = PgTaskSubmitter(pool, task_repo, outbox_repo)
+    chain_registry = build_chain_registry()
     worker = WorkerLoop(
         stream=consumer,
         tasks=task_repo,
@@ -247,6 +272,8 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         audits=audit_repo,
         registry=registry,
         workspaces=workspaces,
+        submitter=submitter,
+        chain_registry=chain_registry,
         config=WorkerConfig(max_attempts=settings.max_attempts, block_ms=settings.block_ms),
     )
 

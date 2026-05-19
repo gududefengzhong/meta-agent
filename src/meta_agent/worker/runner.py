@@ -15,7 +15,12 @@ from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.domain.checkpoint import TaskCheckpoint
 from meta_agent.core.domain.task import Task, TaskState
 from meta_agent.core.domain.workspace import Workspace
-from meta_agent.core.orchestration import Graph, GraphRegistry, TaskRunState
+from meta_agent.core.orchestration import (
+    Graph,
+    GraphRegistry,
+    TaskChainRegistry,
+    TaskRunState,
+)
 from meta_agent.core.orchestration.result import (
     TaskError,
     TaskErrorCode,
@@ -30,6 +35,7 @@ from meta_agent.core.ports.repository import (
     IllegalTaskTransitionError,
     TaskRepository,
 )
+from meta_agent.core.ports.task_submitter import TaskSubmitter
 from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 from meta_agent.infra.queue.redis_consumer import DeliveredMessage
 from meta_agent.infra.security.context import RequestContext, bind_context
@@ -78,6 +84,8 @@ class WorkerLoop:
         audits: AuditRepository,
         registry: GraphRegistry,
         workspaces: WorkspaceManager | None = None,
+        submitter: TaskSubmitter | None = None,
+        chain_registry: TaskChainRegistry | None = None,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], str] | None = None,
         config: WorkerConfig | None = None,
@@ -88,6 +96,12 @@ class WorkerLoop:
         self._audits = audits
         self._registry = registry
         self._workspaces = workspaces
+        # Both halves of the chain hook must be wired for follow-up
+        # enqueue to fire. A missing submitter or empty registry
+        # silently disables chaining, which is what unit tests and
+        # smoke-only deployments depend on.
+        self._submitter = submitter
+        self._chain_registry = chain_registry
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._config = config or WorkerConfig()
@@ -248,7 +262,68 @@ class WorkerLoop:
             f"task.{terminal_state.value}",
             payload={"sequence": state.sequence, "output": result.output},
         )
+        # Chain hook lives between the terminal audit and the ack so a
+        # crash mid-chain results in a redelivery that re-enters this
+        # path: the parent ``complete()`` is a no-op (already terminal,
+        # caught above) and the follow-up insert is guarded by its
+        # idempotency key.
+        await self._maybe_enqueue_follow_up(ctx, task, result, terminal_state)
         await self._stream.ack(msg.entry_id)
+
+    async def _maybe_enqueue_follow_up(
+        self,
+        ctx: RequestContext,
+        parent: Task,
+        result: TaskResult,
+        terminal_state: TaskState,
+    ) -> None:
+        if self._submitter is None or self._chain_registry is None:
+            return
+        if terminal_state is not TaskState.SUCCEEDED:
+            return
+        spec = self._chain_registry.derive(parent, result)
+        if spec is None:
+            return
+        try:
+            child = await self._submitter.submit_follow_up(parent, spec)
+        except Exception as exc:
+            # Chain failures must never roll back the parent. The
+            # parent is already SUCCEEDED at this point; surfacing the
+            # error to the runner would trigger a redelivery that
+            # can't fix the chain anyway (the same code path would
+            # re-fire). Audit and move on; operators can recover by
+            # re-submitting the follow-up by hand.
+            await self._audit(
+                ctx,
+                "task.chain_failed",
+                payload={
+                    "parent_task_id": parent.task_id,
+                    "follow_up_type": spec.task_type.value,
+                    "error": str(exc),
+                },
+            )
+            return
+        if child is None:
+            await self._audit(
+                ctx,
+                "task.chain_skipped",
+                payload={
+                    "parent_task_id": parent.task_id,
+                    "follow_up_type": spec.task_type.value,
+                    "reason": "duplicate",
+                },
+            )
+            return
+        await self._audit(
+            ctx,
+            "task.chain_enqueued",
+            payload={
+                "parent_task_id": parent.task_id,
+                "child_task_id": child.task_id,
+                "follow_up_type": spec.task_type.value,
+                "idempotency_key": spec.idempotency_key,
+            },
+        )
 
     async def _provision_workspace(
         self, task: Task, ctx: RequestContext, graph_id: str

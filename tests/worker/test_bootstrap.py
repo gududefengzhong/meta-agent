@@ -22,6 +22,7 @@ from meta_agent.core.orchestration.graphs import (
 )
 from meta_agent.worker.bootstrap import (
     WorkerSettings,
+    build_chain_registry,
     build_registry,
 )
 from tests.core.orchestration._fakes import FakeLLMClient
@@ -122,3 +123,47 @@ def test_build_registry_registers_builtin_graphs_and_routes_defaults() -> None:
     assert registry.requires_workspace(GIT_INSPECT_GRAPH_ID) is True
     assert registry.requires_workspace(ECHO_GRAPH_ID) is False
     assert registry.requires_workspace(SIMPLE_CHAT_GRAPH_ID) is False
+
+
+def test_build_chain_registry_registers_bug_fix_to_auto_pr() -> None:
+    from datetime import UTC, datetime
+
+    from meta_agent.core.domain.task import Task, TaskState
+    from meta_agent.core.orchestration.result import TaskResult
+
+    registry = build_chain_registry()
+    now = datetime(2026, 5, 15, tzinfo=UTC)
+    parent = Task(
+        task_id="parent-1",
+        tenant_id="tenant-1",
+        principal_id="user-1",
+        trace_id="trace-1",
+        task_type=TaskType.BUG_FIX,
+        state=TaskState.SUCCEEDED,
+        input_payload={"issue_description": "fix x"},
+        created_at=now,
+        updated_at=now,
+    )
+    result = TaskResult(
+        task_id="parent-1",
+        tenant_id="tenant-1",
+        trace_id="trace-1",
+        graph_id="builtin.bug_fix",
+        status="succeeded",
+        output={
+            "repo_url": "https://example.com/repo.git",
+            "head_commit_sha": "deadbeef",
+            "head_branch": "agent/parent-1",
+            "base_ref": "main",
+            "pushed": True,
+            "verifier_passed": True,
+            "verifier_output": "",
+            "diff_stat": "",
+        },
+        node_sequence=4,
+        started_at=now,
+        finished_at=now,
+    )
+    spec = registry.derive(parent, result)
+    assert spec is not None and spec.task_type is TaskType.AUTO_PR
+
