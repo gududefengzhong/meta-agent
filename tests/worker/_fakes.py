@@ -8,7 +8,7 @@ which exercise the SQL and stream serialization paths separately.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.domain.checkpoint import TaskCheckpoint
@@ -26,6 +26,7 @@ from meta_agent.core.ports.repository import (
     SessionRepository,
     TaskRepository,
 )
+from meta_agent.core.ports.task_submitter import FollowUpSpec, TaskSubmitter
 from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 from meta_agent.infra.queue.redis_consumer import DeliveredMessage
 
@@ -268,3 +269,51 @@ class FakeStream:
 
     async def ack(self, entry_id: str) -> None:
         self.acked.append(entry_id)
+
+
+class FakeTaskSubmitter(TaskSubmitter):
+    """In-memory :class:`TaskSubmitter` for runner chain-hook tests.
+
+    Records every ``(parent, follow_up)`` pair and mints synthetic
+    child task ids. ``simulate_duplicate`` mirrors the SQL adapter's
+    ``UniqueViolationError`` path so callers can assert that the
+    runner audits ``chain_skipped`` without raising. ``raise_on_submit``
+    forces the failure branch.
+    """
+
+    def __init__(
+        self,
+        *,
+        simulate_duplicate: bool = False,
+        raise_on_submit: Exception | None = None,
+    ) -> None:
+        self.calls: list[tuple[Task, FollowUpSpec]] = []
+        self._simulate_duplicate = simulate_duplicate
+        self._raise = raise_on_submit
+        self._counter = 0
+
+    async def submit_follow_up(
+        self,
+        parent: Task,
+        follow_up: FollowUpSpec,
+    ) -> Task | None:
+        self.calls.append((parent, follow_up))
+        if self._raise is not None:
+            raise self._raise
+        if self._simulate_duplicate:
+            return None
+        self._counter += 1
+        now = datetime(2026, 5, 15, 12, 0, 0, tzinfo=UTC)
+        return Task(
+            task_id=f"child-{self._counter}",
+            tenant_id=parent.tenant_id,
+            session_id=parent.session_id,
+            principal_id=parent.principal_id,
+            trace_id=parent.trace_id,
+            idempotency_key=follow_up.idempotency_key,
+            task_type=follow_up.task_type,
+            state=TaskState.PENDING,
+            input_payload=dict(follow_up.input_payload),
+            created_at=now,
+            updated_at=now,
+        )

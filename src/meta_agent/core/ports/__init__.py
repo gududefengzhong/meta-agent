@@ -47,6 +47,7 @@ from meta_agent.core.ports.repository import (
     TaskRepository,
     TenantIsolationError,
 )
+from meta_agent.core.ports.task_submitter import FollowUpSpec, TaskSubmitter
 from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 
 __all__ = [
@@ -54,6 +55,7 @@ __all__ = [
     "ChatMessage",
     "CheckpointRepository",
     "FinishReason",
+    "FollowUpSpec",
     "GitProvider",
     "GitProviderAuthError",
     "GitProviderError",
@@ -81,6 +83,7 @@ __all__ = [
     "RepositoryError",
     "SessionRepository",
     "TaskRepository",
+    "TaskSubmitter",
     "TenantIsolationError",
     "WorkspaceError",
     "WorkspaceManager",

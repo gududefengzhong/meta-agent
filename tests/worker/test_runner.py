@@ -21,6 +21,7 @@ from meta_agent.core.orchestration import (
     GraphDeps,
     GraphRegistry,
     NodeResult,
+    TaskChainRegistry,
     TaskRunState,
 )
 from meta_agent.core.orchestration.graphs.echo import ECHO_GRAPH_ID, build_echo_graph
@@ -28,6 +29,7 @@ from meta_agent.core.orchestration.result import TaskErrorCode
 from meta_agent.core.orchestration.state import END
 from meta_agent.core.ports.message import MessageEnvelope
 from meta_agent.core.ports.repository import IllegalTaskTransitionError
+from meta_agent.core.ports.task_submitter import FollowUpSpec, TaskSubmitter
 from meta_agent.infra.queue.redis_consumer import DeliveredMessage
 from meta_agent.worker.runner import WorkerConfig, WorkerLoop
 from tests.core.orchestration._fakes import fake_deps
@@ -37,6 +39,7 @@ from ._fakes import (
     FakeCheckpointRepo,
     FakeStream,
     FakeTaskRepo,
+    FakeTaskSubmitter,
     FakeWorkspaceManager,
 )
 
@@ -124,6 +127,8 @@ def _build_loop(
     audits: FakeAuditRepo | None = None,
     stream: FakeStream | None = None,
     registry: GraphRegistry | None = None,
+    submitter: TaskSubmitter | None = None,
+    chain_registry: TaskChainRegistry | None = None,
     config: WorkerConfig | None = None,
 ) -> tuple[WorkerLoop, FakeTaskRepo, FakeCheckpointRepo, FakeAuditRepo, FakeStream]:
     tasks = tasks or FakeTaskRepo()
@@ -136,6 +141,8 @@ def _build_loop(
         checkpoints=checkpoints,
         audits=audits,
         registry=registry or _registry_with_echo(),
+        submitter=submitter,
+        chain_registry=chain_registry,
         clock=_fixed_clock(),
         id_factory=_id_factory(),
         config=config,
@@ -575,3 +582,120 @@ async def test_non_workspace_graph_skips_provision_and_cleanup() -> None:
     assert wm.cleaned == []
     task = await tasks.get(TENANT, "task-1")
     assert task is not None and task.state == TaskState.SUCCEEDED
+
+
+
+# --- chain hook: BUG_FIX → AUTO_PR-style follow-up enqueue ----------------
+
+
+def _spec_factory(parent_task_id: str) -> FollowUpSpec:
+    return FollowUpSpec(
+        task_type=TaskType.AUTO_PR,
+        input_payload={"_parent_task_id": parent_task_id, "repo_url": "x"},
+        idempotency_key=f"chain:{parent_task_id}:auto_pr",
+        topic="task.commands",
+    )
+
+
+def _chain_registry_always_fires() -> TaskChainRegistry:
+    """Bind a SYSTEM_ECHO parent to a deterministic follow-up spec.
+
+    Using SYSTEM_ECHO keeps the test free of workspace plumbing while
+    still exercising the runner's chain hook in its real shape.
+    """
+    registry = TaskChainRegistry()
+    registry.register(
+        TaskType.SYSTEM_ECHO,
+        lambda parent, _result: _spec_factory(parent.task_id),
+    )
+    return registry
+
+
+async def test_chain_hook_fires_after_success_and_audits_enqueued() -> None:
+    submitter = FakeTaskSubmitter()
+    loop, tasks, _ckpt, audits, stream = _build_loop(
+        submitter=submitter,
+        chain_registry=_chain_registry_always_fires(),
+    )
+    await tasks.upsert(_make_task())
+    stream.push([_delivered()])
+
+    await loop.run_once()
+
+    assert len(submitter.calls) == 1
+    parent, spec = submitter.calls[0]
+    assert parent.task_id == "task-1"
+    assert spec.idempotency_key == "chain:task-1:auto_pr"
+    actions = audits.actions()
+    assert "task.succeeded" in actions
+    assert "task.chain_enqueued" in actions
+    # ack still happens at the end of the run.
+    assert stream.acked == ["1-0"]
+
+
+async def test_chain_hook_skips_when_no_policy_registered() -> None:
+    submitter = FakeTaskSubmitter()
+    # Empty registry: ``derive`` returns None, no enqueue, no audit.
+    loop, tasks, _ckpt, audits, _stream = _build_loop(
+        submitter=submitter,
+        chain_registry=TaskChainRegistry(),
+    )
+    await tasks.upsert(_make_task())
+    _stream.push([_delivered()])
+
+    await loop.run_once()
+
+    assert submitter.calls == []
+    assert "task.chain_enqueued" not in audits.actions()
+
+
+async def test_chain_hook_audits_duplicate_when_submitter_returns_none() -> None:
+    submitter = FakeTaskSubmitter(simulate_duplicate=True)
+    loop, tasks, _ckpt, audits, _stream = _build_loop(
+        submitter=submitter,
+        chain_registry=_chain_registry_always_fires(),
+    )
+    await tasks.upsert(_make_task())
+    _stream.push([_delivered()])
+
+    await loop.run_once()
+
+    assert len(submitter.calls) == 1
+    actions = audits.actions()
+    assert "task.chain_skipped" in actions
+    assert "task.chain_enqueued" not in actions
+
+
+async def test_chain_hook_audits_failure_without_breaking_parent() -> None:
+    submitter = FakeTaskSubmitter(raise_on_submit=RuntimeError("db down"))
+    loop, tasks, _ckpt, audits, stream = _build_loop(
+        submitter=submitter,
+        chain_registry=_chain_registry_always_fires(),
+    )
+    await tasks.upsert(_make_task())
+    stream.push([_delivered()])
+
+    await loop.run_once()
+
+    # Parent task remains SUCCEEDED, message still acked: chain
+    # failures must never roll back a finished parent run.
+    task = await tasks.get(TENANT, "task-1")
+    assert task is not None and task.state == TaskState.SUCCEEDED
+    assert stream.acked == ["1-0"]
+    assert "task.chain_failed" in audits.actions()
+
+
+async def test_chain_hook_disabled_when_submitter_missing() -> None:
+    # ``chain_registry`` set but ``submitter`` is None: the hook is a
+    # no-op so default unit-test bootstraps don't accidentally chain.
+    loop, tasks, _ckpt, audits, _stream = _build_loop(
+        chain_registry=_chain_registry_always_fires(),
+    )
+    await tasks.upsert(_make_task())
+    _stream.push([_delivered()])
+
+    await loop.run_once()
+
+    actions = audits.actions()
+    assert "task.chain_enqueued" not in actions
+    assert "task.chain_skipped" not in actions
