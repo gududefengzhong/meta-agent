@@ -20,9 +20,13 @@ from meta_agent.core.orchestration.graphs import (
     GIT_INSPECT_GRAPH_ID,
     SIMPLE_CHAT_GRAPH_ID,
 )
+from meta_agent.infra.llm.rate_limited import RateLimitedLLMClient
+from meta_agent.infra.ratelimit.noop import NoopRateLimiter
 from meta_agent.worker.bootstrap import (
     WorkerSettings,
     build_chain_registry,
+    build_rate_limited_llm,
+    build_rate_limiter,
     build_registry,
 )
 from tests.core.orchestration._fakes import FakeLLMClient
@@ -166,3 +170,15 @@ def test_build_chain_registry_registers_bug_fix_to_auto_pr() -> None:
     )
     spec = registry.derive(parent, result)
     assert spec is not None and spec.task_type is TaskType.AUTO_PR
+
+
+def test_build_rate_limiter_defaults_to_noop() -> None:
+    limiter = build_rate_limiter()
+    assert isinstance(limiter, NoopRateLimiter)
+
+
+def test_build_rate_limited_llm_wraps_inner() -> None:
+    inner = FakeLLMClient()
+    limiter = NoopRateLimiter()
+    client = build_rate_limited_llm(inner, limiter)
+    assert isinstance(client, RateLimitedLLMClient)

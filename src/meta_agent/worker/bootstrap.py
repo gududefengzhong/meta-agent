@@ -4,7 +4,10 @@ Wires production adapters into a :class:`WorkerLoop`:
 
 * asyncpg pool + PG repositories (task / checkpoint / audit / llm_usage)
 * :class:`OpenRouterClient` wrapped in :class:`MeteredLLMClient` so every
-  LLM call is accounted for in ``llm_usage_logs``
+  LLM call is accounted for in ``llm_usage_logs``, then wrapped again
+  in :class:`RateLimitedLLMClient` so denied calls are intercepted
+  *before* metering. The default backend is :class:`NoopRateLimiter`
+  (zero behaviour change); env-driven backend selection lands later.
 * :class:`GraphRegistry` with built-in graphs registered and materialized
 * :class:`RedisStreamConsumer` exposing ``claim_batch`` / ``ack``
 
@@ -46,12 +49,18 @@ from meta_agent.core.orchestration.graphs import (
 )
 from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
+from meta_agent.core.ports.rate_limiter import RateLimiter
 from meta_agent.infra.git_provider import (
     FakeGitProvider,
     GitHubGitProvider,
     GitHubGitProviderConfig,
 )
-from meta_agent.infra.llm import MeteredLLMClient, OpenRouterClient, OpenRouterConfig
+from meta_agent.infra.llm import (
+    MeteredLLMClient,
+    OpenRouterClient,
+    OpenRouterConfig,
+    RateLimitedLLMClient,
+)
 from meta_agent.infra.persistence import (
     PgAuditRepository,
     PgCheckpointRepository,
@@ -63,6 +72,7 @@ from meta_agent.infra.persistence import (
 )
 from meta_agent.infra.persistence.pool import PoolConfig
 from meta_agent.infra.queue import RedisStreamConsumer
+from meta_agent.infra.ratelimit import NoopRateLimiter
 from meta_agent.infra.workspace import LocalGitConfig, LocalGitWorkspaceManager
 from meta_agent.worker.runner import WorkerConfig, WorkerLoop
 
@@ -187,6 +197,23 @@ def build_metered_llm(inner: LLMClient, recorder: PgLLMUsageRepository) -> Meter
     return MeteredLLMClient(inner, recorder, provider=_DEFAULT_LLM_PROVIDER)
 
 
+def build_rate_limiter() -> RateLimiter:
+    """Build the rate-limiter backend.
+
+    Defaults to :class:`NoopRateLimiter` so the current behaviour is
+    unchanged. Env-driven selection of a Redis-backed limiter ships in
+    a follow-up PR.
+    """
+
+    return NoopRateLimiter()
+
+
+def build_rate_limited_llm(inner: LLMClient, limiter: RateLimiter) -> RateLimitedLLMClient:
+    """Wrap a (typically metered) ``inner`` with the rate-limit decorator."""
+
+    return RateLimitedLLMClient(inner, limiter, provider=_DEFAULT_LLM_PROVIDER)
+
+
 def build_chain_registry() -> TaskChainRegistry:
     """Register every built-in task-chain policy.
 
@@ -248,6 +275,8 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     usage_repo = PgLLMUsageRepository(pool)
     inner_llm = OpenRouterClient(settings.openrouter)
     metered_llm = build_metered_llm(inner_llm, usage_repo)
+    rate_limiter = build_rate_limiter()
+    rate_limited_llm = build_rate_limited_llm(metered_llm, rate_limiter)
     git_provider = build_git_provider(settings)
     # Reuse the GitHub adapter's token for ``git push`` so a single
     # secret covers both PR creation (port-mediated) and pushing local
@@ -255,7 +284,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     # remote to push to, so ``None`` makes the push node skip cleanly.
     push_token = settings.github.token if settings.github is not None else None
     registry = build_registry(
-        GraphDeps(llm=metered_llm, git_provider=git_provider, git_push_token=push_token)
+        GraphDeps(llm=rate_limited_llm, git_provider=git_provider, git_push_token=push_token)
     )
     # Ensure the workspace root exists; the local-git adapter requires
     # the directory to be present so it can ``mkdir`` per-task subdirs.
@@ -277,7 +306,8 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
 
     async def _aclose() -> None:
         await git_provider.close()
-        await metered_llm.close()
+        await rate_limited_llm.close()
+        await rate_limiter.close()
         await redis_client.aclose()
         await pool.close()
 
@@ -287,7 +317,8 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         resources={
             "pool": pool,
             "redis": redis_client,
-            "llm": metered_llm,
+            "llm": rate_limited_llm,
+            "rate_limiter": rate_limiter,
             "git_provider": git_provider,
         },
     )
