@@ -65,9 +65,7 @@ def _parse_repo_url(repo_url: str) -> tuple[str, str]:
             owner, repo = m.group(1), m.group(2)
             if owner and repo:
                 return owner, repo
-    raise GitProviderInvalidRequestError(
-        f"unsupported repo_url shape: {repo_url!r}"
-    )
+    raise GitProviderInvalidRequestError(f"unsupported repo_url shape: {repo_url!r}")
 
 
 class GitHubGitProvider(GitProvider):
@@ -112,9 +110,7 @@ class GitHubGitProvider(GitProvider):
         body: str,
     ) -> PullRequestRef:
         owner, repo = _parse_repo_url(repo_url)
-        existing = await self._search_open_pr(
-            owner=owner, repo=repo, head_branch=head_branch
-        )
+        existing = await self._search_open_pr(owner=owner, repo=repo, head_branch=head_branch)
         if existing is not None:
             existing_sha = existing.get("head", {}).get("sha")
             if isinstance(existing_sha, str) and existing_sha == head_commit_sha:
@@ -160,9 +156,7 @@ class GitHubGitProvider(GitProvider):
         number = payload.get("number")
         url = payload.get("html_url")
         if not isinstance(number, int) or not isinstance(url, str) or not url:
-            raise GitProviderError(
-                "github response missing required PR identifier fields"
-            )
+            raise GitProviderError("github response missing required PR identifier fields")
         return PullRequestRef(
             provider=self.PROVIDER_NAME,
             pr_id=str(number),
@@ -237,13 +231,9 @@ class GitHubGitProvider(GitProvider):
         last_error: GitProviderError | None = None
         for attempt in range(attempts):
             try:
-                response = await self._client.request(
-                    method, path, params=params, json=json
-                )
+                response = await self._client.request(method, path, params=params, json=json)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
-                last_error = GitProviderTransientError(
-                    f"github transport: {type(exc).__name__}"
-                )
+                last_error = GitProviderTransientError(f"github transport: {type(exc).__name__}")
                 logger.warning(
                     "git_provider.github.transport_error",
                     extra={"attempt": attempt + 1, "error_type": type(exc).__name__},
@@ -254,9 +244,7 @@ class GitHubGitProvider(GitProvider):
             if 200 <= status < 300:
                 return response
             if status == 429 or 500 <= status < 600:
-                last_error = GitProviderTransientError(
-                    f"github transient status: {status}"
-                )
+                last_error = GitProviderTransientError(f"github transient status: {status}")
                 retry_after = self._read_retry_after(response) if status == 429 else None
                 await self._maybe_backoff(attempt, attempts, retry_after=retry_after)
                 continue
@@ -269,9 +257,7 @@ class GitHubGitProvider(GitProvider):
         if status in (401, 403):
             return GitProviderAuthError(f"github auth failed: {status}")
         if status in (400, 404, 422):
-            return GitProviderInvalidRequestError(
-                f"github rejected request: {status}"
-            )
+            return GitProviderInvalidRequestError(f"github rejected request: {status}")
         return GitProviderError(f"github unexpected status: {status}")
 
     @staticmethod

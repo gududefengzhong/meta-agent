@@ -52,9 +52,7 @@ class GitHubGitProviderConfig:
         source = env if env is not None else os.environ
         token = source.get("META_AGENT_GITHUB_TOKEN", "").strip()
         if required and not token:
-            raise ValueError(
-                "META_AGENT_GITHUB_TOKEN is required but not set in the environment"
-            )
+            raise ValueError("META_AGENT_GITHUB_TOKEN is required but not set in the environment")
         return cls(
             token=token,
             base_url=source.get("META_AGENT_GITHUB_BASE_URL", "https://api.github.com").rstrip("/"),

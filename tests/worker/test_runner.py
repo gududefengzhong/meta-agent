@@ -584,7 +584,6 @@ async def test_non_workspace_graph_skips_provision_and_cleanup() -> None:
     assert task is not None and task.state == TaskState.SUCCEEDED
 
 
-
 # --- chain hook: BUG_FIX → AUTO_PR-style follow-up enqueue ----------------
 
 

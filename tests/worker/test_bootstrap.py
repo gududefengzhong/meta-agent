@@ -166,4 +166,3 @@ def test_build_chain_registry_registers_bug_fix_to_auto_pr() -> None:
     )
     spec = registry.derive(parent, result)
     assert spec is not None and spec.task_type is TaskType.AUTO_PR
-
