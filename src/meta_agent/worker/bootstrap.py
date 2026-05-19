@@ -6,8 +6,9 @@ Wires production adapters into a :class:`WorkerLoop`:
 * :class:`OpenRouterClient` wrapped in :class:`MeteredLLMClient` so every
   LLM call is accounted for in ``llm_usage_logs``, then wrapped again
   in :class:`RateLimitedLLMClient` so denied calls are intercepted
-  *before* metering. The default backend is :class:`NoopRateLimiter`
-  (zero behaviour change); env-driven backend selection lands later.
+  *before* metering. The backend is selected by
+  ``META_AGENT_RATELIMIT_BACKEND`` env (``noop`` / ``memory`` / ``redis``);
+  default is ``noop`` so the wiring stays behaviour-compatible.
 * :class:`GraphRegistry` with built-in graphs registered and materialized
 * :class:`RedisStreamConsumer` exposing ``claim_batch`` / ``ack``
 
@@ -72,7 +73,11 @@ from meta_agent.infra.persistence import (
 )
 from meta_agent.infra.persistence.pool import PoolConfig
 from meta_agent.infra.queue import RedisStreamConsumer
-from meta_agent.infra.ratelimit import NoopRateLimiter
+from meta_agent.infra.ratelimit import (
+    NoopRateLimiter,
+    RateLimitConfig,
+    build_rate_limiter_from_config,
+)
 from meta_agent.infra.workspace import LocalGitConfig, LocalGitWorkspaceManager
 from meta_agent.worker.runner import WorkerConfig, WorkerLoop
 
@@ -198,14 +203,30 @@ def build_metered_llm(inner: LLMClient, recorder: PgLLMUsageRepository) -> Meter
 
 
 def build_rate_limiter() -> RateLimiter:
-    """Build the rate-limiter backend.
+    """Build the default rate-limiter backend (NoOp).
 
-    Defaults to :class:`NoopRateLimiter` so the current behaviour is
-    unchanged. Env-driven selection of a Redis-backed limiter ships in
-    a follow-up PR.
+    Used by unit tests and any caller that wants a zero-impact limiter.
+    Production wiring goes through :func:`build_rate_limiter_from_env`
+    so the backend can be switched via ``META_AGENT_RATELIMIT_BACKEND``.
     """
 
     return NoopRateLimiter()
+
+
+def build_rate_limiter_from_env(
+    env: dict[str, str] | None = None,
+    *,
+    redis_client: Redis | None = None,
+) -> RateLimiter:
+    """Pick the rate-limiter backend by ``META_AGENT_RATELIMIT_*`` env.
+
+    ``backend=redis`` requires ``redis_client`` to be passed in so the
+    limiter reuses the same connection pool as the message-queue
+    adapters; the env-driven selector itself never opens sockets.
+    """
+
+    config = RateLimitConfig.from_env(env)
+    return build_rate_limiter_from_config(config, redis_client=redis_client)
 
 
 def build_rate_limited_llm(inner: LLMClient, limiter: RateLimiter) -> RateLimitedLLMClient:
@@ -275,7 +296,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     usage_repo = PgLLMUsageRepository(pool)
     inner_llm = OpenRouterClient(settings.openrouter)
     metered_llm = build_metered_llm(inner_llm, usage_repo)
-    rate_limiter = build_rate_limiter()
+    rate_limiter = build_rate_limiter_from_env(redis_client=redis_client)
     rate_limited_llm = build_rate_limited_llm(metered_llm, rate_limiter)
     git_provider = build_git_provider(settings)
     # Reuse the GitHub adapter's token for ``git push`` so a single

@@ -21,12 +21,14 @@ from meta_agent.core.orchestration.graphs import (
     SIMPLE_CHAT_GRAPH_ID,
 )
 from meta_agent.infra.llm.rate_limited import RateLimitedLLMClient
+from meta_agent.infra.ratelimit.in_memory import InMemoryTokenBucketRateLimiter
 from meta_agent.infra.ratelimit.noop import NoopRateLimiter
 from meta_agent.worker.bootstrap import (
     WorkerSettings,
     build_chain_registry,
     build_rate_limited_llm,
     build_rate_limiter,
+    build_rate_limiter_from_env,
     build_registry,
 )
 from tests.core.orchestration._fakes import FakeLLMClient
@@ -175,6 +177,21 @@ def test_build_chain_registry_registers_bug_fix_to_auto_pr() -> None:
 def test_build_rate_limiter_defaults_to_noop() -> None:
     limiter = build_rate_limiter()
     assert isinstance(limiter, NoopRateLimiter)
+
+
+def test_build_rate_limiter_from_env_defaults_to_noop() -> None:
+    limiter = build_rate_limiter_from_env({})
+    assert isinstance(limiter, NoopRateLimiter)
+
+
+def test_build_rate_limiter_from_env_selects_memory_backend() -> None:
+    limiter = build_rate_limiter_from_env({"META_AGENT_RATELIMIT_BACKEND": "memory"})
+    assert isinstance(limiter, InMemoryTokenBucketRateLimiter)
+
+
+def test_build_rate_limiter_from_env_redis_requires_client() -> None:
+    with pytest.raises(ValueError, match="requires a Redis client"):
+        build_rate_limiter_from_env({"META_AGENT_RATELIMIT_BACKEND": "redis"})
 
 
 def test_build_rate_limited_llm_wraps_inner() -> None:
