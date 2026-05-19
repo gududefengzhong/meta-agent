@@ -114,9 +114,7 @@ class WorkerSettings:
             raise ValueError(
                 f"{_GIT_PROVIDER_ENV}={git_provider!r} not in {_SUPPORTED_GIT_PROVIDERS}"
             )
-        github_cfg = (
-            GitHubGitProviderConfig.from_env(source) if git_provider == "github" else None
-        )
+        github_cfg = GitHubGitProviderConfig.from_env(source) if git_provider == "github" else None
         return cls(
             db_url=source.get(_DB_URL_ENV, _DEFAULT_DB_URL),
             redis_url=source.get(_REDIS_URL_ENV, _DEFAULT_REDIS_URL),

@@ -87,6 +87,35 @@ def _two_step_handler(
     return handler
 
 
+def _scripted_handler(
+    *,
+    plan_texts: list[str],
+    patch_payloads: list[dict[str, object] | str],
+) -> Callable[[LLMRequest], LLMResponse]:
+    """Return a handler that replies with the i-th canned response per role.
+
+    Used by replan tests where the 1st patch must produce a *different*
+    body than the 2nd, so the loop's inputs and outputs stay distinct.
+    The handler clamps to the last entry once exhausted to avoid index
+    errors if a node calls more times than expected.
+    """
+
+    bodies = [p if isinstance(p, str) else json.dumps(p) for p in patch_payloads]
+    counters = {"plan": 0, "patch": 0}
+
+    def handler(request: LLMRequest) -> LLMResponse:
+        system = request.messages[0].content
+        if "code patcher" in system:
+            idx = min(counters["patch"], len(bodies) - 1)
+            counters["patch"] += 1
+            return make_response(content=bodies[idx])
+        idx = min(counters["plan"], len(plan_texts) - 1)
+        counters["plan"] += 1
+        return make_response(content=plan_texts[idx])
+
+    return handler
+
+
 async def test_happy_path_writes_patch_and_verifies(tiny_repo: Path) -> None:
     patched = 'def greet(name: str) -> str:\n    return f"hi {name}!"\n'
     client = FakeLLMClient(
@@ -118,6 +147,8 @@ async def test_happy_path_writes_patch_and_verifies(tiny_repo: Path) -> None:
     assert output["base_ref"] is None
     assert output["pushed"] is False
     assert output["push_skip_reason"] == "no_repo_url"
+    # First verify passed; no replan happened.
+    assert output["attempts"] == 1
     # File was actually rewritten on disk inside the worktree.
     assert (tiny_repo / "buggy.py").read_text() == patched
 
@@ -172,7 +203,13 @@ async def test_too_many_files_in_patch_is_rejected(tiny_repo: Path) -> None:
 
 
 async def test_empty_diff_marks_verifier_failed_but_task_succeeds(tiny_repo: Path) -> None:
-    """LLM returns the exact current content: nothing to commit; succeed with verifier_passed=False."""
+    """LLM returns the exact current content: nothing to commit; succeed with verifier_passed=False.
+
+    The empty-diff verifier failure triggers a replan, but a fixed
+    handler keeps returning the same content, so the second attempt
+    also produces an empty diff. The task still succeeds with
+    ``verifier_passed=False`` and ``attempts=2``.
+    """
 
     current = (tiny_repo / "buggy.py").read_text()
     client = FakeLLMClient(
@@ -193,17 +230,24 @@ async def test_empty_diff_marks_verifier_failed_but_task_succeeds(tiny_repo: Pat
     assert output["commit_sha"] is None
     assert output["verifier_passed"] is False
     assert "empty diff" in output["verifier_output"]
+    assert output["attempts"] == 2
 
 
 async def test_verifier_failure_reports_ruff_output_without_task_failure(
     tiny_repo: Path,
 ) -> None:
-    # Introduce a ruff violation: undefined name `undef` (F821).
-    broken = "def greet(name):\n    return undef + name\n"
+    # Both attempts introduce a ruff F821 violation, but with different
+    # symbol names so the 2nd patch is still a real diff vs the 1st
+    # commit and ruff is invoked on a non-empty change set both times.
+    broken_v1 = "def greet(name):\n    return undef + name\n"
+    broken_v2 = "def greet(name):\n    return other_undef + name\n"
     client = FakeLLMClient(
-        handler=_two_step_handler(
-            plan_text="break it",
-            patch_payload={"files": [{"path": "buggy.py", "content": broken}]},
+        handler=_scripted_handler(
+            plan_texts=["break it", "break it differently"],
+            patch_payloads=[
+                {"files": [{"path": "buggy.py", "content": broken_v1}]},
+                {"files": [{"path": "buggy.py", "content": broken_v2}]},
+            ],
         )
     )
     graph = build_bug_fix_graph(fake_deps(client))
@@ -218,6 +262,45 @@ async def test_verifier_failure_reports_ruff_output_without_task_failure(
     assert output["verifier_passed"] is False
     # ruff emits the rule code (F821) for undefined names.
     assert "F821" in output["verifier_output"]
+    # Replan happened: the 1st verifier failure routed back to plan.
+    assert output["attempts"] == 2
+
+
+async def test_replan_succeeds_after_first_verify_failure(tiny_repo: Path) -> None:
+    """1st patch fails ruff, replan + 2nd patch passes; feedback reaches LLM."""
+
+    broken = "def greet(name):\n    return undef + name\n"
+    fixed = 'def greet(name: str) -> str:\n    return f"hi {name}!"\n'
+    fake = FakeLLMClient(
+        handler=_scripted_handler(
+            plan_texts=["initial plan", "refined plan after feedback"],
+            patch_payloads=[
+                {"files": [{"path": "buggy.py", "content": broken}]},
+                {"files": [{"path": "buggy.py", "content": fixed}]},
+            ],
+        )
+    )
+    graph = build_bug_fix_graph(fake_deps(fake))
+
+    final = await graph.run(_state(tiny_repo))
+
+    assert final.finished is True
+    assert final.error is None
+    output = final.data["output"]
+    assert isinstance(output, dict)
+    assert output["verifier_passed"] is True
+    assert output["verifier_output"] == ""
+    assert output["attempts"] == 2
+    assert output["files_changed"] == ["buggy.py"]
+    # The 2nd plan call must carry verifier feedback from attempt 1.
+    plan_calls = [c for c in fake.calls if "code repair agent" in c.messages[0].content]
+    assert len(plan_calls) == 2
+    second_plan_user_msg = plan_calls[1].messages[1].content
+    assert "previous attempt failed verification" in second_plan_user_msg.lower()
+    assert "F821" in second_plan_user_msg
+    assert "initial plan" in second_plan_user_msg
+    # File on disk reflects the final, fixed content.
+    assert (tiny_repo / "buggy.py").read_text() == fixed
 
 
 async def test_missing_workspace_path_raises(tiny_repo: Path) -> None:
@@ -247,7 +330,6 @@ async def test_target_files_must_be_repo_relative(tiny_repo: Path) -> None:
 
     with pytest.raises(GraphError, match="must be repo-relative"):
         await graph.run(_state(tiny_repo, targets=["../escape.py"]))
-
 
 
 # ---------------------------------------------------------------------------
@@ -294,11 +376,18 @@ async def test_push_skips_when_no_repo_url(tiny_repo: Path) -> None:
 
 async def test_push_skips_when_verifier_failed(tiny_repo_with_remote: tuple[Path, Path]) -> None:
     repo, remote = tiny_repo_with_remote
-    broken = "def greet(name):\n    return undef + name\n"
+    # Two distinct broken patches so the 2nd commit is non-empty and
+    # ``push`` reaches the ``verifier_failed`` skip rather than the
+    # ``no_commit`` short-circuit.
+    broken_v1 = "def greet(name):\n    return undef + name\n"
+    broken_v2 = "def greet(name):\n    return other_undef + name\n"
     client = FakeLLMClient(
-        handler=_two_step_handler(
-            plan_text="break it",
-            patch_payload={"files": [{"path": "buggy.py", "content": broken}]},
+        handler=_scripted_handler(
+            plan_texts=["break it", "still broken"],
+            patch_payloads=[
+                {"files": [{"path": "buggy.py", "content": broken_v1}]},
+                {"files": [{"path": "buggy.py", "content": broken_v2}]},
+            ],
         )
     )
     graph = build_bug_fix_graph(fake_deps(client, git_push_token="ghp_secret"))
@@ -405,7 +494,9 @@ async def test_push_failure_raises_graph_error(
     graph = build_bug_fix_graph(fake_deps(client, git_push_token="ghp_secret"))
 
     with pytest.raises(GraphError, match="git push failed"):
-        await graph.run(_state(repo, extra={"repo_url": "https://example/repo", "base_ref": "main"}))
+        await graph.run(
+            _state(repo, extra={"repo_url": "https://example/repo", "base_ref": "main"})
+        )
 
 
 async def test_push_error_message_redacts_credentials_in_url(
