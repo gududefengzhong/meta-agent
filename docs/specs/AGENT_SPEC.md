@@ -265,6 +265,89 @@
 - 必须明确哪些接口给人用，哪些接口给宿主 Agent 或其他系统调用
 - 必须提供面向公司级推广的分布式部署方案说明，包括扩容方式、状态外置方式和故障恢复策略
 
+## 分阶段推进计划
+
+【目标】本节定义从当前 main 出发、达到 L0–L3 全部能力的执行节奏，作为后续每个里程碑选型的参考。每段以「目标 / 关键交付项 / 退出条件」三段式描述。
+
+L0–L3 描述的是能力**分层**，本节描述的是**落地顺序**，不替换上面的能力定义。遇到与 L0 约束冲突时仍以 L0 优先。
+
+### Phase α — 安全生产线 v0
+【目标】使现有 L1 主链路可在多租户、有限流 / 熔断 / 鉴权 / 预算控制的最小可用环境下被多调用方安全使用。
+
+关键交付项：
+- `RateLimiter` Port + Redis 令牌桶实现，先接入 OpenRouter（tenant + model 维度），后续扩 Git Provider（tenant + repo）与 Tool（tenant + tool）
+- `CircuitBreaker` Port + `pybreaker` + Redis 共享统计；先接 OpenRouter 与 Git Provider；命中后显式 fallback
+- 入口鉴权中间件：解析 `Authorization: Bearer <token>` → 构造 `RequestContext`；SSO / OIDC 仅留 Port，不实现
+- `Secrets` Port：env + 文件双实现；KMS / Vault 留 Port 占位
+- 任务级预算硬上限：基于 `llm_usage_logs` 当月聚合检查；超限拒绝并写 `audit.budget_exceeded`
+- 查询 API：`GET /v1/audits`、`GET /v1/usages`（含 tenant / 时间窗 / `group_by` 过滤）
+
+退出条件：
+- 上述 Port 与默认实现合入 main
+- OpenRouter 调用全链路被限流 + 熔断覆盖，且仍写入 `llm_usage_logs`
+- 多租户审计与成本可通过 API 查询，且至少 1 个集成测试覆盖
+
+### Phase β — Tool-use agent loop + 执行沙箱
+【目标】把 `bug_fix` 从一次性 patch 升级为 plan-act-observe agent loop，对齐主流编辑器型 code agent 基线；同时把工具执行隔离起来。
+
+关键交付项：
+- `LLMRequest` 增加 `tools: list[ToolSpec]`；OpenRouter adapter 透传
+- 工具层 Ports：`FileSystemTool`（read / list / grep）、`EditTool`（write / patch apply）、`ShellTool`（白名单 + 超时 + 输出截断）、`TestTool`（多语言 dispatch）
+- 通用 `shell_agent` graph：plan → tool_call → observe → loop，带 `max_steps` 与 per-task LLM 成本上限
+- 容器化 `WorkspaceManager`：Docker 实现；Firecracker / gVisor 等更强隔离方案留 Port
+- `bug_fix` v2 切换到 `shell_agent`，保留 replan 语义
+- 多语言 verifier：先加 TypeScript（tsc + vitest）
+
+退出条件：
+- `shell_agent` 跑通"读取 + 修改 + 验证"完整闭环
+- `bug_fix` v2 在 docker-compose smoke 跑通 Python 与 TypeScript 各一例
+- 工具调用 / 沙箱执行不绕过 α 阶段建立的限流、熔断与计费
+
+### Phase γ — 人机协同 + Checkpoint 恢复
+【目标】补 L2 的 Permission Modes 与真正的长程任务恢复能力。
+
+关键交付项：
+- `Task.permission_mode`：`auto` / `approve_before_push` / `approve_each_tool`
+- graph 内置 `human_gate` 节点；任务进入 `AWAITING_APPROVAL` 终态；API：`POST /v1/tasks/{id}/approve`、`POST /v1/tasks/{id}/abort`
+- worker 启动扫 `RUNNING` 任务，从 `task_checkpoints` 续跑 graph.run
+- SSE 状态流：`GET /v1/tasks/{id}/events`
+
+退出条件：
+- 人工 approve 与 abort 路径有集成测试覆盖
+- 进行中任务在 worker 异常中止 + 重启后能从最近 checkpoint 续跑
+
+### Phase δ — Benchmark + MCP Server
+【目标】建立质量回归基线，让产品被外部 host 调起。
+
+关键交付项：
+- SWE-bench Verified runner：作为新 `task_type`，每 instance 一个任务，跑 `bug_fix` v2；输出 pass@1 / 成本 / 延迟
+- 多模型 A/B：LLM port 增 Router 实现；usage 表按 model 聚合对比
+- 最小 MCP Server：暴露 submit_task / get_task / get_result / list_tasks 四个 Tool + audit / usage 视图 Resource；独立进程，复用 API 层 deps
+
+退出条件：
+- SWE-bench Verified 至少跑通 10 个 instance（不要求高 pass@1，要求流程通）
+- MCP Server 可被 Claude Code 等宿主接入并完成一次 submit → poll → result 闭环
+
+### Phase ε — 平台化交付 + Outbound webhooks（与 β/γ/δ 可并行）
+【目标】把产品从 dev compose 推到可被企业部署的形态；同时补完 `OutboxEvent` 底座的外发侧。
+
+关键交付项：
+- K8s 清单 + Helm chart（API ×N + Worker ×M + Outbox dispatcher singleton；Postgres / Redis 引用外部托管）
+- Prometheus metrics 接出 + Grafana 模板 + 关键 alert 规则
+- Sentry 错误上报
+- Outbound webhooks consumer：消费 `OutboxEvent` → HTTP POST + HMAC 签名 + 退避重试 + 死信
+- CLI：轻量 REST 客户端
+
+退出条件：
+- K8s 单集群可部署，API / Worker 多副本在滚动重启下不丢任务
+- Outbox → webhook 在故障注入下满足「最少一次 + 去重」
+
+### 节奏说明
+- 单段建议 2-3 周；单段内拆 3-5 个独立 PR
+- α 是其余阶段的安全底座，必须先落；β 与 ε 在 α 完成后可并行
+- 每段开始前先做最小化探索，确认范围与最小子集，再进入实现
+- 本节奏不替代 L0–L3 的优先级分层；冲突时以 L0 约束优先
+
 ## 当前状态标注要求
 凡涉及目录结构、命令入口、模块边界、部署清单，必须明确区分：
 - 当前已实现
