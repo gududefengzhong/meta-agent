@@ -17,6 +17,12 @@ Scope (P1.x first cut):
   NOT mark the task as failed; the task succeeds with a patch the
   caller can choose to discard. ``state.error`` fail-fast routing
   for business failures is deferred (see ``simple_chat`` docstring).
+* On a failed verify the graph routes back to ``plan`` once
+  (``_MAX_REPLAN_ATTEMPTS``) with the prior plan, diff summary and
+  verifier output fed back as context. The replan's new patch lands
+  as an additional commit on top of the failed one — no reset / squash
+  — so the worktree history transparently records both attempts.
+  ``output.attempts`` exposes whether a replan happened (``1`` or ``2``).
 * ``push`` is best-effort: it skips when the worktree was provisioned
   without a remote, when verification failed, or when no credentials
   were configured. PR creation lives in the separate ``AUTO_PR`` graph;
@@ -48,6 +54,10 @@ BUG_FIX_GRAPH_ID = "builtin.bug_fix"
 
 _MAX_FILES = 3
 _MAX_FILE_BYTES = 10 * 1024
+_MAX_REPLAN_ATTEMPTS = 1
+"""Maximum number of times ``verify`` may route back to ``plan``. A
+value of ``1`` means the graph runs at most two patch attempts before
+moving on to ``push`` (with whatever the final verifier said)."""
 _GIT_TIMEOUT_SECONDS = 30.0
 _RUFF_TIMEOUT_SECONDS = 60.0
 _GIT_PUSH_TIMEOUT_SECONDS = 120.0
@@ -133,7 +143,11 @@ async def _run_subprocess(
     )
 
 
-def _plan_messages(issue: str, files: dict[str, str]) -> tuple[ChatMessage, ...]:
+def _plan_messages(
+    issue: str,
+    files: dict[str, str],
+    prior_attempt: dict[str, str] | None = None,
+) -> tuple[ChatMessage, ...]:
     system = (
         "You are a code repair agent. Read the issue and the listed files, "
         "then write a concise plan (at most 6 lines) describing the minimal "
@@ -142,10 +156,42 @@ def _plan_messages(issue: str, files: dict[str, str]) -> tuple[ChatMessage, ...]
     parts: list[str] = [f"Issue:\n{issue}", "Current files:"]
     for path, content in files.items():
         parts.append(f"\n--- {path} ---\n{content}")
+    if prior_attempt is not None:
+        parts.append(
+            "\nThe previous attempt failed verification. Read the feedback "
+            "below and plan a different fix; do not repeat the same mistake."
+        )
+        parts.append(f"\nPrevious plan:\n{prior_attempt['plan']}")
+        parts.append(f"\nPrevious diff summary:\n{prior_attempt['diff_stat']}")
+        parts.append(f"\nVerifier output:\n{prior_attempt['verifier_output']}")
     return (
         ChatMessage(role=MessageRole.SYSTEM, content=system),
         ChatMessage(role=MessageRole.USER, content="\n".join(parts)),
     )
+
+
+def _replan_attempts(state: TaskRunState) -> int:
+    """Narrow ``state.data['_replan_attempts']`` to a non-negative int."""
+
+    raw = state.data.get("_replan_attempts", 0)
+    return raw if isinstance(raw, int) and raw >= 0 else 0
+
+
+def _route_after_verify(state: TaskRunState) -> str:
+    """Conditional edge out of ``verify``: pass → push, fail → replan / push.
+
+    The router is pure: it only reads the verifier report and the
+    replan counter. The counter itself is bumped inside ``plan`` on
+    entry, so this function is safe to call any number of times.
+    """
+
+    report = state.data.get("_verifier_report")
+    passed = isinstance(report, dict) and bool(report.get("passed"))
+    if passed:
+        return "push"
+    if _replan_attempts(state) >= _MAX_REPLAN_ATTEMPTS:
+        return "push"
+    return "plan"
 
 
 def _patch_messages(issue: str, plan: str, files: dict[str, str]) -> tuple[ChatMessage, ...]:
@@ -258,12 +304,7 @@ async def _git_push(workspace: Path, branch: str, *, token: str) -> None:
     config override so we do not have to write any state to disk.
     """
 
-    helper = (
-        '!f() { '
-        'echo username=x-access-token; '
-        f'echo "password=${_PUSH_TOKEN_ENV}"; '
-        '}; f'
-    )
+    helper = f'!f() {{ echo username=x-access-token; echo "password=${_PUSH_TOKEN_ENV}"; }}; f'
     args = [
         "git",
         "-C",
@@ -311,8 +352,34 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
         if not workspace.is_dir():
             raise GraphError(f"bug_fix: workspace {workspace!s} does not exist")
         snapshot = _read_snapshot(workspace, targets)
-        response = await llm.complete(LLMRequest(messages=_plan_messages(issue, snapshot)))
-        return NodeResult(data_update={"_plan": response.content})
+        # Detect a replan: a prior failed verifier report in the
+        # scratch space means the verify router sent us back. Bump the
+        # counter here (rather than in the router, which must stay
+        # pure) and feed the previous attempt's summary into the prompt.
+        prior_report = state.data.get("_verifier_report")
+        prior_patch = state.data.get("_patch")
+        prior_attempt: dict[str, str] | None = None
+        attempts_so_far = _replan_attempts(state)
+        if (
+            isinstance(prior_report, dict)
+            and not bool(prior_report.get("passed"))
+            and isinstance(prior_patch, dict)
+        ):
+            prior_attempt = {
+                "plan": str(state.data.get("_plan", "")),
+                "diff_stat": str(prior_patch.get("diff_stat") or ""),
+                "verifier_output": str(prior_report.get("output", "")),
+            }
+            attempts_so_far += 1
+        response = await llm.complete(
+            LLMRequest(messages=_plan_messages(issue, snapshot, prior_attempt))
+        )
+        return NodeResult(
+            data_update={
+                "_plan": response.content,
+                "_replan_attempts": attempts_so_far,
+            }
+        )
 
     async def patch(state: TaskRunState) -> NodeResult:
         issue = _required_str(state, "issue_description")
@@ -410,6 +477,7 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
         repo_url = state.data.get("repo_url")
         base_ref = state.data.get("base_ref")
         push_skip_reason = raw_push.get("skip_reason")
+        replan_count = _replan_attempts(state)
         return NodeResult(
             data_update={
                 "output": {
@@ -421,6 +489,11 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
                     "diff_stat": str(raw_patch.get("diff_stat") or ""),
                     "verifier_passed": bool(raw_report.get("passed")),
                     "verifier_output": str(raw_report.get("output", "")),
+                    # Number of patch attempts the graph made before
+                    # giving up or succeeding. ``1`` means the first
+                    # verify passed; ``2`` means the verify router
+                    # routed back to ``plan`` once.
+                    "attempts": replan_count + 1,
                     # Handoff fields consumed by ``builtin.auto_pr``:
                     # exporting them here means a follow-up AUTO_PR task
                     # can be enqueued with this exact output as its
@@ -446,7 +519,9 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
     g.set_entry("plan")
     g.add_edge("plan", "patch")
     g.add_edge("patch", "verify")
-    g.add_edge("verify", "push")
+    # ``verify`` is the only conditional edge: pass → push, fail →
+    # back to plan up to ``_MAX_REPLAN_ATTEMPTS`` times, then push.
+    g.add_conditional("verify", _route_after_verify)
     g.add_edge("push", "finalize")
     g.add_edge("finalize", END)
     g.compile()
