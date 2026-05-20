@@ -20,6 +20,7 @@ from meta_agent.core.orchestration.graphs import (
     GIT_INSPECT_GRAPH_ID,
     SIMPLE_CHAT_GRAPH_ID,
 )
+from meta_agent.infra.circuitbreaker.in_memory import InMemoryCircuitBreaker
 from meta_agent.infra.circuitbreaker.noop import NoopCircuitBreaker
 from meta_agent.infra.llm.circuit_breaking import CircuitBreakingLLMClient
 from meta_agent.infra.llm.rate_limited import RateLimitedLLMClient
@@ -29,6 +30,7 @@ from meta_agent.worker.bootstrap import (
     WorkerSettings,
     build_chain_registry,
     build_circuit_breaker,
+    build_circuit_breaker_from_env,
     build_circuit_breaking_llm,
     build_rate_limited_llm,
     build_rate_limiter,
@@ -208,6 +210,21 @@ def test_build_rate_limited_llm_wraps_inner() -> None:
 def test_build_circuit_breaker_defaults_to_noop() -> None:
     breaker = build_circuit_breaker()
     assert isinstance(breaker, NoopCircuitBreaker)
+
+
+def test_build_circuit_breaker_from_env_defaults_to_noop() -> None:
+    breaker = build_circuit_breaker_from_env({})
+    assert isinstance(breaker, NoopCircuitBreaker)
+
+
+def test_build_circuit_breaker_from_env_selects_memory_backend() -> None:
+    breaker = build_circuit_breaker_from_env({"META_AGENT_CIRCUITBREAKER_BACKEND": "memory"})
+    assert isinstance(breaker, InMemoryCircuitBreaker)
+
+
+def test_build_circuit_breaker_from_env_redis_requires_client() -> None:
+    with pytest.raises(ValueError, match="requires a Redis client"):
+        build_circuit_breaker_from_env({"META_AGENT_CIRCUITBREAKER_BACKEND": "redis"})
 
 
 def test_build_circuit_breaking_llm_wraps_inner() -> None:
