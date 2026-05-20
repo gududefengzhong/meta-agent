@@ -50,6 +50,7 @@ from meta_agent.core.orchestration.graphs import (
     build_git_inspect_graph,
     build_simple_chat_graph,
 )
+from meta_agent.core.ports.audit_sink import AuditSink
 from meta_agent.core.ports.circuit_breaker import CircuitBreaker
 from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
@@ -238,10 +239,24 @@ def build_rate_limiter_from_env(
     return build_rate_limiter_from_config(config, redis_client=redis_client)
 
 
-def build_rate_limited_llm(inner: LLMClient, limiter: RateLimiter) -> RateLimitedLLMClient:
-    """Wrap a (typically metered) ``inner`` with the rate-limit decorator."""
+def build_rate_limited_llm(
+    inner: LLMClient,
+    limiter: RateLimiter,
+    *,
+    audit_sink: AuditSink | None = None,
+) -> RateLimitedLLMClient:
+    """Wrap a (typically metered) ``inner`` with the rate-limit decorator.
 
-    return RateLimitedLLMClient(inner, limiter, provider=_DEFAULT_LLM_PROVIDER)
+    Passing ``audit_sink`` enables best-effort ``llm.rate_limited.denied``
+    audit emission; unit tests can omit it.
+    """
+
+    return RateLimitedLLMClient(
+        inner,
+        limiter,
+        provider=_DEFAULT_LLM_PROVIDER,
+        audit_sink=audit_sink,
+    )
 
 
 def build_circuit_breaker() -> CircuitBreaker:
@@ -274,11 +289,24 @@ def build_circuit_breaker_from_env(
 
 
 def build_circuit_breaking_llm(
-    inner: LLMClient, breaker: CircuitBreaker
+    inner: LLMClient,
+    breaker: CircuitBreaker,
+    *,
+    audit_sink: AuditSink | None = None,
 ) -> CircuitBreakingLLMClient:
-    """Wrap a raw provider ``inner`` with the circuit-breaker decorator."""
+    """Wrap a raw provider ``inner`` with the circuit-breaker decorator.
 
-    return CircuitBreakingLLMClient(inner, breaker, provider=_DEFAULT_LLM_PROVIDER)
+    Passing ``audit_sink`` enables best-effort
+    ``llm.circuit_breaker.open`` audit emission; unit tests can omit
+    it.
+    """
+
+    return CircuitBreakingLLMClient(
+        inner,
+        breaker,
+        provider=_DEFAULT_LLM_PROVIDER,
+        audit_sink=audit_sink,
+    )
 
 
 def build_chain_registry() -> TaskChainRegistry:
@@ -342,10 +370,10 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     usage_repo = PgLLMUsageRepository(pool)
     inner_llm = OpenRouterClient(settings.openrouter)
     breaker = build_circuit_breaker_from_env(redis_client=redis_client)
-    breaking_llm = build_circuit_breaking_llm(inner_llm, breaker)
+    breaking_llm = build_circuit_breaking_llm(inner_llm, breaker, audit_sink=audit_repo)
     metered_llm = build_metered_llm(breaking_llm, usage_repo)
     rate_limiter = build_rate_limiter_from_env(redis_client=redis_client)
-    rate_limited_llm = build_rate_limited_llm(metered_llm, rate_limiter)
+    rate_limited_llm = build_rate_limited_llm(metered_llm, rate_limiter, audit_sink=audit_repo)
     git_provider = build_git_provider(settings)
     # Reuse the GitHub adapter's token for ``git push`` so a single
     # secret covers both PR creation (port-mediated) and pushing local

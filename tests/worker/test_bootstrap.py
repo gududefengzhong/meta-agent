@@ -207,6 +207,19 @@ def test_build_rate_limited_llm_wraps_inner() -> None:
     assert isinstance(client, RateLimitedLLMClient)
 
 
+def test_build_rate_limited_llm_threads_audit_sink() -> None:
+    from meta_agent.core.domain.audit import AuditEvent
+    from meta_agent.core.ports.audit_sink import AuditSink
+
+    class _NullSink(AuditSink):
+        async def append(self, event: AuditEvent) -> None:
+            return None
+
+    sink = _NullSink()
+    client = build_rate_limited_llm(FakeLLMClient(), NoopRateLimiter(), audit_sink=sink)
+    assert client._audit_sink is sink
+
+
 def test_build_circuit_breaker_defaults_to_noop() -> None:
     breaker = build_circuit_breaker()
     assert isinstance(breaker, NoopCircuitBreaker)
@@ -232,3 +245,16 @@ def test_build_circuit_breaking_llm_wraps_inner() -> None:
     breaker = NoopCircuitBreaker()
     client = build_circuit_breaking_llm(inner, breaker)
     assert isinstance(client, CircuitBreakingLLMClient)
+
+
+def test_build_circuit_breaking_llm_threads_audit_sink() -> None:
+    from meta_agent.core.domain.audit import AuditEvent
+    from meta_agent.core.ports.audit_sink import AuditSink
+
+    class _NullSink(AuditSink):
+        async def append(self, event: AuditEvent) -> None:
+            return None
+
+    sink = _NullSink()
+    client = build_circuit_breaking_llm(FakeLLMClient(), NoopCircuitBreaker(), audit_sink=sink)
+    assert client._audit_sink is sink
