@@ -20,12 +20,16 @@ from meta_agent.core.orchestration.graphs import (
     GIT_INSPECT_GRAPH_ID,
     SIMPLE_CHAT_GRAPH_ID,
 )
+from meta_agent.infra.circuitbreaker.noop import NoopCircuitBreaker
+from meta_agent.infra.llm.circuit_breaking import CircuitBreakingLLMClient
 from meta_agent.infra.llm.rate_limited import RateLimitedLLMClient
 from meta_agent.infra.ratelimit.in_memory import InMemoryTokenBucketRateLimiter
 from meta_agent.infra.ratelimit.noop import NoopRateLimiter
 from meta_agent.worker.bootstrap import (
     WorkerSettings,
     build_chain_registry,
+    build_circuit_breaker,
+    build_circuit_breaking_llm,
     build_rate_limited_llm,
     build_rate_limiter,
     build_rate_limiter_from_env,
@@ -199,3 +203,15 @@ def test_build_rate_limited_llm_wraps_inner() -> None:
     limiter = NoopRateLimiter()
     client = build_rate_limited_llm(inner, limiter)
     assert isinstance(client, RateLimitedLLMClient)
+
+
+def test_build_circuit_breaker_defaults_to_noop() -> None:
+    breaker = build_circuit_breaker()
+    assert isinstance(breaker, NoopCircuitBreaker)
+
+
+def test_build_circuit_breaking_llm_wraps_inner() -> None:
+    inner = FakeLLMClient()
+    breaker = NoopCircuitBreaker()
+    client = build_circuit_breaking_llm(inner, breaker)
+    assert isinstance(client, CircuitBreakingLLMClient)

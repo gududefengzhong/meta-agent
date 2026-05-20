@@ -3,12 +3,13 @@
 Wires production adapters into a :class:`WorkerLoop`:
 
 * asyncpg pool + PG repositories (task / checkpoint / audit / llm_usage)
-* :class:`OpenRouterClient` wrapped in :class:`MeteredLLMClient` so every
-  LLM call is accounted for in ``llm_usage_logs``, then wrapped again
-  in :class:`RateLimitedLLMClient` so denied calls are intercepted
-  *before* metering. The backend is selected by
-  ``META_AGENT_RATELIMIT_BACKEND`` env (``noop`` / ``memory`` / ``redis``);
-  default is ``noop`` so the wiring stays behaviour-compatible.
+* :class:`OpenRouterClient` wrapped (innermost-out) in
+  :class:`CircuitBreakingLLMClient` (guards provider failures only),
+  :class:`MeteredLLMClient` (writes ``llm_usage_logs``), and
+  :class:`RateLimitedLLMClient` (intercepts denied calls *before*
+  metering). The rate-limiter backend is selected by
+  ``META_AGENT_RATELIMIT_BACKEND`` env; the breaker defaults to NoOp
+  (env-driven selection of a real breaker arrives in a follow-up PR).
 * :class:`GraphRegistry` with built-in graphs registered and materialized
 * :class:`RedisStreamConsumer` exposing ``claim_batch`` / ``ack``
 
@@ -48,15 +49,18 @@ from meta_agent.core.orchestration.graphs import (
     build_git_inspect_graph,
     build_simple_chat_graph,
 )
+from meta_agent.core.ports.circuit_breaker import CircuitBreaker
 from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
 from meta_agent.core.ports.rate_limiter import RateLimiter
+from meta_agent.infra.circuitbreaker import NoopCircuitBreaker
 from meta_agent.infra.git_provider import (
     FakeGitProvider,
     GitHubGitProvider,
     GitHubGitProviderConfig,
 )
 from meta_agent.infra.llm import (
+    CircuitBreakingLLMClient,
     MeteredLLMClient,
     OpenRouterClient,
     OpenRouterConfig,
@@ -235,6 +239,25 @@ def build_rate_limited_llm(inner: LLMClient, limiter: RateLimiter) -> RateLimite
     return RateLimitedLLMClient(inner, limiter, provider=_DEFAULT_LLM_PROVIDER)
 
 
+def build_circuit_breaker() -> CircuitBreaker:
+    """Build the default LLM-provider circuit breaker (NoOp).
+
+    Defaults to :class:`NoopCircuitBreaker` so the current behaviour is
+    unchanged. Env-driven selection of a real breaker (in-memory or
+    Redis-shared) ships in a follow-up PR.
+    """
+
+    return NoopCircuitBreaker()
+
+
+def build_circuit_breaking_llm(
+    inner: LLMClient, breaker: CircuitBreaker
+) -> CircuitBreakingLLMClient:
+    """Wrap a raw provider ``inner`` with the circuit-breaker decorator."""
+
+    return CircuitBreakingLLMClient(inner, breaker, provider=_DEFAULT_LLM_PROVIDER)
+
+
 def build_chain_registry() -> TaskChainRegistry:
     """Register every built-in task-chain policy.
 
@@ -295,7 +318,9 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     outbox_repo = PgOutboxRepository(pool)
     usage_repo = PgLLMUsageRepository(pool)
     inner_llm = OpenRouterClient(settings.openrouter)
-    metered_llm = build_metered_llm(inner_llm, usage_repo)
+    breaker = build_circuit_breaker()
+    breaking_llm = build_circuit_breaking_llm(inner_llm, breaker)
+    metered_llm = build_metered_llm(breaking_llm, usage_repo)
     rate_limiter = build_rate_limiter_from_env(redis_client=redis_client)
     rate_limited_llm = build_rate_limited_llm(metered_llm, rate_limiter)
     git_provider = build_git_provider(settings)
@@ -340,6 +365,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
             "redis": redis_client,
             "llm": rate_limited_llm,
             "rate_limiter": rate_limiter,
+            "circuit_breaker": breaker,
             "git_provider": git_provider,
         },
     )
