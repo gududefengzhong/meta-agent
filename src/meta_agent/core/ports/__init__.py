@@ -46,7 +46,12 @@ from meta_agent.core.ports.llm import (
     LLMUsage,
     MessageRole,
 )
-from meta_agent.core.ports.llm_usage import LLMUsageRepository
+from meta_agent.core.ports.llm_usage import (
+    LLMUsageFilter,
+    LLMUsageRepository,
+    UsageAggregate,
+    UsageGroupBy,
+)
 from meta_agent.core.ports.message import MessageEnvelope, MessageHandler
 from meta_agent.core.ports.queue import (
     MessageConsumer,
@@ -59,6 +64,7 @@ from meta_agent.core.ports.rate_limiter import (
     RateLimiterBackendError,
 )
 from meta_agent.core.ports.repository import (
+    AuditFilter,
     AuditRepository,
     CheckpointRepository,
     OutboxRepository,
@@ -82,6 +88,7 @@ __all__ = [
     "KNOWN_SECRET_KEYS",
     "SECRET_KEY_GITHUB_TOKEN",
     "SECRET_KEY_OPENROUTER_API_KEY",
+    "AuditFilter",
     "AuditRepository",
     "AuditSink",
     "AuthBackendError",
@@ -112,6 +119,7 @@ __all__ = [
     "LLMResponse",
     "LLMTransientError",
     "LLMUsage",
+    "LLMUsageFilter",
     "LLMUsageRepository",
     "MessageConsumer",
     "MessageEnvelope",
@@ -135,6 +143,8 @@ __all__ = [
     "TaskSubmitter",
     "TenantIsolationError",
     "TokenValidator",
+    "UsageAggregate",
+    "UsageGroupBy",
     "WorkspaceError",
     "WorkspaceManager",
 ]

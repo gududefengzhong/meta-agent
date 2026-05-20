@@ -10,6 +10,7 @@ raise :class:`TenantIsolationError` on mismatch.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
 
 from meta_agent.core.domain.audit import AuditEvent
@@ -20,6 +21,23 @@ from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import Task, TaskState
 from meta_agent.core.orchestration.result import TaskResult
 from meta_agent.core.ports.audit_sink import AuditSink
+
+
+@dataclass(frozen=True, slots=True)
+class AuditFilter:
+    """Filter / pagination parameters for :meth:`AuditRepository.list_filtered`.
+
+    ``before`` is the exclusive keyset cursor: ``(occurred_at, event_id)``
+    of the last row of the previous page. The next page starts strictly
+    before this tuple in DESC order, breaking ties on ``event_id``.
+    """
+
+    since: datetime
+    until: datetime
+    action: str | None = None
+    task_id: str | None = None
+    before: tuple[datetime, str] | None = None
+    limit: int = 100
 
 
 class RepositoryError(AgentError):
@@ -192,6 +210,21 @@ class AuditRepository(AuditSink):
         tenant_id: str,
         limit: int = 100,
     ) -> list[AuditEvent]: ...
+
+    @abstractmethod
+    async def list_filtered(
+        self,
+        tenant_id: str,
+        filt: AuditFilter,
+    ) -> list[AuditEvent]:
+        """Return up to ``filt.limit`` events matching ``filt``.
+
+        Ordering is by ``occurred_at`` DESC, breaking ties on
+        ``event_id`` DESC so callers can keyset-paginate using the
+        last row's ``(occurred_at, event_id)`` tuple via
+        :attr:`AuditFilter.before`. The window is the half-open
+        interval ``[filt.since, filt.until)``.
+        """
 
 
 class CheckpointRepository(ABC):

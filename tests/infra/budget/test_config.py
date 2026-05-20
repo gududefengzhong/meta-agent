@@ -8,7 +8,12 @@ import pytest
 
 from meta_agent.core.domain.llm_usage import LLMUsageRecord
 from meta_agent.core.ports.budget import BudgetUsage
-from meta_agent.core.ports.llm_usage import LLMUsageRepository
+from meta_agent.core.ports.llm_usage import (
+    LLMUsageFilter,
+    LLMUsageRepository,
+    UsageAggregate,
+    UsageGroupBy,
+)
 from meta_agent.infra.budget.config import (
     BudgetConfig,
     build_budget_enforcer_from_config,
@@ -28,6 +33,22 @@ class _StubUsageRepo(LLMUsageRepository):
 
     async def aggregate_since(self, tenant_id: str, since: datetime) -> BudgetUsage:
         return BudgetUsage(tokens_used=0, cost_usd_micros_used=0)
+
+    async def list_filtered(
+        self,
+        tenant_id: str,
+        filt: LLMUsageFilter,
+    ) -> list[LLMUsageRecord]:
+        raise AssertionError
+
+    async def aggregate_grouped(
+        self,
+        tenant_id: str,
+        since: datetime,
+        until: datetime,
+        group_by: UsageGroupBy,
+    ) -> list[UsageAggregate]:
+        raise AssertionError
 
 
 def test_defaults_are_noop_with_no_cap() -> None:
