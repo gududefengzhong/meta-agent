@@ -99,6 +99,7 @@ from meta_agent.infra.ratelimit import (
     RateLimitConfig,
     build_rate_limiter_from_config,
 )
+from meta_agent.infra.secrets import build_secrets_from_env, resolve_secret_env
 from meta_agent.infra.workspace import LocalGitConfig, LocalGitWorkspaceManager
 from meta_agent.worker.runner import WorkerConfig, WorkerLoop
 
@@ -144,6 +145,13 @@ class WorkerSettings:
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> WorkerSettings:
+        """Read settings from an env-style mapping.
+
+        Pure / synchronous so unit tests can call without an event loop.
+        Production callers should go through
+        :func:`build_worker_settings_from_env` instead so the configured
+        :class:`Secrets` backend gets a chance to fold credentials in.
+        """
         source: dict[str, str] = dict(env if env is not None else os.environ)
         git_provider = source.get(_GIT_PROVIDER_ENV, _DEFAULT_GIT_PROVIDER).strip().lower()
         if git_provider not in _SUPPORTED_GIT_PROVIDERS:
@@ -166,6 +174,25 @@ class WorkerSettings:
             max_attempts=int(source.get(_MAX_ATTEMPTS_ENV, "3")),
             block_ms=int(source.get(_BLOCK_MS_ENV, "1000")),
         )
+
+
+async def build_worker_settings_from_env(
+    env: dict[str, str] | None = None,
+) -> WorkerSettings:
+    """Resolve secrets, then parse :class:`WorkerSettings`.
+
+    Folds the configured :class:`Secrets` backend's values into a copy
+    of ``env`` (or :data:`os.environ`) before delegating to the
+    synchronous :meth:`WorkerSettings.from_env`. This is the production
+    entrypoint: it lets a file-based secrets backend supply
+    ``OPENROUTER_API_KEY`` / ``META_AGENT_GITHUB_TOKEN`` without those
+    values being exported as process env vars, while preserving the
+    existing ``env`` backend as a zero-behaviour-change default.
+    """
+    base = dict(env if env is not None else os.environ)
+    secrets = build_secrets_from_env(base)
+    resolved = await resolve_secret_env(secrets, env=base)
+    return WorkerSettings.from_env(resolved)
 
 
 @dataclass(frozen=True, slots=True)
