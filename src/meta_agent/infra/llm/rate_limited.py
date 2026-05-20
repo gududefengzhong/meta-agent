@@ -23,8 +23,12 @@ flip to fail-closed for high-sensitivity deployments.
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 
+from meta_agent.core.domain.audit import AuditEvent
+from meta_agent.core.ports.audit_sink import AuditSink
 from meta_agent.core.ports.llm import (
     LLMClient,
     LLMRateLimitedError,
@@ -38,6 +42,16 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TENANT_LABEL = "anonymous"
 _DEFAULT_MODEL_LABEL = "default"
+
+_AUDIT_ACTION_DENIED = "llm.rate_limited.denied"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _default_event_id() -> str:
+    return f"ae-{uuid.uuid4()}"
 
 
 class RateLimitedLLMClient(LLMClient):
@@ -60,6 +74,12 @@ class RateLimitedLLMClient(LLMClient):
     key_factory:
         Optional override; tests can inject a deterministic factory.
         Production code should leave this ``None``.
+    audit_sink:
+        If provided, deny outcomes append an ``llm.rate_limited.denied``
+        :class:`AuditEvent`. Audit-write failures are swallowed (warn
+        log only) so a degraded ``audit_events`` table cannot brick
+        the LLM heat path. Skipped if no :class:`RequestContext` is
+        bound (the event schema requires tenant / principal / trace).
     """
 
     def __init__(
@@ -70,6 +90,9 @@ class RateLimitedLLMClient(LLMClient):
         provider: str,
         fail_open: bool = True,
         key_factory: Callable[[RequestContext | None, LLMRequest], str] | None = None,
+        audit_sink: AuditSink | None = None,
+        clock: Callable[[], datetime] | None = None,
+        event_id_factory: Callable[[], str] | None = None,
     ) -> None:
         if not provider:
             raise ValueError("provider must be a non-empty string")
@@ -78,6 +101,11 @@ class RateLimitedLLMClient(LLMClient):
         self._provider = provider
         self._fail_open = fail_open
         self._key_factory = key_factory if key_factory is not None else self._default_key
+        self._audit_sink = audit_sink
+        self._clock = clock if clock is not None else _utcnow
+        self._event_id_factory = (
+            event_id_factory if event_id_factory is not None else _default_event_id
+        )
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         ctx = get_current()
@@ -113,6 +141,7 @@ class RateLimitedLLMClient(LLMClient):
                     "remaining": decision.remaining,
                 },
             )
+            await self._audit_deny(ctx, request, key, decision.retry_after_ms, decision.remaining)
             retry_after = (
                 decision.retry_after_ms / 1000.0 if decision.retry_after_ms is not None else None
             )
@@ -130,6 +159,55 @@ class RateLimitedLLMClient(LLMClient):
         tenant = ctx.tenant_id if ctx is not None else _DEFAULT_TENANT_LABEL
         model = request.model or _DEFAULT_MODEL_LABEL
         return f"llm:{self._provider}:tenant={tenant}:model={model}"
+
+    async def _audit_deny(
+        self,
+        ctx: RequestContext | None,
+        request: LLMRequest,
+        key: str,
+        retry_after_ms: int | None,
+        remaining: int | None,
+    ) -> None:
+        if self._audit_sink is None:
+            return
+        if ctx is None:
+            # AuditEvent requires tenant/principal/trace; emit nothing
+            # rather than fabricate identifiers.
+            logger.debug(
+                "llm.rate_limited.audit_skip_no_context",
+                extra={"provider": self._provider, "requested_model": request.model},
+            )
+            return
+        event = AuditEvent(
+            event_id=self._event_id_factory(),
+            tenant_id=ctx.tenant_id,
+            principal_id=ctx.principal_id,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            trace_id=ctx.trace_id,
+            action=_AUDIT_ACTION_DENIED,
+            payload={
+                "provider": self._provider,
+                "requested_model": request.model,
+                "key": key,
+                "retry_after_ms": retry_after_ms,
+                "remaining": remaining,
+            },
+            occurred_at=self._clock(),
+        )
+        try:
+            await self._audit_sink.append(event)
+        except Exception as exc:
+            logger.warning(
+                "llm.rate_limited.audit_append_failed",
+                extra={
+                    "tenant_id": ctx.tenant_id,
+                    "trace_id": ctx.trace_id,
+                    "task_id": ctx.task_id,
+                    "provider": self._provider,
+                    "error_type": type(exc).__name__,
+                },
+            )
 
 
 __all__ = ["RateLimitedLLMClient"]

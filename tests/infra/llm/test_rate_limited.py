@@ -12,9 +12,12 @@ Cover the four observable behaviours:
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 import pytest
 
+from meta_agent.core.domain.audit import AuditEvent
+from meta_agent.core.ports.audit_sink import AuditSink
 from meta_agent.core.ports.llm import (
     ChatMessage,
     LLMRateLimitedError,
@@ -29,6 +32,19 @@ from meta_agent.core.ports.rate_limiter import (
 from meta_agent.infra.llm.rate_limited import RateLimitedLLMClient
 from meta_agent.infra.security.context import RequestContext, bind_context
 from tests.core.orchestration._fakes import FakeLLMClient
+
+
+class _RecordingAuditSink(AuditSink):
+    """Captures every appended event in order."""
+
+    def __init__(self, *, raise_on_append: BaseException | None = None) -> None:
+        self.events: list[AuditEvent] = []
+        self._raise = raise_on_append
+
+    async def append(self, event: AuditEvent) -> None:
+        if self._raise is not None:
+            raise self._raise
+        self.events.append(event)
 
 
 class _ScriptedLimiter(RateLimiter):
@@ -165,3 +181,77 @@ async def test_close_delegates_to_inner() -> None:
 def test_construction_rejects_empty_provider() -> None:
     with pytest.raises(ValueError, match="provider must be a non-empty string"):
         RateLimitedLLMClient(FakeLLMClient(), _ScriptedLimiter(), provider="")
+
+
+async def test_deny_emits_audit_event_with_context_and_payload() -> None:
+    inner = FakeLLMClient()
+    limiter = _ScriptedLimiter(
+        outcomes=[RateLimitDecision(allowed=False, remaining=0, retry_after_ms=750)],
+    )
+    sink = _RecordingAuditSink()
+    fixed = datetime(2025, 1, 1, tzinfo=UTC)
+    client = RateLimitedLLMClient(
+        inner,
+        limiter,
+        provider="openrouter",
+        audit_sink=sink,
+        clock=lambda: fixed,
+        event_id_factory=lambda: "ae-fixed",
+    )
+    with bind_context(_ctx()), pytest.raises(LLMRateLimitedError):
+        await client.complete(_request())
+
+    assert len(sink.events) == 1
+    event = sink.events[0]
+    assert event.event_id == "ae-fixed"
+    assert event.action == "llm.rate_limited.denied"
+    assert event.tenant_id == "t-1"
+    assert event.principal_id == "p-1"
+    assert event.trace_id == "trace-1"
+    assert event.task_id == "task-1"
+    assert event.occurred_at == fixed
+    assert event.payload == {
+        "provider": "openrouter",
+        "requested_model": "openai/gpt-4o",
+        "key": "llm:openrouter:tenant=t-1:model=openai/gpt-4o",
+        "retry_after_ms": 750,
+        "remaining": 0,
+    }
+
+
+async def test_allow_path_does_not_emit_audit() -> None:
+    inner = FakeLLMClient()
+    limiter = _ScriptedLimiter()
+    sink = _RecordingAuditSink()
+    client = RateLimitedLLMClient(inner, limiter, provider="openrouter", audit_sink=sink)
+    with bind_context(_ctx()):
+        await client.complete(_request())
+    assert sink.events == []
+
+
+async def test_deny_without_context_skips_audit() -> None:
+    inner = FakeLLMClient()
+    limiter = _ScriptedLimiter(
+        outcomes=[RateLimitDecision(allowed=False, remaining=0, retry_after_ms=100)],
+    )
+    sink = _RecordingAuditSink()
+    client = RateLimitedLLMClient(inner, limiter, provider="openrouter", audit_sink=sink)
+    with pytest.raises(LLMRateLimitedError):
+        await client.complete(_request())
+    assert sink.events == []
+
+
+async def test_audit_append_error_is_swallowed(caplog: pytest.LogCaptureFixture) -> None:
+    inner = FakeLLMClient()
+    limiter = _ScriptedLimiter(
+        outcomes=[RateLimitDecision(allowed=False, remaining=0, retry_after_ms=100)],
+    )
+    sink = _RecordingAuditSink(raise_on_append=RuntimeError("audit table down"))
+    client = RateLimitedLLMClient(inner, limiter, provider="openrouter", audit_sink=sink)
+    with (
+        bind_context(_ctx()),
+        caplog.at_level(logging.WARNING, logger="meta_agent.infra.llm.rate_limited"),
+        pytest.raises(LLMRateLimitedError),
+    ):
+        await client.complete(_request())
+    assert any("audit_append_failed" in rec.getMessage() for rec in caplog.records)
