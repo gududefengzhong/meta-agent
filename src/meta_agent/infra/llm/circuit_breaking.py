@@ -37,8 +37,12 @@ they should not poison the failure window.
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 
+from meta_agent.core.domain.audit import AuditEvent
+from meta_agent.core.ports.audit_sink import AuditSink
 from meta_agent.core.ports.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerBackendError,
@@ -59,6 +63,16 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TENANT_LABEL = "anonymous"
 _DEFAULT_MODEL_LABEL = "default"
 
+_AUDIT_ACTION_OPEN = "llm.circuit_breaker.open"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _default_event_id() -> str:
+    return f"ae-{uuid.uuid4()}"
+
 
 def _default_should_count(exc: BaseException) -> bool:
     """Count anything that is not a known caller-side error."""
@@ -67,7 +81,17 @@ def _default_should_count(exc: BaseException) -> bool:
 
 
 class CircuitBreakingLLMClient(LLMClient):
-    """Decorator that runs ``inner.complete`` under a :class:`CircuitBreaker`."""
+    """Decorator that runs ``inner.complete`` under a :class:`CircuitBreaker`.
+
+    Parameters mirror :class:`RateLimitedLLMClient`. ``audit_sink``, when
+    provided, emits an ``llm.circuit_breaker.open`` :class:`AuditEvent`
+    on :class:`CircuitBreakerOpenError`. Audit-write failures are
+    swallowed (warn log only) so a degraded ``audit_events`` table
+    cannot brick the LLM heat path. ``probe_failed`` is not surfaced
+    here: the decorator only sees the underlying exception, not the
+    breaker's state transition, and every probe failure is immediately
+    followed by an ``open`` event anyway.
+    """
 
     def __init__(
         self,
@@ -78,6 +102,9 @@ class CircuitBreakingLLMClient(LLMClient):
         fail_open: bool = True,
         key_factory: Callable[[RequestContext | None, LLMRequest], str] | None = None,
         should_count: Callable[[BaseException], bool] | None = None,
+        audit_sink: AuditSink | None = None,
+        clock: Callable[[], datetime] | None = None,
+        event_id_factory: Callable[[], str] | None = None,
     ) -> None:
         if not provider:
             raise ValueError("provider must be a non-empty string")
@@ -87,6 +114,11 @@ class CircuitBreakingLLMClient(LLMClient):
         self._fail_open = fail_open
         self._key_factory = key_factory if key_factory is not None else self._default_key
         self._should_count = should_count if should_count is not None else _default_should_count
+        self._audit_sink = audit_sink
+        self._clock = clock if clock is not None else _utcnow
+        self._event_id_factory = (
+            event_id_factory if event_id_factory is not None else _default_event_id
+        )
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         ctx = get_current()
@@ -110,6 +142,7 @@ class CircuitBreakingLLMClient(LLMClient):
                     "retry_after_ms": exc.retry_after_ms,
                 },
             )
+            await self._audit_open(ctx, request, exc.key, exc.retry_after_ms)
             raise LLMTransientError(f"upstream circuit breaker open for {self._provider}") from exc
         except CircuitBreakerBackendError as exc:
             if not self._fail_open:
@@ -134,6 +167,53 @@ class CircuitBreakingLLMClient(LLMClient):
         tenant = ctx.tenant_id if ctx is not None else _DEFAULT_TENANT_LABEL
         model = request.model or _DEFAULT_MODEL_LABEL
         return f"llm:{self._provider}:tenant={tenant}:model={model}"
+
+    async def _audit_open(
+        self,
+        ctx: RequestContext | None,
+        request: LLMRequest,
+        key: str,
+        retry_after_ms: int | None,
+    ) -> None:
+        if self._audit_sink is None:
+            return
+        if ctx is None:
+            # AuditEvent requires tenant/principal/trace; emit nothing
+            # rather than fabricate identifiers.
+            logger.debug(
+                "llm.circuit_breaker.audit_skip_no_context",
+                extra={"provider": self._provider, "requested_model": request.model},
+            )
+            return
+        event = AuditEvent(
+            event_id=self._event_id_factory(),
+            tenant_id=ctx.tenant_id,
+            principal_id=ctx.principal_id,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            trace_id=ctx.trace_id,
+            action=_AUDIT_ACTION_OPEN,
+            payload={
+                "provider": self._provider,
+                "requested_model": request.model,
+                "key": key,
+                "retry_after_ms": retry_after_ms,
+            },
+            occurred_at=self._clock(),
+        )
+        try:
+            await self._audit_sink.append(event)
+        except Exception as exc:
+            logger.warning(
+                "llm.circuit_breaker.audit_append_failed",
+                extra={
+                    "tenant_id": ctx.tenant_id,
+                    "trace_id": ctx.trace_id,
+                    "task_id": ctx.task_id,
+                    "provider": self._provider,
+                    "error_type": type(exc).__name__,
+                },
+            )
 
 
 __all__ = ["CircuitBreakingLLMClient"]
