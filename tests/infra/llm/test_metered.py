@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 import pytest
 
 from meta_agent.core.domain import ErrorCategory, LLMUsageRecord, LLMUsageStatus
+from meta_agent.core.ports.budget import BudgetUsage
 from meta_agent.core.ports.llm import (
     ChatMessage,
     LLMRequest,
@@ -35,6 +36,12 @@ class _RecorderSpy(LLMUsageRepository):
 
     async def list_for_task(self, tenant_id: str, task_id: str) -> list[LLMUsageRecord]:
         return [r for r in self.records if r.tenant_id == tenant_id and r.task_id == task_id]
+
+    async def aggregate_since(self, tenant_id: str, since: datetime) -> BudgetUsage:
+        rows = [r for r in self.records if r.tenant_id == tenant_id and r.created_at >= since]
+        tokens = sum(r.total_tokens or 0 for r in rows)
+        cost = sum(r.cost_usd_micros or 0 for r in rows)
+        return BudgetUsage(tokens_used=tokens, cost_usd_micros_used=cost)
 
 
 def _ctx(**overrides: str | None) -> RequestContext:

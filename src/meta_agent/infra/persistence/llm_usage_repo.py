@@ -7,10 +7,12 @@ on both writes (against the record's own ``tenant_id``) and reads
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from meta_agent.core.domain.errors import ErrorCategory
 from meta_agent.core.domain.llm_usage import LLMUsageRecord, LLMUsageStatus
+from meta_agent.core.ports.budget import BudgetUsage
 from meta_agent.core.ports.llm_usage import LLMUsageRepository
 from meta_agent.infra.persistence._guard import check_tenant
 from meta_agent.infra.persistence.pool import DatabasePool
@@ -70,6 +72,19 @@ class PgLLMUsageRepository(LLMUsageRepository):
         "SELECT * FROM llm_usage_logs WHERE tenant_id = $1 AND task_id = $2 ORDER BY created_at ASC"
     )
 
+    # COALESCE so a NULL token or cost column counts as 0 in the sum.
+    # The `ix_llm_usage_tenant_created` index covers (tenant_id,
+    # created_at DESC), so PG can use it to skip rows older than the
+    # window start.
+    _AGGREGATE_SINCE = """
+        SELECT
+            COALESCE(SUM(total_tokens), 0)::bigint AS tokens,
+            COALESCE(SUM(cost_usd_micros), 0)::bigint AS cost_micros
+        FROM llm_usage_logs
+        WHERE tenant_id = $1
+          AND created_at >= $2
+    """
+
     def __init__(self, pool: DatabasePool) -> None:
         self._pool = pool
 
@@ -110,3 +125,18 @@ class PgLLMUsageRepository(LLMUsageRepository):
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(self._LIST_FOR_TASK, tenant_id, task_id)
         return [_row_to_record(dict(r)) for r in rows]
+
+    async def aggregate_since(
+        self,
+        tenant_id: str,
+        since: datetime,
+    ) -> BudgetUsage:
+        check_tenant(tenant_id)
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(self._AGGREGATE_SINCE, tenant_id, since)
+        if row is None:
+            return BudgetUsage(tokens_used=0, cost_usd_micros_used=0)
+        return BudgetUsage(
+            tokens_used=int(row["tokens"]),
+            cost_usd_micros_used=int(row["cost_micros"]),
+        )

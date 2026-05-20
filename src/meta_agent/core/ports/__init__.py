@@ -9,6 +9,12 @@ capabilities) only depends on ports, never on adapter modules.
 """
 
 from meta_agent.core.ports.audit_sink import AuditSink
+from meta_agent.core.ports.budget import (
+    BudgetBackendError,
+    BudgetDecision,
+    BudgetEnforcer,
+    BudgetUsage,
+)
 from meta_agent.core.ports.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerBackendError,
@@ -28,6 +34,7 @@ from meta_agent.core.ports.llm import (
     ChatMessage,
     FinishReason,
     LLMAuthError,
+    LLMBudgetExceededError,
     LLMClient,
     LLMError,
     LLMInvalidRequestError,
@@ -65,6 +72,10 @@ from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 __all__ = [
     "AuditRepository",
     "AuditSink",
+    "BudgetBackendError",
+    "BudgetDecision",
+    "BudgetEnforcer",
+    "BudgetUsage",
     "ChatMessage",
     "CheckpointRepository",
     "CircuitBreaker",
@@ -79,6 +90,7 @@ __all__ = [
     "GitProviderInvalidRequestError",
     "GitProviderTransientError",
     "LLMAuthError",
+    "LLMBudgetExceededError",
     "LLMClient",
     "LLMError",
     "LLMInvalidRequestError",

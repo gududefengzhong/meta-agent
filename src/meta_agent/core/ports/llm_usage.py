@@ -3,16 +3,19 @@
 Append-only persistence for :class:`LLMUsageRecord`. Kept as a
 dedicated port (rather than folded into :class:`AuditRepository`)
 because the access patterns are different: usage logs are queried by
-``(tenant_id, task_id)`` for per-task summaries and by
-``(tenant_id, created_at)`` for billing rollups, neither of which is
-how audit events are read.
+``(tenant_id, task_id)`` for per-task summaries, by
+``(tenant_id, created_at)`` for billing rollups, and by
+``(tenant_id, window)`` for budget enforcement; none of which is how
+audit events are read.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 from meta_agent.core.domain.llm_usage import LLMUsageRecord
+from meta_agent.core.ports.budget import BudgetUsage
 
 
 class LLMUsageRepository(ABC):
@@ -32,4 +35,17 @@ class LLMUsageRepository(ABC):
 
         Ordering is by ``created_at`` ascending so callers can sum
         token counts in invocation order without re-sorting.
+        """
+
+    @abstractmethod
+    async def aggregate_since(
+        self,
+        tenant_id: str,
+        since: datetime,
+    ) -> BudgetUsage:
+        """Sum ``total_tokens`` and ``cost_usd_micros`` for ``tenant_id``.
+
+        Window is ``[since, +inf)``; the caller supplies ``since`` as a
+        timezone-aware UTC datetime (typically the first instant of the
+        current calendar month). NULL token or cost values count as 0.
         """

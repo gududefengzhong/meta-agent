@@ -5,12 +5,15 @@ Wires production adapters into a :class:`WorkerLoop`:
 * asyncpg pool + PG repositories (task / checkpoint / audit / llm_usage)
 * :class:`OpenRouterClient` wrapped (innermost-out) in
   :class:`CircuitBreakingLLMClient` (guards provider failures only),
-  :class:`MeteredLLMClient` (writes ``llm_usage_logs``), and
+  :class:`MeteredLLMClient` (writes ``llm_usage_logs``),
   :class:`RateLimitedLLMClient` (intercepts denied calls *before*
-  metering). The rate-limiter and breaker backends are selected by
-  ``META_AGENT_RATELIMIT_BACKEND`` and
-  ``META_AGENT_CIRCUITBREAKER_BACKEND`` respectively; both default to
-  NoOp so unconfigured deployments keep their previous behaviour.
+  metering), and :class:`BudgetEnforcingLLMClient` (rejects calls when
+  the tenant's monthly token cap is exhausted, *before* any rate-limit
+  token is consumed). The rate-limiter, breaker, and budget backends
+  are selected by ``META_AGENT_RATELIMIT_BACKEND``,
+  ``META_AGENT_CIRCUITBREAKER_BACKEND``, and
+  ``META_AGENT_BUDGET_BACKEND`` respectively; all default to NoOp so
+  unconfigured deployments keep their previous behaviour.
 * :class:`GraphRegistry` with built-in graphs registered and materialized
 * :class:`RedisStreamConsumer` exposing ``claim_batch`` / ``ack``
 
@@ -51,10 +54,17 @@ from meta_agent.core.orchestration.graphs import (
     build_simple_chat_graph,
 )
 from meta_agent.core.ports.audit_sink import AuditSink
+from meta_agent.core.ports.budget import BudgetEnforcer
 from meta_agent.core.ports.circuit_breaker import CircuitBreaker
 from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
+from meta_agent.core.ports.llm_usage import LLMUsageRepository
 from meta_agent.core.ports.rate_limiter import RateLimiter
+from meta_agent.infra.budget import (
+    BudgetConfig,
+    NoopBudgetEnforcer,
+    build_budget_enforcer_from_config,
+)
 from meta_agent.infra.circuitbreaker import (
     CircuitBreakerConfig,
     NoopCircuitBreaker,
@@ -66,6 +76,7 @@ from meta_agent.infra.git_provider import (
     GitHubGitProviderConfig,
 )
 from meta_agent.infra.llm import (
+    BudgetEnforcingLLMClient,
     CircuitBreakingLLMClient,
     MeteredLLMClient,
     OpenRouterClient,
@@ -309,6 +320,62 @@ def build_circuit_breaking_llm(
     )
 
 
+def build_budget_enforcer() -> BudgetEnforcer:
+    """Build the default budget enforcer (NoOp).
+
+    Used by unit tests and any caller that wants zero-impact budget
+    enforcement. Production wiring goes through
+    :func:`build_budget_enforcer_from_env` so the backend can be switched
+    via ``META_AGENT_BUDGET_BACKEND``.
+    """
+
+    return NoopBudgetEnforcer()
+
+
+def build_budget_enforcer_from_env(
+    env: dict[str, str] | None = None,
+    *,
+    usage_repo: LLMUsageRepository | None = None,
+) -> tuple[BudgetEnforcer, BudgetConfig]:
+    """Pick the budget backend by ``META_AGENT_BUDGET_*`` env.
+
+    ``backend=llm_usage`` requires ``usage_repo`` to be passed in so the
+    enforcer reads the same table that :class:`MeteredLLMClient` writes;
+    the env-driven selector itself never opens sockets. Returns both the
+    enforcer and the parsed :class:`BudgetConfig` so callers can read
+    decorator-side knobs (``cache_ttl_s``, ``fail_open``) without parsing
+    env a second time.
+    """
+
+    config = BudgetConfig.from_env(env)
+    enforcer = build_budget_enforcer_from_config(config, usage_repo=usage_repo)
+    return enforcer, config
+
+
+def build_budget_enforcing_llm(
+    inner: LLMClient,
+    enforcer: BudgetEnforcer,
+    *,
+    cache_ttl_s: float = 10.0,
+    fail_open: bool = True,
+    audit_sink: AuditSink | None = None,
+) -> BudgetEnforcingLLMClient:
+    """Wrap a (typically rate-limited) ``inner`` with the budget decorator.
+
+    Passing ``audit_sink`` enables best-effort ``llm.budget.exceeded``
+    audit emission; unit tests can omit it.
+    """
+
+    return BudgetEnforcingLLMClient(
+        inner,
+        enforcer,
+        provider=_DEFAULT_LLM_PROVIDER,
+        cache_ttl_s=cache_ttl_s,
+        fail_open=fail_open,
+        audit_sink=audit_sink,
+    )
+
+
 def build_chain_registry() -> TaskChainRegistry:
     """Register every built-in task-chain policy.
 
@@ -374,6 +441,14 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     metered_llm = build_metered_llm(breaking_llm, usage_repo)
     rate_limiter = build_rate_limiter_from_env(redis_client=redis_client)
     rate_limited_llm = build_rate_limited_llm(metered_llm, rate_limiter, audit_sink=audit_repo)
+    budget_enforcer, budget_config = build_budget_enforcer_from_env(usage_repo=usage_repo)
+    budget_enforcing_llm = build_budget_enforcing_llm(
+        rate_limited_llm,
+        budget_enforcer,
+        cache_ttl_s=budget_config.cache_ttl_s,
+        fail_open=budget_config.fail_open,
+        audit_sink=audit_repo,
+    )
     git_provider = build_git_provider(settings)
     # Reuse the GitHub adapter's token for ``git push`` so a single
     # secret covers both PR creation (port-mediated) and pushing local
@@ -381,7 +456,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     # remote to push to, so ``None`` makes the push node skip cleanly.
     push_token = settings.github.token if settings.github is not None else None
     registry = build_registry(
-        GraphDeps(llm=rate_limited_llm, git_provider=git_provider, git_push_token=push_token)
+        GraphDeps(llm=budget_enforcing_llm, git_provider=git_provider, git_push_token=push_token)
     )
     # Ensure the workspace root exists; the local-git adapter requires
     # the directory to be present so it can ``mkdir`` per-task subdirs.
@@ -403,7 +478,8 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
 
     async def _aclose() -> None:
         await git_provider.close()
-        await rate_limited_llm.close()
+        await budget_enforcing_llm.close()
+        await budget_enforcer.close()
         await rate_limiter.close()
         await breaker.close()
         await redis_client.aclose()
@@ -415,9 +491,10 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         resources={
             "pool": pool,
             "redis": redis_client,
-            "llm": rate_limited_llm,
+            "llm": budget_enforcing_llm,
             "rate_limiter": rate_limiter,
             "circuit_breaker": breaker,
+            "budget_enforcer": budget_enforcer,
             "git_provider": git_provider,
         },
     )

@@ -137,6 +137,30 @@ class LLMAuthError(LLMError):
     category = ErrorCategory.PERMISSION
 
 
+class LLMBudgetExceededError(LLMError):
+    """Raised when the caller's monthly LLM budget is exhausted.
+
+    Distinct from :class:`LLMRateLimitedError`: a rate-limit deny clears
+    on the next refill window (typically seconds); a budget deny clears
+    on the next billing window (typically end-of-month). Retrying is
+    almost never appropriate, so this is a :class:`ErrorCategory.PERMISSION`
+    error rather than :class:`ErrorCategory.TRANSIENT`.
+    """
+
+    category = ErrorCategory.PERMISSION
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tokens_used: int | None = None,
+        limit_tokens: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.tokens_used = tokens_used
+        self.limit_tokens = limit_tokens
+
+
 class LLMClient(ABC):
     """Adapter contract: turn a typed request into a typed response."""
 
