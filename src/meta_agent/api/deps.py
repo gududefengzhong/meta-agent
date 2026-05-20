@@ -8,13 +8,17 @@ so no real Postgres / Redis connection is required.
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
+from meta_agent.core.ports.auth import AuthBackendError, TokenValidator
 from meta_agent.infra.persistence import DatabasePool, PgOutboxRepository, PgTaskRepository
 from meta_agent.infra.queue import RedisStreamPublisher
 from meta_agent.infra.security.context import RequestContext
+
+logger = logging.getLogger(__name__)
 
 # ── Infrastructure handles (populated by lifespan) ───────────────────────────
 
@@ -34,6 +38,11 @@ def get_task_topic(request: Request) -> str:
     return request.app.state.task_topic  # type: ignore[no-any-return]
 
 
+def get_token_validator(request: Request) -> TokenValidator:
+    """Return the shared :class:`TokenValidator` attached to ``app.state``."""
+    return request.app.state.token_validator  # type: ignore[no-any-return]
+
+
 # ── Domain-level collaborators ────────────────────────────────────────────────
 
 
@@ -50,32 +59,54 @@ def get_outbox_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgOutboxReposi
 # ── Request context ───────────────────────────────────────────────────────────
 
 
-def get_request_ctx(
-    x_tenant_id: str | None = Header(default=None),
-    x_principal_id: str | None = Header(default=None),
+_INVALID_TOKEN = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="invalid or missing bearer token",
+    headers={"WWW-Authenticate": "Bearer"},
+)
+
+
+def _parse_bearer(authorization: str | None) -> str | None:
+    """Return the bearer token from ``Authorization`` or ``None`` if absent."""
+    if not authorization:
+        return None
+    parts = authorization.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    return token or None
+
+
+async def get_request_ctx(
+    authorization: str | None = Header(default=None),
     x_trace_id: str | None = Header(default=None),
+    validator: TokenValidator = Depends(get_token_validator),
 ) -> RequestContext:
-    """Build a :class:`RequestContext` from standard request headers.
+    """Validate ``Authorization: Bearer`` and build a :class:`RequestContext`.
 
-    ``X-Tenant-Id`` and ``X-Principal-Id`` are mandatory; missing either
-    returns HTTP 401 so the caller gets a clear signal rather than a 422
-    Pydantic validation error.
+    ``tenant_id`` and ``principal_id`` are taken from the validated
+    :class:`Principal`; any ``X-Tenant-Id`` / ``X-Principal-Id`` headers
+    the client may send are ignored — header-derived tenancy would let
+    any caller spoof a tenant. ``X-Trace-Id`` is still honoured because
+    tracing is not a security boundary.
     """
-
-    if not x_tenant_id:
+    token = _parse_bearer(authorization)
+    if token is None:
+        raise _INVALID_TOKEN
+    try:
+        principal = await validator.validate(token)
+    except AuthBackendError:
+        logger.exception("auth.backend_error")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="X-Tenant-Id header is required",
-        )
-    if not x_principal_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="X-Principal-Id header is required",
-        )
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="authentication backend unavailable",
+        ) from None
+    if principal is None:
+        raise _INVALID_TOKEN
     trace_id = x_trace_id if x_trace_id else str(uuid.uuid4())
     return RequestContext(
-        tenant_id=x_tenant_id,
-        principal_id=x_principal_id,
+        tenant_id=principal.tenant_id,
+        principal_id=principal.principal_id,
         trace_id=trace_id,
         request_id=str(uuid.uuid4()),
     )
