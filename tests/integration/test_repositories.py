@@ -19,7 +19,11 @@ from meta_agent.core.domain.llm_usage import LLMUsageRecord, LLMUsageStatus
 from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
 from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import Task, TaskState, TaskType
-from meta_agent.core.ports.repository import TenantIsolationError
+from meta_agent.core.ports.llm_usage import (
+    LLMUsageFilter,
+    UsageGroupBy,
+)
+from meta_agent.core.ports.repository import AuditFilter, TenantIsolationError
 from meta_agent.infra.persistence import (
     DatabasePool,
     PgAuditRepository,
@@ -242,6 +246,159 @@ async def test_llm_usage_list_isolates_tenants(db_pool: DatabasePool) -> None:
         await repo.record(_usage("llmu-iso-B", tenant_id="tenant-B"))
         rows = await repo.list_for_task("tenant-B", "t-1")
     assert {r.record_id for r in rows} == {"llmu-iso-B"}
+
+
+async def test_audit_list_filtered_keyset_paginates(db_pool: DatabasePool) -> None:
+    """Two-page keyset walk: page 1 → cursor → page 2 → exhausted."""
+    repo = PgAuditRepository(db_pool)
+    base = datetime(2026, 5, 20, 9, 0, tzinfo=UTC)
+    # Insert four events at distinct timestamps.
+    events = [
+        AuditEvent(
+            event_id=f"af-{i}",
+            tenant_id="tenant-A",
+            principal_id="user-1",
+            trace_id="trace-1",
+            task_id="t-1" if i % 2 == 0 else "t-2",
+            action="task.submitted" if i < 2 else "task.completed",
+            payload={"i": i},
+            occurred_at=base.replace(minute=i),
+        )
+        for i in range(4)
+    ]
+    with bind_context(_ctx()):
+        for e in events:
+            await repo.append(e)
+        # Window covers all four.
+        window = (base.replace(minute=0), base.replace(hour=10))
+        page1 = await repo.list_filtered(
+            "tenant-A",
+            AuditFilter(since=window[0], until=window[1], limit=2),
+        )
+        assert [e.event_id for e in page1] == ["af-3", "af-2"]
+        last = page1[-1]
+        page2 = await repo.list_filtered(
+            "tenant-A",
+            AuditFilter(
+                since=window[0],
+                until=window[1],
+                limit=2,
+                before=(last.occurred_at, last.event_id),
+            ),
+        )
+        assert [e.event_id for e in page2] == ["af-1", "af-0"]
+
+
+async def test_audit_list_filtered_action_and_task_filters(db_pool: DatabasePool) -> None:
+    repo = PgAuditRepository(db_pool)
+    base = datetime(2026, 5, 21, 9, 0, tzinfo=UTC)
+    events = [
+        AuditEvent(
+            event_id="afa-0",
+            tenant_id="tenant-A",
+            principal_id="user-1",
+            trace_id="trace-1",
+            task_id="t-1",
+            action="task.submitted",
+            payload={},
+            occurred_at=base,
+        ),
+        AuditEvent(
+            event_id="afa-1",
+            tenant_id="tenant-A",
+            principal_id="user-1",
+            trace_id="trace-1",
+            task_id="t-2",
+            action="task.submitted",
+            payload={},
+            occurred_at=base.replace(minute=1),
+        ),
+        AuditEvent(
+            event_id="afa-2",
+            tenant_id="tenant-A",
+            principal_id="user-1",
+            trace_id="trace-1",
+            task_id="t-1",
+            action="task.completed",
+            payload={},
+            occurred_at=base.replace(minute=2),
+        ),
+    ]
+    with bind_context(_ctx()):
+        for e in events:
+            await repo.append(e)
+        rows = await repo.list_filtered(
+            "tenant-A",
+            AuditFilter(
+                since=base,
+                until=base.replace(hour=10),
+                action="task.submitted",
+                task_id="t-1",
+                limit=100,
+            ),
+        )
+    assert [e.event_id for e in rows] == ["afa-0"]
+
+
+async def test_llm_usage_list_filtered_and_keyset(db_pool: DatabasePool) -> None:
+    repo = PgLLMUsageRepository(db_pool)
+    base = datetime(2026, 5, 22, 10, 0, tzinfo=UTC)
+    records = [
+        _usage("lf-0", task_id="t-A", created_at=base),
+        _usage("lf-1", task_id="t-A", created_at=base.replace(minute=1)),
+        _usage(
+            "lf-2",
+            task_id="t-B",
+            status=LLMUsageStatus.ERROR,
+            created_at=base.replace(minute=2),
+        ),
+    ]
+    with bind_context(_ctx()):
+        for r in records:
+            await repo.record(r)
+        # Filter by task — should return only the two t-A rows, DESC.
+        rows = await repo.list_filtered(
+            "tenant-A",
+            LLMUsageFilter(
+                since=base,
+                until=base.replace(hour=11),
+                task_id="t-A",
+                limit=100,
+            ),
+        )
+        assert [r.record_id for r in rows] == ["lf-1", "lf-0"]
+        # Keyset cursor: jump past lf-1.
+        page2 = await repo.list_filtered(
+            "tenant-A",
+            LLMUsageFilter(
+                since=base,
+                until=base.replace(hour=11),
+                task_id="t-A",
+                limit=100,
+                before=(rows[0].created_at, rows[0].record_id),
+            ),
+        )
+        assert [r.record_id for r in page2] == ["lf-0"]
+
+
+async def test_llm_usage_aggregate_grouped_by_model(db_pool: DatabasePool) -> None:
+    repo = PgLLMUsageRepository(db_pool)
+    base = datetime(2026, 5, 23, 9, 0, tzinfo=UTC)
+    with bind_context(_ctx()):
+        await repo.record(_usage("agg-1", created_at=base))
+        await repo.record(_usage("agg-2", created_at=base.replace(minute=1)))
+        buckets = await repo.aggregate_grouped(
+            "tenant-A",
+            base,
+            base.replace(hour=10),
+            UsageGroupBy.MODEL,
+        )
+    assert len(buckets) == 1
+    bucket = buckets[0]
+    assert bucket.key == "openai/gpt-4o"
+    # _usage helper writes total_tokens=46 for OK rows.
+    assert bucket.tokens == 92
+    assert bucket.calls == 2
 
 
 async def test_checkpoint_append_and_latest(db_pool: DatabasePool) -> None:
