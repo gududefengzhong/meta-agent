@@ -19,6 +19,7 @@ from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
 from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import Task, TaskState
 from meta_agent.core.orchestration.result import TaskResult
+from meta_agent.core.ports.audit_sink import AuditSink
 
 
 class RepositoryError(AgentError):
@@ -177,11 +178,13 @@ class OutboxRepository(ABC):
     async def count_by_status(self, tenant_id: str, status: OutboxStatus) -> int: ...
 
 
-class AuditRepository(ABC):
-    """Append-only persistence for :class:`AuditEvent`."""
+class AuditRepository(AuditSink):
+    """Append-only persistence for :class:`AuditEvent`.
 
-    @abstractmethod
-    async def append(self, event: AuditEvent) -> None: ...
+    Extends :class:`AuditSink` so producers that only need the write
+    capability (decorators, ingress middlewares) can depend on the
+    smaller port without pulling the read path.
+    """
 
     @abstractmethod
     async def list_recent(

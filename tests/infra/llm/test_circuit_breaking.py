@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import TypeVar
 
 import pytest
 
+from meta_agent.core.domain.audit import AuditEvent
+from meta_agent.core.ports.audit_sink import AuditSink
 from meta_agent.core.ports.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerBackendError,
@@ -193,3 +196,99 @@ async def test_close_delegates_to_inner() -> None:
 def test_construction_rejects_empty_provider() -> None:
     with pytest.raises(ValueError, match="provider must be a non-empty string"):
         CircuitBreakingLLMClient(FakeLLMClient(), _ScriptedBreaker(), provider="")
+
+
+class _RecordingAuditSink(AuditSink):
+    """Captures every appended event in order."""
+
+    def __init__(self, *, raise_on_append: BaseException | None = None) -> None:
+        self.events: list[AuditEvent] = []
+        self._raise = raise_on_append
+
+    async def append(self, event: AuditEvent) -> None:
+        if self._raise is not None:
+            raise self._raise
+        self.events.append(event)
+
+
+async def test_open_emits_audit_event_with_context_and_payload() -> None:
+    inner = FakeLLMClient()
+    breaker = _ScriptedBreaker(
+        outcomes=[CircuitBreakerOpenError("open", key="k", retry_after_ms=500)],
+    )
+    sink = _RecordingAuditSink()
+    fixed = datetime(2025, 1, 1, tzinfo=UTC)
+    client = CircuitBreakingLLMClient(
+        inner,
+        breaker,
+        provider="openrouter",
+        audit_sink=sink,
+        clock=lambda: fixed,
+        event_id_factory=lambda: "ae-fixed",
+    )
+    with bind_context(_ctx()), pytest.raises(LLMTransientError):
+        await client.complete(_request())
+
+    assert len(sink.events) == 1
+    event = sink.events[0]
+    assert event.event_id == "ae-fixed"
+    assert event.action == "llm.circuit_breaker.open"
+    assert event.tenant_id == "t-1"
+    assert event.principal_id == "p-1"
+    assert event.trace_id == "trace-1"
+    assert event.task_id == "task-1"
+    assert event.occurred_at == fixed
+    assert event.payload == {
+        "provider": "openrouter",
+        "requested_model": "openai/gpt-4o",
+        "key": "k",
+        "retry_after_ms": 500,
+    }
+
+
+async def test_allow_path_does_not_emit_audit() -> None:
+    inner = FakeLLMClient()
+    breaker = _ScriptedBreaker()
+    sink = _RecordingAuditSink()
+    client = CircuitBreakingLLMClient(inner, breaker, provider="openrouter", audit_sink=sink)
+    with bind_context(_ctx()):
+        await client.complete(_request())
+    assert sink.events == []
+
+
+async def test_backend_error_fail_open_does_not_emit_audit() -> None:
+    inner = FakeLLMClient()
+    breaker = _ScriptedBreaker(outcomes=[CircuitBreakerBackendError("redis blip")])
+    sink = _RecordingAuditSink()
+    client = CircuitBreakingLLMClient(inner, breaker, provider="openrouter", audit_sink=sink)
+    with bind_context(_ctx()):
+        await client.complete(_request())
+    assert sink.events == []
+
+
+async def test_open_without_context_skips_audit() -> None:
+    inner = FakeLLMClient()
+    breaker = _ScriptedBreaker(
+        outcomes=[CircuitBreakerOpenError("open", key="k", retry_after_ms=500)],
+    )
+    sink = _RecordingAuditSink()
+    client = CircuitBreakingLLMClient(inner, breaker, provider="openrouter", audit_sink=sink)
+    with pytest.raises(LLMTransientError):
+        await client.complete(_request())
+    assert sink.events == []
+
+
+async def test_open_audit_append_error_is_swallowed(caplog: pytest.LogCaptureFixture) -> None:
+    inner = FakeLLMClient()
+    breaker = _ScriptedBreaker(
+        outcomes=[CircuitBreakerOpenError("open", key="k", retry_after_ms=500)],
+    )
+    sink = _RecordingAuditSink(raise_on_append=RuntimeError("audit table down"))
+    client = CircuitBreakingLLMClient(inner, breaker, provider="openrouter", audit_sink=sink)
+    with (
+        bind_context(_ctx()),
+        caplog.at_level(logging.WARNING, logger="meta_agent.infra.llm.circuit_breaking"),
+        pytest.raises(LLMTransientError),
+    ):
+        await client.complete(_request())
+    assert any("audit_append_failed" in rec.getMessage() for rec in caplog.records)
