@@ -8,7 +8,12 @@ import pytest
 
 from meta_agent.core.domain.llm_usage import LLMUsageRecord
 from meta_agent.core.ports.budget import BudgetBackendError, BudgetUsage
-from meta_agent.core.ports.llm_usage import LLMUsageRepository
+from meta_agent.core.ports.llm_usage import (
+    LLMUsageFilter,
+    LLMUsageRepository,
+    UsageAggregate,
+    UsageGroupBy,
+)
 from meta_agent.infra.budget.llm_usage_aggregator import (
     LLMUsageAggregatorBudgetEnforcer,
 )
@@ -38,6 +43,22 @@ class _FakeUsageRepo(LLMUsageRepository):
         if self._raise is not None:
             raise self._raise
         return self._usage
+
+    async def list_filtered(
+        self,
+        tenant_id: str,
+        filt: LLMUsageFilter,
+    ) -> list[LLMUsageRecord]:
+        raise AssertionError("list_filtered not exercised by aggregator")
+
+    async def aggregate_grouped(
+        self,
+        tenant_id: str,
+        since: datetime,
+        until: datetime,
+        group_by: UsageGroupBy,
+    ) -> list[UsageAggregate]:
+        raise AssertionError("aggregate_grouped not exercised by aggregator")
 
 
 def _clock_at(dt: datetime) -> datetime:

@@ -13,9 +13,27 @@ from typing import Any
 from meta_agent.core.domain.errors import ErrorCategory
 from meta_agent.core.domain.llm_usage import LLMUsageRecord, LLMUsageStatus
 from meta_agent.core.ports.budget import BudgetUsage
-from meta_agent.core.ports.llm_usage import LLMUsageRepository
+from meta_agent.core.ports.llm_usage import (
+    LLMUsageFilter,
+    LLMUsageRepository,
+    UsageAggregate,
+    UsageGroupBy,
+)
 from meta_agent.infra.persistence._guard import check_tenant
 from meta_agent.infra.persistence.pool import DatabasePool
+
+# ``aggregate_grouped`` SQL is templated by ``group_by``; the key
+# expression is fixed per bucket (NULL collapses to a sentinel so
+# unattributed rows still surface), every other column / WHERE clause
+# is identical, so a single string-format template is safer than a
+# generic builder. The ``key_expr`` values are server-side identifiers
+# / literals — they never carry caller input.
+_AGG_KEY_EXPRS: dict[UsageGroupBy, str] = {
+    UsageGroupBy.MODEL: "COALESCE(model, 'unknown')",
+    UsageGroupBy.DAY: "to_char(date_trunc('day', created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD')",
+    UsageGroupBy.TASK: "COALESCE(task_id, 'unattributed')",
+    UsageGroupBy.PRINCIPAL: "COALESCE(principal_id, 'unattributed')",
+}
 
 
 def _row_to_record(row: dict[str, Any]) -> LLMUsageRecord:
@@ -140,3 +158,80 @@ class PgLLMUsageRepository(LLMUsageRepository):
             tokens_used=int(row["tokens"]),
             cost_usd_micros_used=int(row["cost_micros"]),
         )
+
+    async def list_filtered(
+        self,
+        tenant_id: str,
+        filt: LLMUsageFilter,
+    ) -> list[LLMUsageRecord]:
+        check_tenant(tenant_id)
+        # ``$1..$3`` always bind ``tenant_id`` / ``since`` / ``until``;
+        # optional filters and the keyset cursor append further params
+        # so the ix_llm_usage_tenant_created index can still drive the
+        # query plan from a fixed prefix.
+        params: list[Any] = [tenant_id, filt.since, filt.until]
+        clauses: list[str] = ["tenant_id = $1", "created_at >= $2", "created_at < $3"]
+        if filt.model is not None:
+            params.append(filt.model)
+            clauses.append(f"model = ${len(params)}")
+        if filt.task_id is not None:
+            params.append(filt.task_id)
+            clauses.append(f"task_id = ${len(params)}")
+        if filt.status is not None:
+            params.append(filt.status.value)
+            clauses.append(f"status = ${len(params)}")
+        if filt.before is not None:
+            cursor_at, cursor_id = filt.before
+            params.append(cursor_at)
+            cursor_at_n = len(params)
+            params.append(cursor_id)
+            cursor_id_n = len(params)
+            # Strict keyset (DESC): next page starts before the previous
+            # row, breaking ties on record_id to keep ordering stable.
+            clauses.append(
+                f"(created_at < ${cursor_at_n} "
+                f"OR (created_at = ${cursor_at_n} AND record_id < ${cursor_id_n}))"
+            )
+        params.append(filt.limit)
+        limit_n = len(params)
+        sql = (
+            f"SELECT * FROM llm_usage_logs WHERE {' AND '.join(clauses)} "
+            f"ORDER BY created_at DESC, record_id DESC LIMIT ${limit_n}"
+        )
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+        return [_row_to_record(dict(r)) for r in rows]
+
+    async def aggregate_grouped(
+        self,
+        tenant_id: str,
+        since: datetime,
+        until: datetime,
+        group_by: UsageGroupBy,
+    ) -> list[UsageAggregate]:
+        check_tenant(tenant_id)
+        key_expr = _AGG_KEY_EXPRS[group_by]
+        sql = f"""
+            SELECT
+                {key_expr} AS key,
+                COALESCE(SUM(total_tokens), 0)::bigint AS tokens,
+                COALESCE(SUM(cost_usd_micros), 0)::bigint AS cost_micros,
+                COUNT(*)::bigint AS calls
+            FROM llm_usage_logs
+            WHERE tenant_id = $1
+              AND created_at >= $2
+              AND created_at < $3
+            GROUP BY {key_expr}
+            ORDER BY tokens DESC, key ASC
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, tenant_id, since, until)
+        return [
+            UsageAggregate(
+                key=str(r["key"]),
+                tokens=int(r["tokens"]),
+                cost_usd_micros=int(r["cost_micros"]),
+                calls=int(r["calls"]),
+            )
+            for r in rows
+        ]

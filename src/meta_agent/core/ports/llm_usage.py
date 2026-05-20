@@ -12,10 +12,63 @@ audit events are read.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 
-from meta_agent.core.domain.llm_usage import LLMUsageRecord
+from meta_agent.core.domain.llm_usage import LLMUsageRecord, LLMUsageStatus
 from meta_agent.core.ports.budget import BudgetUsage
+
+
+class UsageGroupBy(StrEnum):
+    """Buckets supported by :meth:`LLMUsageRepository.aggregate_grouped`.
+
+    * ``MODEL`` — group by ``model`` string (NULL → ``"unknown"``).
+    * ``DAY``   — group by ``date_trunc('day', created_at)`` UTC.
+    * ``TASK``  — group by ``task_id`` (NULL → ``"unattributed"``).
+    * ``PRINCIPAL`` — group by ``principal_id`` (NULL → ``"unattributed"``).
+    """
+
+    MODEL = "model"
+    DAY = "day"
+    TASK = "task"
+    PRINCIPAL = "principal"
+
+
+@dataclass(frozen=True, slots=True)
+class UsageAggregate:
+    """One bucket of an :meth:`LLMUsageRepository.aggregate_grouped` result.
+
+    Read-only projection of ``llm_usage_logs``; never written back.
+    ``key`` carries the grouping value (model id, ISO date, task id,
+    principal id). ``tokens`` / ``cost_usd_micros`` sum NULL-as-0 so
+    rows missing pricing still surface. ``calls`` is the row count in
+    the bucket so callers can spot bursts of cheap calls separately
+    from a few expensive ones.
+    """
+
+    key: str
+    tokens: int
+    cost_usd_micros: int
+    calls: int
+
+
+@dataclass(frozen=True, slots=True)
+class LLMUsageFilter:
+    """Filter / pagination parameters for :meth:`LLMUsageRepository.list_filtered`.
+
+    ``before`` is the exclusive keyset cursor: ``(created_at, record_id)``
+    of the last row of the previous page. The next page starts strictly
+    before this tuple in DESC order, breaking ties on ``record_id``.
+    """
+
+    since: datetime
+    until: datetime
+    model: str | None = None
+    task_id: str | None = None
+    status: LLMUsageStatus | None = None
+    before: tuple[datetime, str] | None = None
+    limit: int = 100
 
 
 class LLMUsageRepository(ABC):
@@ -48,4 +101,34 @@ class LLMUsageRepository(ABC):
         Window is ``[since, +inf)``; the caller supplies ``since`` as a
         timezone-aware UTC datetime (typically the first instant of the
         current calendar month). NULL token or cost values count as 0.
+        """
+
+    @abstractmethod
+    async def list_filtered(
+        self,
+        tenant_id: str,
+        filt: LLMUsageFilter,
+    ) -> list[LLMUsageRecord]:
+        """Return up to ``filt.limit`` records matching ``filt``.
+
+        Ordering is by ``created_at`` DESC, breaking ties on
+        ``record_id`` DESC so callers can keyset-paginate using the
+        last row's ``(created_at, record_id)`` tuple via
+        :attr:`LLMUsageFilter.before`. The window is the half-open
+        interval ``[filt.since, filt.until)``.
+        """
+
+    @abstractmethod
+    async def aggregate_grouped(
+        self,
+        tenant_id: str,
+        since: datetime,
+        until: datetime,
+        group_by: UsageGroupBy,
+    ) -> list[UsageAggregate]:
+        """Return per-bucket sums over ``[since, until)`` for ``tenant_id``.
+
+        Buckets are sorted by ``tokens`` DESC so the heaviest consumers
+        sort first. NULL token / cost values count as 0; NULL group
+        keys collapse to a sentinel (see :class:`UsageGroupBy`).
         """

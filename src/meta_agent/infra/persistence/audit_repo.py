@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from meta_agent.core.domain.audit import AuditEvent
-from meta_agent.core.ports.repository import AuditRepository
+from meta_agent.core.ports.repository import AuditFilter, AuditRepository
 from meta_agent.infra.persistence._guard import check_tenant
 from meta_agent.infra.persistence.pool import DatabasePool
 
@@ -66,4 +66,44 @@ class PgAuditRepository(AuditRepository):
         check_tenant(tenant_id)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(self._LIST_RECENT, tenant_id, limit)
+        return [_row_to_event(dict(r)) for r in rows]
+
+    async def list_filtered(
+        self,
+        tenant_id: str,
+        filt: AuditFilter,
+    ) -> list[AuditEvent]:
+        check_tenant(tenant_id)
+        # ``$1..$3`` always bind tenant_id / since / until; optional
+        # filters and the keyset cursor append further params so the
+        # ix_audit_tenant_occurred index keeps driving the plan from a
+        # fixed prefix.
+        params: list[Any] = [tenant_id, filt.since, filt.until]
+        clauses: list[str] = ["tenant_id = $1", "occurred_at >= $2", "occurred_at < $3"]
+        if filt.action is not None:
+            params.append(filt.action)
+            clauses.append(f"action = ${len(params)}")
+        if filt.task_id is not None:
+            params.append(filt.task_id)
+            clauses.append(f"task_id = ${len(params)}")
+        if filt.before is not None:
+            cursor_at, cursor_id = filt.before
+            params.append(cursor_at)
+            cursor_at_n = len(params)
+            params.append(cursor_id)
+            cursor_id_n = len(params)
+            # Strict keyset (DESC): next page starts before the previous
+            # row, breaking ties on event_id to keep ordering stable.
+            clauses.append(
+                f"(occurred_at < ${cursor_at_n} "
+                f"OR (occurred_at = ${cursor_at_n} AND event_id < ${cursor_id_n}))"
+            )
+        params.append(filt.limit)
+        limit_n = len(params)
+        sql = (
+            f"SELECT * FROM audit_events WHERE {' AND '.join(clauses)} "
+            f"ORDER BY occurred_at DESC, event_id DESC LIMIT ${limit_n}"
+        )
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
         return [_row_to_event(dict(r)) for r in rows]

@@ -19,6 +19,7 @@ from meta_agent.core.domain.workspace import Workspace
 from meta_agent.core.orchestration.result import TaskResult
 from meta_agent.core.ports.repository import (
     TERMINAL_TASK_STATES,
+    AuditFilter,
     AuditRepository,
     CheckpointRepository,
     IllegalTaskTransitionError,
@@ -119,6 +120,15 @@ class FakeAuditRepo(AuditRepository):
 
     async def list_recent(self, tenant_id: str, limit: int = 100) -> list[AuditEvent]:
         return [e for e in self.rows if e.tenant_id == tenant_id][:limit]
+
+    async def list_filtered(
+        self,
+        tenant_id: str,
+        filt: AuditFilter,
+    ) -> list[AuditEvent]:
+        # Worker-side fake: query path is not exercised here, the API
+        # layer has its own dedicated fakes in tests/api/test_queries.py.
+        raise AssertionError("list_filtered not exercised by worker fakes")
 
     def actions(self) -> list[str]:
         return [e.action for e in self.rows]

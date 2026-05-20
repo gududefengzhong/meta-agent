@@ -18,7 +18,12 @@ from meta_agent.core.ports.llm import (
     LLMUsage,
     MessageRole,
 )
-from meta_agent.core.ports.llm_usage import LLMUsageRepository
+from meta_agent.core.ports.llm_usage import (
+    LLMUsageFilter,
+    LLMUsageRepository,
+    UsageAggregate,
+    UsageGroupBy,
+)
 from meta_agent.infra.llm.metered import MeteredLLMClient
 from meta_agent.infra.security.context import RequestContext, bind_context
 from tests.core.orchestration._fakes import FakeLLMClient
@@ -42,6 +47,22 @@ class _RecorderSpy(LLMUsageRepository):
         tokens = sum(r.total_tokens or 0 for r in rows)
         cost = sum(r.cost_usd_micros or 0 for r in rows)
         return BudgetUsage(tokens_used=tokens, cost_usd_micros_used=cost)
+
+    async def list_filtered(
+        self,
+        tenant_id: str,
+        filt: LLMUsageFilter,
+    ) -> list[LLMUsageRecord]:
+        raise AssertionError("list_filtered not exercised by metered tests")
+
+    async def aggregate_grouped(
+        self,
+        tenant_id: str,
+        since: datetime,
+        until: datetime,
+        group_by: UsageGroupBy,
+    ) -> list[UsageAggregate]:
+        raise AssertionError("aggregate_grouped not exercised by metered tests")
 
 
 def _ctx(**overrides: str | None) -> RequestContext:

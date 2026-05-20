@@ -14,7 +14,13 @@ import uuid
 from fastapi import Depends, Header, HTTPException, Request, status
 
 from meta_agent.core.ports.auth import AuthBackendError, TokenValidator
-from meta_agent.infra.persistence import DatabasePool, PgOutboxRepository, PgTaskRepository
+from meta_agent.infra.persistence import (
+    DatabasePool,
+    PgAuditRepository,
+    PgLLMUsageRepository,
+    PgOutboxRepository,
+    PgTaskRepository,
+)
 from meta_agent.infra.queue import RedisStreamPublisher
 from meta_agent.infra.security.context import RequestContext
 
@@ -54,6 +60,16 @@ def get_task_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgTaskRepository
 def get_outbox_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgOutboxRepository:
     """Construct a :class:`PgOutboxRepository` from the shared pool."""
     return PgOutboxRepository(pool)
+
+
+def get_audit_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgAuditRepository:
+    """Construct a :class:`PgAuditRepository` from the shared pool."""
+    return PgAuditRepository(pool)
+
+
+def get_llm_usage_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgLLMUsageRepository:
+    """Construct a :class:`PgLLMUsageRepository` from the shared pool."""
+    return PgLLMUsageRepository(pool)
 
 
 # ── Request context ───────────────────────────────────────────────────────────
