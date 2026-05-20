@@ -9,6 +9,7 @@ capabilities) only depends on ports, never on adapter modules.
 """
 
 from meta_agent.core.ports.audit_sink import AuditSink
+from meta_agent.core.ports.auth import AuthBackendError, Principal, TokenValidator
 from meta_agent.core.ports.budget import (
     BudgetBackendError,
     BudgetDecision,
@@ -66,12 +67,24 @@ from meta_agent.core.ports.repository import (
     TaskRepository,
     TenantIsolationError,
 )
+from meta_agent.core.ports.secrets import (
+    KNOWN_SECRET_KEYS,
+    SECRET_KEY_GITHUB_TOKEN,
+    SECRET_KEY_OPENROUTER_API_KEY,
+    SecretBackendError,
+    SecretNotFoundError,
+    Secrets,
+)
 from meta_agent.core.ports.task_submitter import FollowUpSpec, TaskSubmitter
 from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 
 __all__ = [
+    "KNOWN_SECRET_KEYS",
+    "SECRET_KEY_GITHUB_TOKEN",
+    "SECRET_KEY_OPENROUTER_API_KEY",
     "AuditRepository",
     "AuditSink",
+    "AuthBackendError",
     "BudgetBackendError",
     "BudgetDecision",
     "BudgetEnforcer",
@@ -106,6 +119,7 @@ __all__ = [
     "MessagePublisher",
     "MessageRole",
     "OutboxRepository",
+    "Principal",
     "PullRequestAction",
     "PullRequestRef",
     "QueueError",
@@ -113,10 +127,14 @@ __all__ = [
     "RateLimiter",
     "RateLimiterBackendError",
     "RepositoryError",
+    "SecretBackendError",
+    "SecretNotFoundError",
+    "Secrets",
     "SessionRepository",
     "TaskRepository",
     "TaskSubmitter",
     "TenantIsolationError",
+    "TokenValidator",
     "WorkspaceError",
     "WorkspaceManager",
 ]

@@ -24,6 +24,8 @@ from fastapi import FastAPI
 from redis.asyncio import Redis
 
 from meta_agent.api.routers import tasks as tasks_router
+from meta_agent.infra.auth import build_token_validator_from_config
+from meta_agent.infra.auth.config import AuthConfig
 from meta_agent.infra.persistence import OutboxDispatcher, PgOutboxRepository, build_pool
 from meta_agent.infra.persistence.pool import PoolConfig
 from meta_agent.infra.queue import RedisStreamPublisher
@@ -76,6 +78,13 @@ async def _default_lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     dispatcher_task.add_done_callback(_log_dispatcher_done)
 
+    # TokenValidator is the ingress auth gate. ``env`` backend is the
+    # default; ``pg`` backend requires the shared pool so api_keys
+    # lookups reuse the asyncpg connection.
+    auth_config = AuthConfig.from_env()
+    token_validator = build_token_validator_from_config(auth_config, pool=pool)
+    logger.info("api.auth_backend=%s", auth_config.backend)
+
     app.state.db_pool = pool
     app.state.redis = redis_client
     app.state.publisher = publisher
@@ -83,6 +92,7 @@ async def _default_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.outbox_repo = outbox_repo
     app.state.dispatcher = dispatcher
     app.state.dispatcher_task = dispatcher_task
+    app.state.token_validator = token_validator
 
     try:
         yield

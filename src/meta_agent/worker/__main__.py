@@ -14,7 +14,7 @@ import logging
 import signal
 
 from meta_agent.infra.observability import configure_logging
-from meta_agent.worker.bootstrap import WorkerSettings, build_worker
+from meta_agent.worker.bootstrap import build_worker, build_worker_settings_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ _SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 async def _amain() -> None:
     configure_logging()
-    settings = WorkerSettings.from_env()
+    settings = await build_worker_settings_from_env()
     logger.info(
         "worker.startup",
         extra={

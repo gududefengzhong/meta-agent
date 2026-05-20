@@ -44,6 +44,7 @@ from meta_agent.worker.bootstrap import (
     build_rate_limiter,
     build_rate_limiter_from_env,
     build_registry,
+    build_worker_settings_from_env,
 )
 from tests.core.orchestration._fakes import FakeLLMClient
 
@@ -127,6 +128,36 @@ def test_settings_from_env_overrides_each_knob() -> None:
 def test_settings_from_env_requires_openrouter_key() -> None:
     with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
         WorkerSettings.from_env({})
+
+
+async def test_build_worker_settings_from_env_env_backend_passthrough() -> None:
+    """``env`` secrets backend leaves the env dict unchanged (zero-behaviour-change)."""
+
+    settings = await build_worker_settings_from_env(_env())
+    assert settings.openrouter.api_key == "sk-or-test-1234"
+
+
+async def test_build_worker_settings_from_env_file_backend_folds_secrets(
+    tmp_path: Path,
+) -> None:
+    """``file`` secrets backend supplies OPENROUTER_API_KEY without exporting it."""
+
+    import json
+
+    secrets_file = tmp_path / "secrets.json"
+    secrets_file.write_text(
+        json.dumps({"openrouter.api_key": "sk-or-from-file"}),
+        encoding="utf-8",
+    )
+    # Note: no OPENROUTER_API_KEY in the env; only the file backend
+    # supplies it. WorkerSettings.from_env would otherwise raise.
+    settings = await build_worker_settings_from_env(
+        {
+            "META_AGENT_SECRETS_BACKEND": "file",
+            "META_AGENT_SECRETS_FILE": str(secrets_file),
+        }
+    )
+    assert settings.openrouter.api_key == "sk-or-from-file"
 
 
 def test_build_registry_registers_builtin_graphs_and_routes_defaults() -> None:

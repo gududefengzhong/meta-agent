@@ -22,12 +22,24 @@ from meta_agent.api.deps import (
     get_request_ctx,
     get_task_repo,
     get_task_topic,
+    get_token_validator,
 )
 from meta_agent.core.domain.outbox import OutboxStatus
 from meta_agent.core.domain.task import Task, TaskState, TaskType
 from meta_agent.core.orchestration.result import TaskError, TaskErrorCode, TaskResult
+from meta_agent.core.ports.auth import Principal, TokenValidator
 from meta_agent.infra.security.context import RequestContext
 from tests.worker._fakes import FakeOutboxRepo, FakeTaskRepo
+
+
+class _StubTokenValidator(TokenValidator):
+    """Resolve a single hardcoded token to the test tenant/principal."""
+
+    async def validate(self, token: str) -> Principal | None:
+        if token == "tok-test":
+            return Principal(tenant_id="tenant-test", principal_id="user-test")
+        return None
+
 
 # ── Shared fakes ──────────────────────────────────────────────────────────────
 
@@ -35,6 +47,7 @@ _TOPIC = "task.commands"
 _TENANT = "tenant-test"
 _PRINCIPAL = "user-test"
 _HEADERS = {"X-Tenant-Id": _TENANT, "X-Principal-Id": _PRINCIPAL}
+_BEARER = {"Authorization": "Bearer tok-test"}
 
 
 class FakeDbPool:
@@ -118,22 +131,28 @@ async def test_submit_task_returns_201(
     assert event.payload == {"message": "hi"}
 
 
-async def test_submit_task_missing_tenant_returns_401(
+async def test_submit_task_missing_bearer_returns_401(
     fake_repo: FakeTaskRepo, fake_outbox: FakeOutboxRepo
 ) -> None:
-    # Override ctx dep so it reads headers for this test
+    """No ``Authorization`` header → 401 via real :func:`get_request_ctx`.
+
+    The X-Tenant-Id / X-Principal-Id headers must NOT be enough to
+    authenticate: tenancy is taken from the validated bearer token, so
+    sending only legacy headers is treated as unauthenticated.
+    """
     app = create_app(lifespan=None)
     app.dependency_overrides[get_task_repo] = lambda: fake_repo
     app.dependency_overrides[get_outbox_repo] = lambda: fake_outbox
     app.dependency_overrides[get_db_pool] = FakeDbPool
     app.dependency_overrides[get_task_topic] = lambda: _TOPIC
-    # No get_request_ctx override → uses real header-reading dep
+    app.dependency_overrides[get_token_validator] = _StubTokenValidator
+    # No get_request_ctx override → uses real bearer-reading dep
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
             "/v1/tasks",
             json={"task_type": "system_echo"},
-            headers={"X-Principal-Id": _PRINCIPAL},  # missing X-Tenant-Id
+            headers=_HEADERS,  # legacy tenant/principal headers; no bearer
         )
     assert resp.status_code == 401
 
