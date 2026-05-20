@@ -1,13 +1,19 @@
 """Port abstractions: business-layer contracts for external systems.
 
 【目标】仓储、队列、LLM、Git、限流、熔断、Secret、对象存储等 Port 抽象。
-【当前】持久化、消息队列、LLM、Git、限流 Port。
+【当前】持久化、消息队列、LLM、Git、限流、熔断 Port。
 
 Per CLAUDE.md "实现约束": ports are language- and host-neutral; concrete
 adapters live under ``meta_agent.infra``. Business code (orchestration,
 capabilities) only depends on ports, never on adapter modules.
 """
 
+from meta_agent.core.ports.circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerBackendError,
+    CircuitBreakerOpenError,
+    CircuitBreakerState,
+)
 from meta_agent.core.ports.git_provider import (
     GitProvider,
     GitProviderAuthError,
@@ -59,6 +65,10 @@ __all__ = [
     "AuditRepository",
     "ChatMessage",
     "CheckpointRepository",
+    "CircuitBreaker",
+    "CircuitBreakerBackendError",
+    "CircuitBreakerOpenError",
+    "CircuitBreakerState",
     "FinishReason",
     "FollowUpSpec",
     "GitProvider",
