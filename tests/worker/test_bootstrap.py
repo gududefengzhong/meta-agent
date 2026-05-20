@@ -20,14 +20,22 @@ from meta_agent.core.orchestration.graphs import (
     GIT_INSPECT_GRAPH_ID,
     SIMPLE_CHAT_GRAPH_ID,
 )
+from meta_agent.infra.budget.llm_usage_aggregator import (
+    LLMUsageAggregatorBudgetEnforcer,
+)
+from meta_agent.infra.budget.noop import NoopBudgetEnforcer
 from meta_agent.infra.circuitbreaker.in_memory import InMemoryCircuitBreaker
 from meta_agent.infra.circuitbreaker.noop import NoopCircuitBreaker
+from meta_agent.infra.llm.budget_enforcing import BudgetEnforcingLLMClient
 from meta_agent.infra.llm.circuit_breaking import CircuitBreakingLLMClient
 from meta_agent.infra.llm.rate_limited import RateLimitedLLMClient
 from meta_agent.infra.ratelimit.in_memory import InMemoryTokenBucketRateLimiter
 from meta_agent.infra.ratelimit.noop import NoopRateLimiter
 from meta_agent.worker.bootstrap import (
     WorkerSettings,
+    build_budget_enforcer,
+    build_budget_enforcer_from_env,
+    build_budget_enforcing_llm,
     build_chain_registry,
     build_circuit_breaker,
     build_circuit_breaker_from_env,
@@ -258,3 +266,79 @@ def test_build_circuit_breaking_llm_threads_audit_sink() -> None:
     sink = _NullSink()
     client = build_circuit_breaking_llm(FakeLLMClient(), NoopCircuitBreaker(), audit_sink=sink)
     assert client._audit_sink is sink
+
+
+def test_build_budget_enforcer_defaults_to_noop() -> None:
+    enforcer = build_budget_enforcer()
+    assert isinstance(enforcer, NoopBudgetEnforcer)
+
+
+def test_build_budget_enforcer_from_env_defaults_to_noop() -> None:
+    enforcer, config = build_budget_enforcer_from_env({})
+    assert isinstance(enforcer, NoopBudgetEnforcer)
+    assert config.backend == "noop"
+    assert config.cache_ttl_s == 10.0
+    assert config.fail_open is True
+
+
+def test_build_budget_enforcer_from_env_selects_llm_usage_backend() -> None:
+    from datetime import datetime
+
+    from meta_agent.core.domain.llm_usage import LLMUsageRecord
+    from meta_agent.core.ports.budget import BudgetUsage
+    from meta_agent.core.ports.llm_usage import LLMUsageRepository
+
+    class _StubRepo(LLMUsageRepository):
+        async def record(self, record: LLMUsageRecord) -> None:
+            raise AssertionError
+
+        async def list_for_task(self, tenant_id: str, task_id: str) -> list[LLMUsageRecord]:
+            raise AssertionError
+
+        async def aggregate_since(self, tenant_id: str, since: datetime) -> BudgetUsage:
+            return BudgetUsage(tokens_used=0, cost_usd_micros_used=0)
+
+    enforcer, config = build_budget_enforcer_from_env(
+        {
+            "META_AGENT_BUDGET_BACKEND": "llm_usage",
+            "META_AGENT_BUDGET_MAX_TOKENS": "100000",
+            "META_AGENT_BUDGET_CACHE_TTL_S": "5",
+            "META_AGENT_BUDGET_FAIL_OPEN": "false",
+        },
+        usage_repo=_StubRepo(),
+    )
+    assert isinstance(enforcer, LLMUsageAggregatorBudgetEnforcer)
+    assert config.max_tokens_per_month == 100_000
+    assert config.cache_ttl_s == 5.0
+    assert config.fail_open is False
+
+
+def test_build_budget_enforcer_from_env_llm_usage_requires_repo() -> None:
+    with pytest.raises(ValueError, match="requires an LLMUsageRepository"):
+        build_budget_enforcer_from_env({"META_AGENT_BUDGET_BACKEND": "llm_usage"})
+
+
+def test_build_budget_enforcing_llm_wraps_inner() -> None:
+    client = build_budget_enforcing_llm(FakeLLMClient(), NoopBudgetEnforcer())
+    assert isinstance(client, BudgetEnforcingLLMClient)
+
+
+def test_build_budget_enforcing_llm_threads_audit_sink_and_knobs() -> None:
+    from meta_agent.core.domain.audit import AuditEvent
+    from meta_agent.core.ports.audit_sink import AuditSink
+
+    class _NullSink(AuditSink):
+        async def append(self, event: AuditEvent) -> None:
+            return None
+
+    sink = _NullSink()
+    client = build_budget_enforcing_llm(
+        FakeLLMClient(),
+        NoopBudgetEnforcer(),
+        cache_ttl_s=3.0,
+        fail_open=False,
+        audit_sink=sink,
+    )
+    assert client._audit_sink is sink
+    assert client._cache_ttl_s == 3.0
+    assert client._fail_open is False
