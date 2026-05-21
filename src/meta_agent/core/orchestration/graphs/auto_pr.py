@@ -102,6 +102,26 @@ def _truncate(value: str, max_chars: int) -> str:
     return value[: max_chars - len(suffix)] + suffix
 
 
+def _provider_label(git_provider: object | None) -> str:
+    """Best-effort stable provider label for output-only attribution.
+
+    Publish success paths use the adapter-returned ``PullRequestRef``
+    and therefore do not depend on this helper. It only exists so the
+    skipped path can still surface the configured provider rather than
+    hard-coding ``fake``.
+    """
+
+    if git_provider is None:
+        return "unknown"
+    provider = getattr(git_provider, "_provider", None)
+    if isinstance(provider, str) and provider:
+        return provider
+    provider = getattr(git_provider, "PROVIDER_NAME", None)
+    if isinstance(provider, str) and provider:
+        return provider
+    return "unknown"
+
+
 def _render_title(issue_title: str, override: str | None) -> str:
     raw = override if override else f"Fix: {issue_title}"
     return _truncate(raw, _MAX_TITLE_CHARS)
@@ -149,6 +169,7 @@ def build_auto_pr_graph(deps: GraphDeps) -> Graph:
     """
 
     git_provider = deps.git_provider
+    provider_label = _provider_label(git_provider)
 
     async def prepare(state: TaskRunState) -> NodeResult:
         if git_provider is None:
@@ -274,7 +295,7 @@ def build_auto_pr_graph(deps: GraphDeps) -> Graph:
             if not isinstance(skip_reason_raw, str):
                 raise GraphError("auto_pr: missing skip_reason on skipped path")
             action = "skipped"
-            provider = "fake"
+            provider = provider_label
             pr_ref = None
             pr_id = None
             reason = skip_reason_raw  # type: ignore[assignment]

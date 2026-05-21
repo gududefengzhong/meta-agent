@@ -29,6 +29,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 
+# ── Node runtime stage ───────────────────────────────────────────────────────
+# Pull an official Node 24 LTS userspace so the runtime image can reuse the
+# modern node/npm/npx toolchain without relying on Debian's older packages.
+FROM node:24-bookworm-slim AS node_runtime
+
+
 # ── Runtime stage ────────────────────────────────────────────────────────────
 # Minimal image: copy the prebuilt venv and the application code. No package
 # manager, no compiler. Runs as a non-root user.
@@ -39,13 +45,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH="/app/src"
 
-# ``git`` is a runtime dependency: the worker shells out to it for
-# workspace provisioning (LocalGitWorkspaceManager) and for the
-# built-in ``builtin.git_inspect`` smoke graph. Pin to the bookworm
-# stable line so the layer cache stays valid across patch releases.
+# ``git`` is a runtime dependency for workspace provisioning / inspection.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
+    libstdc++6 \
+    
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=node_runtime /usr/local /usr/local
+
+# COPY --from=node_runtime /usr/local/bin/node /usr/local/bin/node
+# COPY --from=node_runtime /usr/local/bin/npm /usr/local/bin/npm
+# COPY --from=node_runtime /usr/local/bin/npx /usr/local/bin/npx
+# COPY --from=node_runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+RUN npm install -g typescript vitest
 
 RUN groupadd --system --gid 1001 app \
     && useradd --system --uid 1001 --gid app --home-dir /app --shell /usr/sbin/nologin app \

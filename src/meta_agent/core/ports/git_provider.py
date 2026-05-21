@@ -8,12 +8,14 @@ the adapter publishes the change as a real pull request.
 Adapter contract (v1, minimum surface):
 
 * Exactly one publish operation: :meth:`GitProvider.open_or_reuse_pr`.
-  The adapter MUST be idempotent on ``(tenant_id, repo_url,
-  head_branch, head_commit_sha)``: any call with a key that already
-  produced a PR returns the same :class:`PullRequestRef` with
-  ``action="reused"``; the adapter MUST NOT mutate the upstream PR
-  on a reuse call (no title/body update; that lives behind a future
-  ``update_pr_body`` method).
+  V1 models "one open PR per ``(tenant_id, repo_url, head_branch)``".
+  If an existing open PR on that branch already points at the caller's
+  ``head_commit_sha``, the adapter returns the same
+  :class:`PullRequestRef` with ``action="reused"``. If an existing open
+  PR on that branch points at a *different* head SHA, the adapter MUST
+  fail the call as a caller-side contract violation: v1 has no
+  "update the existing PR" surface, so silently rewriting or replacing
+  upstream PRs is forbidden.
 * The adapter MUST NOT log or echo credentials. Error messages
   surfaced to callers must already be redacted; see
   ``infra/workspace`` for the precedent.
@@ -104,12 +106,18 @@ class GitProvider(ABC):
         title: str,
         body: str,
     ) -> PullRequestRef:
-        """Open a new PR or reuse the existing one for this commit.
+        """Open a new PR or reuse the existing one for this branch+commit.
 
-        Idempotency contract: ``(tenant_id, repo_url, head_branch,
-        head_commit_sha)`` is the dedup key. A call with a key that
-        has already been used returns the *same* :class:`PullRequestRef`
-        with ``action="reused"``.
+        V1 branch contract:
+
+        * No open PR on ``(tenant_id, repo_url, head_branch)`` →
+          create a new PR.
+        * Existing open PR on that branch with the same
+          ``head_commit_sha`` → return the same
+          :class:`PullRequestRef` with ``action="reused"``.
+        * Existing open PR on that branch with a different head SHA →
+          raise :class:`GitProviderInvalidRequestError` until a future
+          ``update_pr_body`` / ``update_pr_head`` surface exists.
 
         Raises:
             GitProviderAuthError: missing/revoked credentials.

@@ -162,3 +162,43 @@ async def test_open_or_reuse_retries_then_succeeds_on_transient_5xx() -> None:
     # Exactly one backoff slept between the 503 and the retry that
     # returned 200; the search-then-create POST does not sleep.
     assert sleeps == [0.0]
+
+
+async def test_open_or_reuse_treats_secondary_rate_limit_403_as_transient() -> None:
+    """GitHub's secondary throttling often surfaces as 403, not 429."""
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    responses = iter(
+        [
+            httpx.Response(
+                403,
+                headers={"Retry-After": "0"},
+                json={
+                    "message": "You have exceeded a secondary rate limit. Please wait a few minutes."
+                },
+            ),
+            httpx.Response(200, json=[]),
+            httpx.Response(201, json=_pr_payload(number=8, sha="deadbeef0123")),
+        ]
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return next(responses)
+
+    provider = GitHubGitProvider(
+        _config(),
+        transport=httpx.MockTransport(handler),
+        sleep=fake_sleep,
+    )
+    try:
+        ref = await provider.open_or_reuse_pr(**_kwargs())
+    finally:
+        await provider.close()
+
+    assert ref.action == "created"
+    assert ref.pr_id == "8"
+    assert sleeps == [0.0]

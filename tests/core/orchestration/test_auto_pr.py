@@ -25,6 +25,10 @@ from meta_agent.infra.git_provider import FakeGitProvider
 from tests.core.orchestration._fakes import FakeLLMClient
 
 
+class _GitHubNamedFakeProvider(FakeGitProvider):
+    PROVIDER_NAME = "github"
+
+
 def _payload(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "repo_url": "https://example.test/acme/widget.git",
@@ -106,6 +110,16 @@ async def test_skip_rules_succeed_under_scheme_x(override: dict[str, object], re
     assert out["pr_ref"] is None
     assert out["pr_id"] is None
     assert provider.calls == []
+
+
+async def test_skip_path_reports_configured_provider_not_hard_coded_fake() -> None:
+    provider = _GitHubNamedFakeProvider()
+    graph = build_auto_pr_graph(_deps(provider))
+    state = await graph.run(_state(data=_payload(verifier_passed=False)))
+    out = state.data["output"]
+    assert isinstance(out, dict)
+    assert out["action"] == "skipped"
+    assert out["provider"] == "github"
 
 
 async def test_reuse_returns_same_pr_for_same_commit() -> None:

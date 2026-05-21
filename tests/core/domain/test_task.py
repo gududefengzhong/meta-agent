@@ -81,4 +81,5 @@ def test_task_type_set_contains_expected_members() -> None:
         "system_echo",
         "system_chat",
         "system_git_inspect",
+        "system_shell_agent",
     }

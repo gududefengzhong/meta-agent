@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from meta_agent.core.capabilities.executor import ToolExecutor
+from meta_agent.core.capabilities.registry import ToolRegistry
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.ports.llm import (
     FinishReason,
@@ -12,23 +14,26 @@ from meta_agent.core.ports.llm import (
     LLMResponse,
     LLMUsage,
 )
+from meta_agent.core.ports.tools import ToolCall
 
 
 class FakeLLMClient(LLMClient):
     """In-memory :class:`LLMClient` used by graph unit tests.
 
     The client records every received request and returns either a
-    pre-canned response or whatever ``handler`` produces. Pass an
-    exception-raising handler to exercise error paths.
+    pre-canned response, a script of responses (one per call), or
+    whatever ``handler`` produces. Pass an exception-raising handler to
+    exercise error paths.
     """
 
     def __init__(
         self,
         *,
         response: LLMResponse | None = None,
+        responses: list[LLMResponse] | None = None,
         handler: Callable[[LLMRequest], LLMResponse] | None = None,
     ) -> None:
-        if response is None and handler is None:
+        if response is None and responses is None and handler is None:
             response = LLMResponse(
                 content="ok",
                 model="fake/echo",
@@ -36,6 +41,7 @@ class FakeLLMClient(LLMClient):
                 usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
             )
         self._response = response
+        self._responses = list(responses) if responses is not None else None
         self._handler = handler
         self.calls: list[LLMRequest] = []
         self.closed = False
@@ -44,6 +50,10 @@ class FakeLLMClient(LLMClient):
         self.calls.append(request)
         if self._handler is not None:
             return self._handler(request)
+        if self._responses is not None:
+            if not self._responses:
+                raise AssertionError("FakeLLMClient.responses script exhausted")
+            return self._responses.pop(0)
         assert self._response is not None  # default branch populated above
         return self._response
 
@@ -57,6 +67,7 @@ def make_response(
     model: str = "fake/echo",
     finish_reason: FinishReason = "stop",
     usage: LLMUsage | None = None,
+    tool_calls: tuple[ToolCall, ...] = (),
     provider_response_id: str | None = None,
 ) -> LLMResponse:
     return LLMResponse(
@@ -64,6 +75,7 @@ def make_response(
         model=model,
         finish_reason=finish_reason,
         usage=usage or LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        tool_calls=tool_calls,
         provider_response_id=provider_response_id,
     )
 
@@ -72,10 +84,22 @@ def fake_deps(
     client: LLMClient | None = None,
     *,
     git_push_token: str | None = None,
+    tool_registry: ToolRegistry | None = None,
+    tool_executor: ToolExecutor | None = None,
 ) -> GraphDeps:
-    """Build a :class:`GraphDeps` with an opinionated :class:`FakeLLMClient`."""
+    """Build a :class:`GraphDeps` with an opinionated :class:`FakeLLMClient`.
 
+    When ``tool_registry`` is supplied but ``tool_executor`` is not,
+    a default :class:`ToolExecutor` is materialised against it so
+    callers can write ``fake_deps(client, tool_registry=reg)`` without
+    constructing the executor by hand.
+    """
+
+    if tool_registry is not None and tool_executor is None:
+        tool_executor = ToolExecutor(tool_registry)
     return GraphDeps(
         llm=client if client is not None else FakeLLMClient(),
         git_push_token=git_push_token,
+        tool_registry=tool_registry,
+        tool_executor=tool_executor,
     )

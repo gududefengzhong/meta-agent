@@ -14,12 +14,14 @@ only sizes, model id, and finish reason — to avoid leaking prompts.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
 import httpx
 
 from meta_agent.core.ports.llm import (
+    ChatMessage,
     FinishReason,
     LLMAuthError,
     LLMClient,
@@ -30,7 +32,9 @@ from meta_agent.core.ports.llm import (
     LLMResponse,
     LLMTransientError,
     LLMUsage,
+    MessageRole,
 )
+from meta_agent.core.ports.tools import ToolCall, ToolSpec
 from meta_agent.infra.llm.config import OpenRouterConfig
 
 logger = logging.getLogger(__name__)
@@ -71,8 +75,11 @@ def _decode_success(response: httpx.Response) -> LLMResponse:
     """Translate a 200 response into an :class:`LLMResponse`.
 
     Raises :class:`LLMTransientError` if the body is unparseable or
-    missing the ``choices[0].message.content`` path so the retry loop
-    can attempt again rather than crashing the caller.
+    missing the ``choices[0].message`` path so the retry loop can
+    attempt again rather than crashing the caller. ``content`` may be
+    ``null`` when the model elected to invoke tools instead of producing
+    text; in that case we surface it as the empty string and rely on
+    :attr:`LLMResponse.tool_calls` to carry the action.
     """
     try:
         body = response.json()
@@ -89,9 +96,16 @@ def _decode_success(response: httpx.Response) -> LLMResponse:
     message = first.get("message")
     if not isinstance(message, dict):
         raise LLMTransientError("openrouter choice missing message")
-    content = message.get("content")
-    if not isinstance(content, str):
-        raise LLMTransientError("openrouter choice missing string content")
+    raw_content = message.get("content")
+    if raw_content is None:
+        content = ""
+    elif isinstance(raw_content, str):
+        content = raw_content
+    else:
+        raise LLMTransientError("openrouter choice content is not string|null")
+    tool_calls = _decode_tool_calls(message.get("tool_calls"))
+    if not content and not tool_calls:
+        raise LLMTransientError("openrouter choice has neither content nor tool_calls")
     usage_value = body.get("usage")
     usage_raw: dict[str, Any] = usage_value if isinstance(usage_value, dict) else {}
     usage = LLMUsage(
@@ -105,8 +119,49 @@ def _decode_success(response: httpx.Response) -> LLMResponse:
         model=model_id if isinstance(model_id, str) else "",
         finish_reason=_coerce_finish_reason(first.get("finish_reason")),
         usage=usage,
+        tool_calls=tool_calls,
         provider_response_id=body.get("id") if isinstance(body.get("id"), str) else None,
     )
+
+
+def _decode_tool_calls(raw: object) -> tuple[ToolCall, ...]:
+    """Parse an OpenAI-style ``tool_calls`` array into typed objects.
+
+    Unknown / malformed entries raise :class:`LLMTransientError` so
+    retry kicks in rather than silently dropping a model action. Each
+    entry's ``function.arguments`` is a JSON-encoded string per the
+    upstream contract; we decode it eagerly into ``dict[str, Any]``.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise LLMTransientError("openrouter tool_calls is not an array")
+    decoded: list[ToolCall] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise LLMTransientError("openrouter tool_call entry is not an object")
+        call_id = entry.get("id")
+        function = entry.get("function")
+        if not isinstance(call_id, str) or not call_id:
+            raise LLMTransientError("openrouter tool_call missing id")
+        if not isinstance(function, dict):
+            raise LLMTransientError("openrouter tool_call missing function payload")
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            raise LLMTransientError("openrouter tool_call function missing name")
+        arguments_raw = function.get("arguments", "{}")
+        if not isinstance(arguments_raw, str):
+            raise LLMTransientError("openrouter tool_call arguments must be a JSON string")
+        try:
+            arguments = json.loads(arguments_raw) if arguments_raw else {}
+        except ValueError as exc:
+            raise LLMTransientError(
+                f"openrouter tool_call arguments not valid JSON: {exc!s}"
+            ) from exc
+        if not isinstance(arguments, dict):
+            raise LLMTransientError("openrouter tool_call arguments must decode to object")
+        decoded.append(ToolCall(id=call_id, name=name, arguments=arguments))
+    return tuple(decoded)
 
 
 def _maybe_int(value: object) -> int | None:
@@ -116,6 +171,45 @@ def _maybe_int(value: object) -> int | None:
     if isinstance(value, int):
         return value
     return None
+
+
+def _encode_message(message: ChatMessage) -> dict[str, Any]:
+    """Encode a :class:`ChatMessage` in OpenAI/OpenRouter wire shape.
+
+    Tool-role messages carry ``tool_call_id``; assistant messages with
+    ``tool_calls`` emit them under ``tool_calls`` (each function's
+    ``arguments`` is serialised as a JSON string per the spec).
+    """
+    encoded: dict[str, Any] = {"role": message.role.value, "content": message.content}
+    if message.role is MessageRole.TOOL:
+        if not message.tool_call_id:
+            raise LLMInvalidRequestError("tool-role messages require tool_call_id")
+        encoded["tool_call_id"] = message.tool_call_id
+    if message.tool_calls:
+        encoded["tool_calls"] = [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {
+                    "name": call.name,
+                    "arguments": json.dumps(call.arguments, sort_keys=True),
+                },
+            }
+            for call in message.tool_calls
+        ]
+    return encoded
+
+
+def _encode_tool_spec(spec: ToolSpec) -> dict[str, Any]:
+    """Encode a :class:`ToolSpec` as an OpenAI-style ``function`` tool."""
+    return {
+        "type": "function",
+        "function": {
+            "name": spec.name,
+            "description": spec.description,
+            "parameters": dict(spec.parameters),
+        },
+    }
 
 
 class OpenRouterClient(LLMClient):
@@ -179,7 +273,7 @@ class OpenRouterClient(LLMClient):
     def _build_body(self, request: LLMRequest) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": request.model or self._config.default_model,
-            "messages": [{"role": m.role.value, "content": m.content} for m in request.messages],
+            "messages": [_encode_message(m) for m in request.messages],
         }
         if request.temperature is not None:
             body["temperature"] = request.temperature
@@ -187,6 +281,8 @@ class OpenRouterClient(LLMClient):
             body["max_tokens"] = request.max_tokens
         if request.stop:
             body["stop"] = list(request.stop)
+        if request.tools:
+            body["tools"] = [_encode_tool_spec(spec) for spec in request.tools]
         return body
 
     def _parse(self, response: httpx.Response) -> LLMResponse:
