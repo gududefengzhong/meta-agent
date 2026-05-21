@@ -30,6 +30,7 @@ import os
 import re
 from pathlib import Path
 
+from meta_agent.core.capabilities.executor import ToolExecutor
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
 from meta_agent.core.orchestration.graphs.shell_agent import (
@@ -208,7 +209,7 @@ async def _verify_with_test_tool(
     changed: list[str],
     *,
     workspace: Path,
-    tool_executor,
+    tool_executor: ToolExecutor,
 ) -> dict[str, object]:
     if not changed:
         return {

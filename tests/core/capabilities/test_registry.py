@@ -66,7 +66,7 @@ def test_names_and_contains_membership() -> None:
     assert registry.names() == frozenset({"x"})
     assert "x" in registry
     assert "y" not in registry
-    assert 42 not in registry  # type: ignore[operator]
+    assert 42 not in registry
 
 
 def test_len_reflects_population() -> None:

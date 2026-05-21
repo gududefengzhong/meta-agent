@@ -6,7 +6,7 @@ import asyncio
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -101,6 +101,12 @@ def _docker_tool_registry(workspace_root: Path) -> ToolRegistry:
     return registry
 
 
+def _output(state: TaskRunState) -> dict[str, Any]:
+    raw = state.data["output"]
+    assert isinstance(raw, dict)
+    return cast(dict[str, Any], raw)
+
+
 async def test_happy_path_edits_file_and_verifies(tiny_repo: Path) -> None:
     patched = 'def greet(name: str) -> str:\n    return f"hi {name}!"\n'
     client = FakeLLMClient(
@@ -124,7 +130,7 @@ async def test_happy_path_edits_file_and_verifies(tiny_repo: Path) -> None:
     final = await graph.run(_state(tiny_repo))
 
     assert final.current_node == END
-    output = final.data["output"]
+    output = _output(final)
     assert isinstance(output, dict)
     assert output["verifier_passed"] is True
     assert output["attempts"] == 1
@@ -173,7 +179,7 @@ async def test_verify_failure_triggers_single_replan(tiny_repo: Path) -> None:
 
     final = await graph.run(_state(tiny_repo))
 
-    output = final.data["output"]
+    output = _output(final)
     assert output["verifier_passed"] is True
     assert output["attempts"] == 2
     assert output["assistant_message"] == "fixed after verifier"
@@ -206,7 +212,7 @@ async def test_push_skips_when_no_token(tiny_repo_with_remote: tuple[Path, Path]
 
     final = await graph.run(_state(repo, extra={"repo_url": str(remote), "base_ref": "main"}))
 
-    output = final.data["output"]
+    output = _output(final)
     assert output["verifier_passed"] is True
     assert output["pushed"] is False
     assert output["push_skip_reason"] == "no_token"
@@ -254,7 +260,7 @@ async def test_push_invokes_git_with_token_only_in_env(
 
     final = await graph.run(_state(repo, extra={"repo_url": str(remote), "base_ref": "main"}))
 
-    output = final.data["output"]
+    output = _output(final)
     assert output["pushed"] is True
     assert output["push_skip_reason"] is None
     assert len(captured) == 1
@@ -327,7 +333,7 @@ async def test_happy_path_with_docker_tool_stack_uses_docker_exec(
 
     final = await graph.run(_state(tiny_repo))
 
-    output = final.data["output"]
+    output = _output(final)
     assert output["verifier_passed"] is True
     assert output["tool_invocations"] == 1
     assert (tiny_repo / "buggy.py").read_text(encoding="utf-8") == patched
@@ -388,7 +394,7 @@ async def test_verify_suite_override_flows_to_test_tool(tmp_path: Path) -> None:
         )
     )
 
-    output = final.data["output"]
+    output = _output(final)
     assert output["verifier_passed"] is True
     assert "suite=typescript_typecheck" in output["verifier_output"]
     assert "ts-ok" in output["verifier_output"]
@@ -469,7 +475,7 @@ async def test_verify_suite_typescript_test_with_docker_tool_stack(
         )
     )
 
-    output = final.data["output"]
+    output = _output(final)
     assert output["verifier_passed"] is True
     assert "suite=typescript_test" in output["verifier_output"]
     assert "vitest-pass" in output["verifier_output"]

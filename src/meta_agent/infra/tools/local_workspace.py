@@ -315,7 +315,7 @@ class LocalWorkspaceShellTool(ShellTool):
         ctx: ToolContext,
         *,
         argv: tuple[str, ...],
-        timeout_seconds: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ShellOutcome:
         if not argv:
             raise ToolValidationError("argv must not be empty")
@@ -373,7 +373,7 @@ class LocalWorkspaceTestTool(TestTool):
         *,
         suite: str,
         targets: tuple[str, ...] = (),
-        timeout_seconds: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> TestOutcome:
         if not suite:
             raise ToolValidationError("suite must not be empty")

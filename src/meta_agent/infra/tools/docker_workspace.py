@@ -104,7 +104,7 @@ class _DockerWorkspaceToolBase:
         workspace: Path,
         *,
         argv: tuple[str, ...],
-        timeout_seconds: int,
+        timeout_seconds: float,
         stdin: bytes | None = None,
     ) -> tuple[int, bytes, bytes]:
         proc = await asyncio.create_subprocess_exec(
@@ -370,7 +370,7 @@ class DockerWorkspaceShellTool(_DockerWorkspaceToolBase, ShellTool):
         ctx: ToolContext,
         *,
         argv: tuple[str, ...],
-        timeout_seconds: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ShellOutcome:
         if not argv:
             raise ToolValidationError("argv must not be empty")
@@ -429,7 +429,7 @@ class DockerWorkspaceTestTool(_DockerWorkspaceToolBase, TestTool):
         *,
         suite: str,
         targets: tuple[str, ...] = (),
-        timeout_seconds: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> TestOutcome:
         if not suite:
             raise ToolValidationError("suite must not be empty")

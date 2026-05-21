@@ -275,7 +275,7 @@ class ShellTool(ABC):
         ctx: ToolContext,
         *,
         argv: tuple[str, ...],
-        timeout_seconds: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ShellOutcome:
         """Run ``argv`` and return stdout/stderr plus the exit status."""
 
@@ -300,6 +300,6 @@ class TestTool(ABC):
         *,
         suite: str,
         targets: tuple[str, ...] = (),
-        timeout_seconds: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> TestOutcome:
         """Run ``suite`` against ``targets`` within the workspace."""
