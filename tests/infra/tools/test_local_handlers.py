@@ -80,12 +80,12 @@ def test_register_is_idempotent_only_via_fresh_registry() -> None:
     register_local_workspace_tools(
         registry,
         fs=LocalWorkspaceFileSystemTool(),
-            edit=LocalWorkspaceEditTool(),
-            shell=LocalWorkspaceShellTool(
-                allowed_commands=frozenset({Path(sys.executable).name, "python", "python3"})
-            ),
-            test=LocalWorkspaceTestTool(),
-        )
+        edit=LocalWorkspaceEditTool(),
+        shell=LocalWorkspaceShellTool(
+            allowed_commands=frozenset({Path(sys.executable).name, "python", "python3"})
+        ),
+        test=LocalWorkspaceTestTool(),
+    )
     with pytest.raises(ToolValidationError):
         register_local_workspace_tools(
             registry,
@@ -98,9 +98,7 @@ def test_register_is_idempotent_only_via_fresh_registry() -> None:
         )
 
 
-async def test_fs_read_handler_round_trip(
-    populated_registry: ToolRegistry, tmp_path: Path
-) -> None:
+async def test_fs_read_handler_round_trip(populated_registry: ToolRegistry, tmp_path: Path) -> None:
     (tmp_path / "x.txt").write_text("hello", encoding="utf-8")
     executor = ToolExecutor(populated_registry)
     call = ToolCall(id="c1", name=TOOL_FS_READ, arguments={"path": "x.txt"})

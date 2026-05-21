@@ -153,9 +153,7 @@ async def test_grep_caps_at_max_matches(workspace: Path) -> None:
     body = "\n".join(["match"] * 10) + "\n"
     (workspace / "many.txt").write_text(body, encoding="utf-8")
     fs = LocalWorkspaceFileSystemTool()
-    hits = await fs.grep(
-        _ctx(workspace), pattern=r"match", path_globs=("**/*.txt",), max_matches=3
-    )
+    hits = await fs.grep(_ctx(workspace), pattern=r"match", path_globs=("**/*.txt",), max_matches=3)
     assert len(hits) == 3
 
 
@@ -209,21 +207,12 @@ def _has_git() -> bool:
 @pytest.mark.skipif(not _has_git(), reason="git binary not available")
 async def test_patch_apply_happy_path(workspace: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"], cwd=workspace, check=True
-    )
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=workspace, check=True)
     subprocess.run(["git", "config", "user.name", "test"], cwd=workspace, check=True)
     (workspace / "f.txt").write_text("old\n", encoding="utf-8")
     subprocess.run(["git", "add", "f.txt"], cwd=workspace, check=True)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=workspace, check=True)
-    diff = (
-        "diff --git a/f.txt b/f.txt\n"
-        "--- a/f.txt\n"
-        "+++ b/f.txt\n"
-        "@@ -1 +1 @@\n"
-        "-old\n"
-        "+new\n"
-    )
+    diff = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\n"
     edit = LocalWorkspaceEditTool()
     outcome = await edit.patch_apply(_ctx(workspace), unified_diff=diff)
     assert outcome.files_changed == ("f.txt",)
@@ -284,7 +273,9 @@ async def test_shell_run_times_out(workspace: Path) -> None:
 
 
 async def test_test_run_returns_exit_code_and_output(workspace: Path) -> None:
-    (workspace / "lint_ok.py").write_text("def hello() -> str:\n    return 'hi'\n", encoding="utf-8")
+    (workspace / "lint_ok.py").write_text(
+        "def hello() -> str:\n    return 'hi'\n", encoding="utf-8"
+    )
     test_tool = LocalWorkspaceTestTool()
     outcome = await test_tool.run(
         _ctx(workspace),

@@ -116,9 +116,7 @@ class _DockerWorkspaceToolBase:
         )
         try:
             communicate = proc.communicate(stdin) if stdin is not None else proc.communicate()
-            stdout_b, stderr_b = await asyncio.wait_for(
-                communicate, timeout=timeout_seconds
-            )
+            stdout_b, stderr_b = await asyncio.wait_for(communicate, timeout=timeout_seconds)
         except TimeoutError as exc:
             proc.kill()
             await proc.wait()
@@ -173,7 +171,9 @@ class DockerWorkspaceFileSystemTool(_DockerWorkspaceToolBase, FileSystemTool):
             timeout_seconds=self._default_timeout_seconds,
         )
         if code != 0:
-            detail = _decode_bounded(stderr_b or stdout_b, ctx.output_byte_cap).strip() or "read failed"
+            detail = (
+                _decode_bounded(stderr_b or stdout_b, ctx.output_byte_cap).strip() or "read failed"
+            )
             raise ToolExecutionError(f"read failed: {detail}")
         return _decode_bounded(stdout_b, ctx.output_byte_cap)
 
@@ -223,7 +223,9 @@ class DockerWorkspaceFileSystemTool(_DockerWorkspaceToolBase, FileSystemTool):
             timeout_seconds=self._default_timeout_seconds,
         )
         if code != 0:
-            detail = _decode_bounded(stderr_b or stdout_b, ctx.output_byte_cap).strip() or "list failed"
+            detail = (
+                _decode_bounded(stderr_b or stdout_b, ctx.output_byte_cap).strip() or "list failed"
+            )
             raise ToolExecutionError(f"list_dir failed: {detail}")
         return tuple(json.loads(stdout_b.decode("utf-8", errors="replace")))
 
@@ -286,7 +288,9 @@ class DockerWorkspaceFileSystemTool(_DockerWorkspaceToolBase, FileSystemTool):
             timeout_seconds=self._default_timeout_seconds,
         )
         if code != 0:
-            detail = _decode_bounded(stderr_b or stdout_b, ctx.output_byte_cap).strip() or "grep failed"
+            detail = (
+                _decode_bounded(stderr_b or stdout_b, ctx.output_byte_cap).strip() or "grep failed"
+            )
             raise ToolExecutionError(f"grep failed: {detail}")
         raw_hits = json.loads(stdout_b.decode("utf-8", errors="replace"))
         return tuple(GrepHit.model_validate(item) for item in raw_hits)
@@ -323,7 +327,9 @@ class DockerWorkspaceEditTool(_DockerWorkspaceToolBase, EditTool):
             stdin=encoded,
         )
         if code != 0:
-            detail = _decode_bounded(stderr_b or stdout_b, ctx.output_byte_cap).strip() or "write failed"
+            detail = (
+                _decode_bounded(stderr_b or stdout_b, ctx.output_byte_cap).strip() or "write failed"
+            )
             raise ToolExecutionError(f"write failed: {detail}")
         payload = json.loads(stdout_b.decode("utf-8", errors="replace"))
         return EditOutcome(
@@ -435,10 +441,7 @@ class DockerWorkspaceTestTool(_DockerWorkspaceToolBase, TestTool):
         workspace = self._require_workspace(ctx)
         argv = (
             *self._suites[suite],
-            *(
-                self._relative_arg(workspace, target)
-                for target in _suite_targets(suite, targets)
-            ),
+            *(self._relative_arg(workspace, target) for target in _suite_targets(suite, targets)),
         )
         code, stdout_b, stderr_b = await self._exec(
             workspace,

@@ -325,9 +325,7 @@ async def test_request_serialises_tools_and_tool_messages() -> None:
             ChatMessage(
                 role=MessageRole.ASSISTANT,
                 content="",
-                tool_calls=(
-                    ToolCall(id="call_1", name="fs_read", arguments={"path": "x"}),
-                ),
+                tool_calls=(ToolCall(id="call_1", name="fs_read", arguments={"path": "x"}),),
             ),
             ChatMessage(
                 role=MessageRole.TOOL,

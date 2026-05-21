@@ -298,23 +298,21 @@ async def test_happy_path_with_docker_tool_stack_uses_docker_exec(
         if args and args[0] == "docker":
             docker_calls.append([str(part) for part in args])
             workspace = tiny_repo
+            argv = [str(part) for part in args]
 
             class _Proc:
                 returncode = 0
 
                 async def communicate(self, stdin: bytes | None = None) -> tuple[bytes, bytes]:
-                    command = str(args[5]) if len(args) > 5 else ""
-                    if command == "python3" and "tmp.replace(target)" in str(args[7]):
-                        target = workspace / str(args[8])
+                    if "python3" in argv and any("tmp.replace(target)" in part for part in argv):
+                        target = workspace / argv[-1]
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.write_bytes(stdin or b"")
                         size = len(stdin or b"")
-                        body = (
-                            f'{{"files_changed":["{args[8]}"],"bytes_written":{size}}}'
-                        ).encode()
+                        body = f'{{"files_changed":["{argv[-1]}"],"bytes_written":{size}}}'.encode()
                         return (body, b"")
-                    if command == "python3" and "read_bytes" in str(args[7]):
-                        target = workspace / str(args[8])
+                    if "python3" in argv and any("read_bytes" in part for part in argv):
+                        target = workspace / argv[-1]
                         return (target.read_bytes(), b"")
                     return (b"", b"")
 
@@ -334,13 +332,10 @@ async def test_happy_path_with_docker_tool_stack_uses_docker_exec(
     assert output["tool_invocations"] == 1
     assert (tiny_repo / "buggy.py").read_text(encoding="utf-8") == patched
     assert docker_calls
-    assert docker_calls[0][:5] == [
-        "docker",
-        "exec",
-        "-w",
-        "/workspace/repo",
-        f"meta-agent-ws-{tiny_repo.parent.name}",
-    ]
+    first_call = docker_calls[0]
+    assert first_call[:2] == ["docker", "exec"]
+    assert "/workspace/repo" in first_call
+    assert f"meta-agent-ws-{tiny_repo.parent.name}" in first_call
 
 
 async def test_verify_suite_override_flows_to_test_tool(tmp_path: Path) -> None:
@@ -378,9 +373,7 @@ async def test_verify_suite_override_flows_to_test_tool(tmp_path: Path) -> None:
         edit=LocalWorkspaceEditTool(),
         shell=LocalWorkspaceShellTool(),
         test=LocalWorkspaceTestTool(
-            suites={
-                "typescript_typecheck": (sys.executable, "-c", "print('ts-ok')")
-            },
+            suites={"typescript_typecheck": (sys.executable, "-c", "print('ts-ok')")},
         ),
     )
     graph = build_bug_fix_v2_graph(fake_deps(client, tool_registry=registry))
@@ -440,22 +433,20 @@ async def test_verify_suite_typescript_test_with_docker_tool_stack(
         if args and args[0] == "docker":
             docker_calls.append([str(part) for part in args])
             workspace = repo
+            argv = [str(part) for part in args]
 
             class _Proc:
                 returncode = 0
 
                 async def communicate(self, stdin: bytes | None = None) -> tuple[bytes, bytes]:
-                    command = str(args[5]) if len(args) > 5 else ""
-                    if command == "python3" and "tmp.replace(target)" in str(args[7]):
-                        target = workspace / str(args[8])
+                    if "python3" in argv and any("tmp.replace(target)" in part for part in argv):
+                        target = workspace / argv[-1]
                         target.parent.mkdir(parents=True, exist_ok=True)
                         target.write_bytes(stdin or b"")
                         size = len(stdin or b"")
-                        body = (
-                            f'{{"files_changed":["{args[8]}"],"bytes_written":{size}}}'
-                        ).encode()
+                        body = f'{{"files_changed":["{argv[-1]}"],"bytes_written":{size}}}'.encode()
                         return (body, b"")
-                    if command == "npx" and len(args) > 7 and str(args[6]) == "vitest":
+                    if "npx" in argv and "vitest" in argv and "run" in argv:
                         return (b"vitest-pass", b"")
                     return (b"", b"")
 

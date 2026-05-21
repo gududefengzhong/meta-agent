@@ -61,7 +61,9 @@ def _manager(tmp_path: Path, inner: _StubInner) -> DockerWorkspaceManager:
     )
 
 
-async def test_provision_starts_container_with_bind_mount(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_provision_starts_container_with_bind_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     ws = _workspace(tmp_path)
     inner = _StubInner(ws)
     manager = _manager(tmp_path, inner)
@@ -114,13 +116,17 @@ async def test_cleanup_stops_container_then_cleans_inner(
     assert inner.cleaned == [ws]
 
 
-async def test_cleanup_ignores_missing_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cleanup_ignores_missing_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     ws = _workspace(tmp_path)
     inner = _StubInner(ws)
     manager = _manager(tmp_path, inner)
 
     async def fake_run(args: object) -> str:
-        raise WorkspaceError("docker command failed (exit=1): docker rm -f meta-agent-ws-ws-1\nNo such container")
+        raise WorkspaceError(
+            "docker command failed (exit=1): docker rm -f meta-agent-ws-ws-1\nNo such container"
+        )
 
     monkeypatch.setattr(manager, "_run", fake_run)
 

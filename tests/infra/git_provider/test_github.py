@@ -177,7 +177,9 @@ async def test_open_or_reuse_treats_secondary_rate_limit_403_as_transient() -> N
             httpx.Response(
                 403,
                 headers={"Retry-After": "0"},
-                json={"message": "You have exceeded a secondary rate limit. Please wait a few minutes."},
+                json={
+                    "message": "You have exceeded a secondary rate limit. Please wait a few minutes."
+                },
             ),
             httpx.Response(200, json=[]),
             httpx.Response(201, json=_pr_payload(number=8, sha="deadbeef0123")),

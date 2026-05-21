@@ -185,9 +185,9 @@ class WorkerSettings:
         :class:`Secrets` backend gets a chance to fold credentials in.
         """
         source: dict[str, str] = dict(env if env is not None else os.environ)
-        workspace_backend = source.get(
-            _WORKSPACE_BACKEND_ENV, _DEFAULT_WORKSPACE_BACKEND
-        ).strip().lower()
+        workspace_backend = (
+            source.get(_WORKSPACE_BACKEND_ENV, _DEFAULT_WORKSPACE_BACKEND).strip().lower()
+        )
         if workspace_backend not in _SUPPORTED_WORKSPACE_BACKENDS:
             raise ValueError(
                 f"{_WORKSPACE_BACKEND_ENV}={workspace_backend!r} not in "
@@ -249,7 +249,9 @@ class WorkerRuntime:
     resources: dict[str, object] = field(default_factory=dict)
 
 
-def build_shell_tool(settings: WorkerSettings) -> LocalWorkspaceShellTool | DockerWorkspaceShellTool:
+def build_shell_tool(
+    settings: WorkerSettings,
+) -> LocalWorkspaceShellTool | DockerWorkspaceShellTool:
     """Materialize the shell tool for the configured workspace backend."""
 
     if settings.workspace_backend == "local_git":
@@ -323,7 +325,9 @@ def build_local_tool_stack(
     return registry, ToolExecutor(registry)
 
 
-def build_workspace_manager(settings: WorkerSettings) -> LocalGitWorkspaceManager | DockerWorkspaceManager:
+def build_workspace_manager(
+    settings: WorkerSettings,
+) -> LocalGitWorkspaceManager | DockerWorkspaceManager:
     """Materialize the configured workspace backend.
 
     Phase β currently supports two backends:

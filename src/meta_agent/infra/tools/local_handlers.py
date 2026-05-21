@@ -45,9 +45,7 @@ TOOL_SHELL_RUN = "shell_run"
 TOOL_TEST_RUN = "test_run"
 
 
-def _arg_str(
-    args: dict[str, Any], key: str, *, required: bool = True, default: str = ""
-) -> str:
+def _arg_str(args: dict[str, Any], key: str, *, required: bool = True, default: str = "") -> str:
     if key not in args:
         if required:
             raise ToolValidationError(f"missing required argument {key!r}")
@@ -85,9 +83,7 @@ def _arg_bool(args: dict[str, Any], key: str, *, default: bool) -> bool:
     return value
 
 
-def _arg_str_tuple(
-    args: dict[str, Any], key: str, *, default: tuple[str, ...]
-) -> tuple[str, ...]:
+def _arg_str_tuple(args: dict[str, Any], key: str, *, default: tuple[str, ...]) -> tuple[str, ...]:
     if key not in args:
         return default
     value = args[key]
@@ -228,9 +224,7 @@ def _fs_list_dir_handler(fs: FileSystemTool) -> ToolHandler:
         path = _arg_str(call.arguments, "path", required=False, default="")
         recursive = _arg_bool(call.arguments, "recursive", default=False)
         max_entries = _arg_int(call.arguments, "max_entries", default=1000)
-        entries = await fs.list_dir(
-            ctx, path=path, recursive=recursive, max_entries=max_entries
-        )
+        entries = await fs.list_dir(ctx, path=path, recursive=recursive, max_entries=max_entries)
         return ToolResult(call_id=call.id, name=call.name, content="\n".join(entries))
 
     return handler
@@ -241,9 +235,7 @@ def _fs_grep_handler(fs: FileSystemTool) -> ToolHandler:
         pattern = _arg_str(call.arguments, "pattern")
         globs = _arg_str_tuple(call.arguments, "path_globs", default=("**/*",))
         max_matches = _arg_int(call.arguments, "max_matches", default=200)
-        hits = await fs.grep(
-            ctx, pattern=pattern, path_globs=globs, max_matches=max_matches
-        )
+        hits = await fs.grep(ctx, pattern=pattern, path_globs=globs, max_matches=max_matches)
         body = "\n".join(f"{hit.path}:{hit.line_no}:{hit.line}" for hit in hits)
         return ToolResult(call_id=call.id, name=call.name, content=body)
 

@@ -31,7 +31,9 @@ def _ctx(workspace: Path, *, output_byte_cap: int = 65536) -> ToolContext:
     )
 
 
-async def test_docker_shell_run_uses_docker_exec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_docker_shell_run_uses_docker_exec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace = tmp_path / "root" / "ws-1" / "feature"
     workspace.mkdir(parents=True)
     shell = DockerWorkspaceShellTool(workspace_root=tmp_path / "root")
@@ -157,14 +159,7 @@ async def test_docker_edit_patch_apply_uses_git_apply(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
-    diff = (
-        "diff --git a/a.txt b/a.txt\n"
-        "--- a/a.txt\n"
-        "+++ b/a.txt\n"
-        "@@ -1 +1 @@\n"
-        "-old\n"
-        "+new\n"
-    )
+    diff = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n"
     outcome = await edit.patch_apply(_ctx(workspace), unified_diff=diff)
 
     assert outcome.files_changed == ("a.txt",)

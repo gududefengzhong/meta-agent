@@ -131,7 +131,7 @@ def _make_typescript_repo(root: Path) -> Path:
         encoding="utf-8",
     )
     (repo / "tsconfig.json").write_text(
-        '{\n'
+        "{\n"
         '  "compilerOptions": {\n'
         '    "target": "ES2020",\n'
         '    "module": "ESNext",\n'
@@ -139,7 +139,7 @@ def _make_typescript_repo(root: Path) -> Path:
         '    "strict": true\n'
         "  },\n"
         '  "include": ["src/**/*.ts", "greet.test.ts"]\n'
-        '}\n',
+        "}\n",
         encoding="utf-8",
     )
     _run("git", "-C", str(repo), "add", ".")
@@ -305,9 +305,9 @@ async def test_bug_fix_v2_python_repo_end_to_end_in_docker_backend(
     assert output["push_skip_reason"] == "no_token"
     assert "suite=python_lint" in output["verifier_output"]
     assert fetched is not None and fetched.state == TaskState.SUCCEEDED
-    assert (
-        repo / "src" / "greet.py"
-    ).read_text(encoding="utf-8") == 'def greet(name: str) -> str:\n    return f"hi {name}"\n'
+    assert (repo / "src" / "greet.py").read_text(
+        encoding="utf-8"
+    ) == 'def greet(name: str) -> str:\n    return f"hi {name}"\n'
     assert not any(workspace_root.iterdir()), "workspace root should be cleaned after run"
     relayed = await outbox_repo.get(event.event_id)
     assert relayed is not None and relayed.status == OutboxStatus.DISPATCHED
@@ -372,9 +372,9 @@ async def test_bug_fix_v2_typescript_repo_end_to_end_in_docker_backend(
     assert output["push_skip_reason"] == "no_token"
     assert "suite=typescript_test" in output["verifier_output"]
     assert fetched is not None and fetched.state == TaskState.SUCCEEDED
-    assert (
-        repo / "src" / "greet.ts"
-    ).read_text(encoding="utf-8") == "export const greet = (name: string): string => `hi ${name}`;\n"
+    assert (repo / "src" / "greet.ts").read_text(
+        encoding="utf-8"
+    ) == "export const greet = (name: string): string => `hi ${name}`;\n"
     assert not any(workspace_root.iterdir()), "workspace root should be cleaned after run"
     relayed = await outbox_repo.get(event.event_id)
     assert relayed is not None and relayed.status == OutboxStatus.DISPATCHED

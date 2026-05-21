@@ -89,7 +89,11 @@ def _optional_str(state: TaskRunState, key: str) -> str | None:
 
 def _target_files(state: TaskRunState) -> list[str]:
     raw = state.data.get("target_files")
-    if not isinstance(raw, list) or not raw or not all(isinstance(item, str) and item for item in raw):
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or not all(isinstance(item, str) and item for item in raw)
+    ):
         raise GraphError("bug_fix_v2: state.data['target_files'] must be a non-empty list[str]")
     return list(raw)
 
@@ -154,9 +158,7 @@ def _user_prompt(
     return "\n".join(parts)
 
 
-async def _run_subprocess(
-    args: list[str], cwd: Path, *, timeout: float
-) -> tuple[int, str, str]:
+async def _run_subprocess(args: list[str], cwd: Path, *, timeout: float) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=str(cwd),
@@ -359,7 +361,8 @@ def build_bug_fix_v2_graph(deps: GraphDeps) -> Graph:
         tool_names_raw = state.data.get("tool_names")
         tool_names = (
             tool_names_raw
-            if isinstance(tool_names_raw, list) and all(isinstance(name, str) for name in tool_names_raw)
+            if isinstance(tool_names_raw, list)
+            and all(isinstance(name, str) for name in tool_names_raw)
             else _DEFAULT_TOOL_NAMES
         )
         inner_state = TaskRunState(

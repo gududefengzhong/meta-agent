@@ -260,9 +260,7 @@ def build_shell_agent_graph(deps: GraphDeps) -> Graph:
         wants_tools = bool(response.tool_calls) and step < max_steps
         next_decision = "tool_call" if wants_tools else "finalize"
         pending = (
-            [call.model_dump(mode="json") for call in response.tool_calls]
-            if wants_tools
-            else []
+            [call.model_dump(mode="json") for call in response.tool_calls] if wants_tools else []
         )
         truncated = bool(response.tool_calls) and step >= max_steps
         merged_usage = _merge_usage(state.data.get("_usage"), response.usage)
@@ -326,9 +324,7 @@ def build_shell_agent_graph(deps: GraphDeps) -> Graph:
                     steps=_int_or_default(state, "_step", 0),
                     tool_invocations=_int_or_default(state, "_tool_invocations", 0),
                     truncated_by_max_steps=bool(state.data.get("_truncated_by_max_steps")),
-                    truncated_by_token_budget=bool(
-                        state.data.get("_truncated_by_token_budget")
-                    ),
+                    truncated_by_token_budget=bool(state.data.get("_truncated_by_token_budget")),
                     usage=usage,
                 )
             }

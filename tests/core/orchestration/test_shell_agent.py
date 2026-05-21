@@ -44,7 +44,9 @@ def _spec(name: str) -> ToolSpec:
     )
 
 
-def _registry_with(name: str, *, content: str = "tool-output") -> tuple[ToolRegistry, list[ToolCall]]:
+def _registry_with(
+    name: str, *, content: str = "tool-output"
+) -> tuple[ToolRegistry, list[ToolCall]]:
     """Build a registry whose single tool records every call and returns ``content``."""
     registry = ToolRegistry()
     recorded: list[ToolCall] = []
