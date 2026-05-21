@@ -26,6 +26,11 @@ from meta_agent.infra.budget.llm_usage_aggregator import (
 from meta_agent.infra.budget.noop import NoopBudgetEnforcer
 from meta_agent.infra.circuitbreaker.in_memory import InMemoryCircuitBreaker
 from meta_agent.infra.circuitbreaker.noop import NoopCircuitBreaker
+from meta_agent.infra.git_provider import (
+    CircuitBreakingGitProvider,
+    FakeGitProvider,
+    RateLimitedGitProvider,
+)
 from meta_agent.infra.llm.budget_enforcing import BudgetEnforcingLLMClient
 from meta_agent.infra.llm.circuit_breaking import CircuitBreakingLLMClient
 from meta_agent.infra.llm.rate_limited import RateLimitedLLMClient
@@ -39,7 +44,9 @@ from meta_agent.worker.bootstrap import (
     build_chain_registry,
     build_circuit_breaker,
     build_circuit_breaker_from_env,
+    build_circuit_breaking_git_provider,
     build_circuit_breaking_llm,
+    build_rate_limited_git_provider,
     build_rate_limited_llm,
     build_rate_limiter,
     build_rate_limiter_from_env,
@@ -297,6 +304,41 @@ def test_build_circuit_breaking_llm_threads_audit_sink() -> None:
     sink = _NullSink()
     client = build_circuit_breaking_llm(FakeLLMClient(), NoopCircuitBreaker(), audit_sink=sink)
     assert client._audit_sink is sink
+
+
+def test_build_circuit_breaking_git_provider_wraps_inner() -> None:
+    inner = FakeGitProvider()
+    breaker = NoopCircuitBreaker()
+    wrapped = build_circuit_breaking_git_provider(inner, breaker, provider="github")
+    assert isinstance(wrapped, CircuitBreakingGitProvider)
+
+
+def test_build_rate_limited_git_provider_wraps_inner() -> None:
+    inner = FakeGitProvider()
+    limiter = NoopRateLimiter()
+    wrapped = build_rate_limited_git_provider(inner, limiter, provider="github")
+    assert isinstance(wrapped, RateLimitedGitProvider)
+
+
+def test_build_git_provider_safety_shell_threads_audit_sink() -> None:
+    """Both decorators must receive the audit sink so deny/open are recorded."""
+
+    from meta_agent.core.domain.audit import AuditEvent
+    from meta_agent.core.ports.audit_sink import AuditSink
+
+    class _NullSink(AuditSink):
+        async def append(self, event: AuditEvent) -> None:
+            return None
+
+    sink = _NullSink()
+    breaker = build_circuit_breaking_git_provider(
+        FakeGitProvider(), NoopCircuitBreaker(), provider="github", audit_sink=sink
+    )
+    assert breaker._audit_sink is sink
+    limiter = build_rate_limited_git_provider(
+        FakeGitProvider(), NoopRateLimiter(), provider="github", audit_sink=sink
+    )
+    assert limiter._audit_sink is sink
 
 
 def test_build_budget_enforcer_defaults_to_noop() -> None:
