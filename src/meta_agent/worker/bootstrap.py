@@ -32,6 +32,7 @@ from pathlib import Path
 
 from redis.asyncio import Redis
 
+from meta_agent.core.capabilities import ToolExecutor, ToolRegistry
 from meta_agent.core.domain.task import TaskType
 from meta_agent.core.orchestration import (
     GraphDeps,
@@ -42,15 +43,19 @@ from meta_agent.core.orchestration import (
 from meta_agent.core.orchestration.graphs import (
     AUTO_PR_GRAPH_ID,
     BUG_FIX_GRAPH_ID,
+    BUG_FIX_V2_GRAPH_ID,
     CODE_REVIEW_GRAPH_ID,
     ECHO_GRAPH_ID,
     GIT_INSPECT_GRAPH_ID,
+    SHELL_AGENT_GRAPH_ID,
     SIMPLE_CHAT_GRAPH_ID,
     build_auto_pr_graph,
     build_bug_fix_graph,
+    build_bug_fix_v2_graph,
     build_code_review_graph,
     build_echo_graph,
     build_git_inspect_graph,
+    build_shell_agent_graph,
     build_simple_chat_graph,
 )
 from meta_agent.core.ports.audit_sink import AuditSink
@@ -102,7 +107,23 @@ from meta_agent.infra.ratelimit import (
     build_rate_limiter_from_config,
 )
 from meta_agent.infra.secrets import build_secrets_from_env, resolve_secret_env
-from meta_agent.infra.workspace import LocalGitConfig, LocalGitWorkspaceManager
+from meta_agent.infra.tools import (
+    DockerWorkspaceEditTool,
+    DockerWorkspaceFileSystemTool,
+    DockerWorkspaceShellTool,
+    DockerWorkspaceTestTool,
+    LocalWorkspaceEditTool,
+    LocalWorkspaceFileSystemTool,
+    LocalWorkspaceShellTool,
+    LocalWorkspaceTestTool,
+    register_local_workspace_tools,
+)
+from meta_agent.infra.workspace import (
+    DockerWorkspaceConfig,
+    DockerWorkspaceManager,
+    LocalGitConfig,
+    LocalGitWorkspaceManager,
+)
 from meta_agent.worker.runner import WorkerConfig, WorkerLoop
 
 _DB_URL_ENV = "META_AGENT_DB_URL"
@@ -115,6 +136,9 @@ _BLOCK_MS_ENV = "META_AGENT_WORKER_BLOCK_MS"
 _DB_MIN_SIZE_ENV = "META_AGENT_WORKER_DB_MIN_SIZE"
 _DB_MAX_SIZE_ENV = "META_AGENT_WORKER_DB_MAX_SIZE"
 _WORKSPACE_ROOT_ENV = "META_AGENT_WORKSPACE_ROOT"
+_WORKSPACE_BACKEND_ENV = "META_AGENT_WORKSPACE_BACKEND"
+_WORKSPACE_DOCKER_IMAGE_ENV = "META_AGENT_WORKSPACE_DOCKER_IMAGE"
+_WORKSPACE_DOCKER_NETWORK_ENV = "META_AGENT_WORKSPACE_DOCKER_NETWORK"
 _GIT_PROVIDER_ENV = "META_AGENT_GIT_PROVIDER"
 
 _DEFAULT_DB_URL = "postgresql://meta_agent:dev-only@localhost:5432/meta_agent"
@@ -123,7 +147,10 @@ _DEFAULT_TASK_TOPIC = "task.commands"
 _DEFAULT_GROUP = "workers"
 _DEFAULT_LLM_PROVIDER = "openrouter"
 _DEFAULT_WORKSPACE_ROOT = "/var/lib/meta-agent/workspaces"
+_DEFAULT_WORKSPACE_BACKEND = "local_git"
+_DEFAULT_WORKSPACE_DOCKER_IMAGE = "meta-agent:local"
 _DEFAULT_GIT_PROVIDER = "fake"
+_SUPPORTED_WORKSPACE_BACKENDS = ("local_git", "docker")
 _SUPPORTED_GIT_PROVIDERS = ("fake", "github")
 
 
@@ -138,6 +165,9 @@ class WorkerSettings:
     consumer_name: str
     openrouter: OpenRouterConfig
     workspace_root: Path
+    workspace_backend: str
+    workspace_docker_image: str
+    workspace_docker_network: str | None
     git_provider: str
     github: GitHubGitProviderConfig | None
     db_min_size: int = 1
@@ -155,6 +185,14 @@ class WorkerSettings:
         :class:`Secrets` backend gets a chance to fold credentials in.
         """
         source: dict[str, str] = dict(env if env is not None else os.environ)
+        workspace_backend = source.get(
+            _WORKSPACE_BACKEND_ENV, _DEFAULT_WORKSPACE_BACKEND
+        ).strip().lower()
+        if workspace_backend not in _SUPPORTED_WORKSPACE_BACKENDS:
+            raise ValueError(
+                f"{_WORKSPACE_BACKEND_ENV}={workspace_backend!r} not in "
+                f"{_SUPPORTED_WORKSPACE_BACKENDS}"
+            )
         git_provider = source.get(_GIT_PROVIDER_ENV, _DEFAULT_GIT_PROVIDER).strip().lower()
         if git_provider not in _SUPPORTED_GIT_PROVIDERS:
             raise ValueError(
@@ -169,6 +207,11 @@ class WorkerSettings:
             consumer_name=source.get(_NAME_ENV, "") or socket.gethostname(),
             openrouter=OpenRouterConfig.from_env(source),
             workspace_root=Path(source.get(_WORKSPACE_ROOT_ENV, _DEFAULT_WORKSPACE_ROOT)),
+            workspace_backend=workspace_backend,
+            workspace_docker_image=source.get(
+                _WORKSPACE_DOCKER_IMAGE_ENV, _DEFAULT_WORKSPACE_DOCKER_IMAGE
+            ),
+            workspace_docker_network=source.get(_WORKSPACE_DOCKER_NETWORK_ENV) or None,
             git_provider=git_provider,
             github=github_cfg,
             db_min_size=int(source.get(_DB_MIN_SIZE_ENV, "1")),
@@ -206,10 +249,124 @@ class WorkerRuntime:
     resources: dict[str, object] = field(default_factory=dict)
 
 
+def build_shell_tool(settings: WorkerSettings) -> LocalWorkspaceShellTool | DockerWorkspaceShellTool:
+    """Materialize the shell tool for the configured workspace backend."""
+
+    if settings.workspace_backend == "local_git":
+        return LocalWorkspaceShellTool()
+    if settings.workspace_backend == "docker":
+        return DockerWorkspaceShellTool(workspace_root=settings.workspace_root)
+    raise ValueError(
+        f"unsupported workspace backend {settings.workspace_backend!r}; "
+        f"expected one of {_SUPPORTED_WORKSPACE_BACKENDS}"
+    )
+
+
+def build_file_system_tool(
+    settings: WorkerSettings,
+) -> LocalWorkspaceFileSystemTool | DockerWorkspaceFileSystemTool:
+    if settings.workspace_backend == "local_git":
+        return LocalWorkspaceFileSystemTool()
+    if settings.workspace_backend == "docker":
+        return DockerWorkspaceFileSystemTool(workspace_root=settings.workspace_root)
+    raise ValueError(
+        f"unsupported workspace backend {settings.workspace_backend!r}; "
+        f"expected one of {_SUPPORTED_WORKSPACE_BACKENDS}"
+    )
+
+
+def build_edit_tool(settings: WorkerSettings) -> LocalWorkspaceEditTool | DockerWorkspaceEditTool:
+    if settings.workspace_backend == "local_git":
+        return LocalWorkspaceEditTool()
+    if settings.workspace_backend == "docker":
+        return DockerWorkspaceEditTool(workspace_root=settings.workspace_root)
+    raise ValueError(
+        f"unsupported workspace backend {settings.workspace_backend!r}; "
+        f"expected one of {_SUPPORTED_WORKSPACE_BACKENDS}"
+    )
+
+
+def build_test_tool(settings: WorkerSettings) -> LocalWorkspaceTestTool | DockerWorkspaceTestTool:
+    if settings.workspace_backend == "local_git":
+        return LocalWorkspaceTestTool()
+    if settings.workspace_backend == "docker":
+        return DockerWorkspaceTestTool(workspace_root=settings.workspace_root)
+    raise ValueError(
+        f"unsupported workspace backend {settings.workspace_backend!r}; "
+        f"expected one of {_SUPPORTED_WORKSPACE_BACKENDS}"
+    )
+
+
+def build_local_tool_stack(
+    fs: LocalWorkspaceFileSystemTool | DockerWorkspaceFileSystemTool | None = None,
+    edit: LocalWorkspaceEditTool | DockerWorkspaceEditTool | None = None,
+    shell: LocalWorkspaceShellTool | DockerWorkspaceShellTool | None = None,
+    test: LocalWorkspaceTestTool | DockerWorkspaceTestTool | None = None,
+) -> tuple[ToolRegistry, ToolExecutor]:
+    """Materialize the default local-workspace tool stack.
+
+    Constructs a fresh :class:`ToolRegistry`, registers the
+    FS / Edit / Shell / Test handlers from
+    :mod:`meta_agent.infra.tools`, and binds a
+    :class:`ToolExecutor` to it. Returned pair is ready to attach to
+    :class:`GraphDeps` for ``shell_agent``-style tool-use graphs.
+    """
+
+    registry = ToolRegistry()
+    register_local_workspace_tools(
+        registry,
+        fs=fs or LocalWorkspaceFileSystemTool(),
+        edit=edit or LocalWorkspaceEditTool(),
+        shell=shell or LocalWorkspaceShellTool(),
+        test=test or LocalWorkspaceTestTool(),
+    )
+    return registry, ToolExecutor(registry)
+
+
+def build_workspace_manager(settings: WorkerSettings) -> LocalGitWorkspaceManager | DockerWorkspaceManager:
+    """Materialize the configured workspace backend.
+
+    Phase β currently supports two backends:
+
+    * ``local_git``: host-side ``git worktree`` only
+    * ``docker``: host-side ``git worktree`` plus a managed companion
+      Docker container per workspace
+
+    The Docker backend keeps ``Workspace.worktree_path`` as a host path
+    for graph state and git operations, while the Docker-backed tool
+    adapters execute inside the companion container against the same
+    bind-mounted workspace.
+    """
+
+    settings.workspace_root.mkdir(parents=True, exist_ok=True)
+    local_git = LocalGitConfig(root_dir=settings.workspace_root)
+    if settings.workspace_backend == "local_git":
+        return LocalGitWorkspaceManager(local_git)
+    if settings.workspace_backend == "docker":
+        return DockerWorkspaceManager(
+            DockerWorkspaceConfig(
+                local_git=local_git,
+                image=settings.workspace_docker_image,
+                network=settings.workspace_docker_network,
+            )
+        )
+    raise ValueError(
+        f"unsupported workspace backend {settings.workspace_backend!r}; "
+        f"expected one of {_SUPPORTED_WORKSPACE_BACKENDS}"
+    )
+
+
 def build_registry(deps: GraphDeps) -> GraphRegistry:
-    """Register every built-in graph and materialize against ``deps``."""
+    """Register every built-in graph and materialize against ``deps``.
+
+    ``shell_agent`` is registered only when ``deps`` carries both
+    ``tool_registry`` and ``tool_executor``; callers without a tool
+    stack (legacy unit tests, smoke harnesses) still get a working
+    registry with the L0/L1 graphs.
+    """
 
     registry = GraphRegistry()
+    has_tool_caps = deps.tool_registry is not None and deps.tool_executor is not None
     registry.register(
         ECHO_GRAPH_ID,
         lambda _deps: build_echo_graph(),
@@ -229,7 +386,7 @@ def build_registry(deps: GraphDeps) -> GraphRegistry:
     registry.register(
         BUG_FIX_GRAPH_ID,
         build_bug_fix_graph,
-        default_for=TaskType.BUG_FIX,
+        default_for=None if has_tool_caps else TaskType.BUG_FIX,
         requires_workspace=True,
     )
     registry.register(
@@ -242,6 +399,19 @@ def build_registry(deps: GraphDeps) -> GraphRegistry:
         build_auto_pr_graph,
         default_for=TaskType.AUTO_PR,
     )
+    if has_tool_caps:
+        registry.register(
+            BUG_FIX_V2_GRAPH_ID,
+            build_bug_fix_v2_graph,
+            default_for=TaskType.BUG_FIX,
+            requires_workspace=True,
+        )
+        registry.register(
+            SHELL_AGENT_GRAPH_ID,
+            build_shell_agent_graph,
+            default_for=TaskType.SYSTEM_SHELL_AGENT,
+            requires_workspace=True,
+        )
     registry.materialize(deps)
     return registry
 
@@ -547,13 +717,26 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     # commits (subprocess-mediated). With the fake provider there is no
     # remote to push to, so ``None`` makes the push node skip cleanly.
     push_token = settings.github.token if settings.github is not None else None
-    registry = build_registry(
-        GraphDeps(llm=budget_enforcing_llm, git_provider=git_provider, git_push_token=push_token)
+    # Local-workspace tool stack feeds the ``shell_agent`` tool-use loop.
+    # Containment for FS/Edit lives in the adapters; the executor binds
+    # the same registry instance so registry mutation post-boot is the
+    # only race worth defending against.
+    tool_registry, tool_executor = build_local_tool_stack(
+        fs=build_file_system_tool(settings),
+        edit=build_edit_tool(settings),
+        shell=build_shell_tool(settings),
+        test=build_test_tool(settings),
     )
-    # Ensure the workspace root exists; the local-git adapter requires
-    # the directory to be present so it can ``mkdir`` per-task subdirs.
-    settings.workspace_root.mkdir(parents=True, exist_ok=True)
-    workspaces = LocalGitWorkspaceManager(LocalGitConfig(root_dir=settings.workspace_root))
+    registry = build_registry(
+        GraphDeps(
+            llm=budget_enforcing_llm,
+            git_provider=git_provider,
+            git_push_token=push_token,
+            tool_registry=tool_registry,
+            tool_executor=tool_executor,
+        )
+    )
+    workspaces = build_workspace_manager(settings)
     submitter = PgTaskSubmitter(pool, task_repo, outbox_repo)
     chain_registry = build_chain_registry()
     worker = WorkerLoop(

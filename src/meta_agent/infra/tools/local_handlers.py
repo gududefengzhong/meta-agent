@@ -1,8 +1,8 @@
-"""Wire local-workspace FS/Edit implementations into the tool registry.
+"""Wire local-workspace FS/Edit/Shell/Test implementations into the tool registry.
 
 The :class:`ToolRegistry` keys handlers by tool name and treats each
 handler as opaque. This module supplies the concrete
-``ToolCall(name, arguments) → typed FileSystemTool / EditTool method``
+``ToolCall(name, arguments) → typed FileSystemTool / EditTool / ShellTool / TestTool method``
 adapters together with the JSON-schema specs the LLM sees.
 
 Layout (kept dull on purpose):
@@ -10,11 +10,11 @@ Layout (kept dull on purpose):
 * Name constants (``TOOL_*``) are public so graph code can build
   ``ToolCall`` instances against the same identifiers.
 * Argument helpers normalise ``dict[str, Any]`` into the typed kwargs
-  the FS / Edit ports expect; type mismatches raise
+  the FS / Edit / Shell / Test ports expect; type mismatches raise
   :class:`ToolValidationError` so the executor renders them as an
   ``is_error=True`` observation instead of crashing the worker.
 * Specs are kept as plain JSON-schema fragments; pydantic-level
-  validation lives on the FS / Edit methods themselves, so the schema
+  validation lives on the typed tool methods themselves, so the schema
   here is informational (it ships to the LLM) rather than enforcing.
 """
 
@@ -26,6 +26,8 @@ from meta_agent.core.capabilities.registry import ToolHandler, ToolRegistry
 from meta_agent.core.ports.tools import (
     EditTool,
     FileSystemTool,
+    ShellTool,
+    TestTool,
     ToolCall,
     ToolCategory,
     ToolContext,
@@ -39,6 +41,8 @@ TOOL_FS_LIST_DIR = "fs_list_dir"
 TOOL_FS_GREP = "fs_grep"
 TOOL_EDIT_WRITE = "edit_write"
 TOOL_EDIT_PATCH_APPLY = "edit_patch_apply"
+TOOL_SHELL_RUN = "shell_run"
+TOOL_TEST_RUN = "test_run"
 
 
 def _arg_str(
@@ -92,6 +96,13 @@ def _arg_str_tuple(
     return tuple(value)
 
 
+def _arg_argv(args: dict[str, Any], key: str) -> tuple[str, ...]:
+    value = args.get(key)
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+        raise ToolValidationError(f"argument {key!r} must be a non-empty array of strings")
+    return tuple(value)
+
+
 _FS_READ_SPEC = ToolSpec(
     name=TOOL_FS_READ,
     description="Read a UTF-8 slice of a file inside the workspace.",
@@ -118,7 +129,7 @@ _FS_LIST_DIR_SPEC = ToolSpec(
             "recursive": {"type": "boolean"},
             "max_entries": {"type": "integer", "minimum": 1},
         },
-        "required": ["path"],
+        "required": [],
         "additionalProperties": False,
     },
     category=ToolCategory.FILESYSTEM,
@@ -167,6 +178,37 @@ _EDIT_PATCH_APPLY_SPEC = ToolSpec(
         "additionalProperties": False,
     },
     category=ToolCategory.EDIT,
+)
+
+_SHELL_RUN_SPEC = ToolSpec(
+    name=TOOL_SHELL_RUN,
+    description="Run an allow-listed command inside the workspace without invoking a shell.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "timeout_seconds": {"type": ["integer", "null"], "minimum": 1},
+        },
+        "required": ["argv"],
+        "additionalProperties": False,
+    },
+    category=ToolCategory.SHELL,
+)
+
+_TEST_RUN_SPEC = ToolSpec(
+    name=TOOL_TEST_RUN,
+    description="Run an allow-listed verification suite inside the workspace.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "suite": {"type": "string"},
+            "targets": {"type": "array", "items": {"type": "string"}},
+            "timeout_seconds": {"type": ["integer", "null"], "minimum": 1},
+        },
+        "required": ["suite"],
+        "additionalProperties": False,
+    },
+    category=ToolCategory.TEST,
 )
 
 
@@ -238,13 +280,65 @@ def _edit_patch_apply_handler(edit: EditTool) -> ToolHandler:
     return handler
 
 
+def _shell_run_handler(shell: ShellTool) -> ToolHandler:
+    async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
+        argv = _arg_argv(call.arguments, "argv")
+        timeout_seconds = _arg_int_or_none(call.arguments, "timeout_seconds")
+        outcome = await shell.run(ctx, argv=argv, timeout_seconds=timeout_seconds)
+        stdout = outcome.stdout or "<empty>"
+        stderr = outcome.stderr or "<empty>"
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content=f"exit_code={outcome.exit_code}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            is_error=outcome.exit_code != 0,
+            metadata={"exit_code": str(outcome.exit_code)},
+        )
+
+    return handler
+
+
+def _test_run_handler(test: TestTool) -> ToolHandler:
+    async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
+        suite = _arg_str(call.arguments, "suite")
+        targets = _arg_str_tuple(call.arguments, "targets", default=())
+        timeout_seconds = _arg_int_or_none(call.arguments, "timeout_seconds")
+        outcome = await test.run(
+            ctx,
+            suite=suite,
+            targets=targets,
+            timeout_seconds=timeout_seconds,
+        )
+        stdout = outcome.stdout or "<empty>"
+        stderr = outcome.stderr or "<empty>"
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content=(
+                f"suite={outcome.suite}\n"
+                f"exit_code={outcome.exit_code}\n"
+                f"stdout:\n{stdout}\n"
+                f"stderr:\n{stderr}"
+            ),
+            is_error=outcome.exit_code != 0,
+            metadata={
+                "suite": outcome.suite,
+                "exit_code": str(outcome.exit_code),
+            },
+        )
+
+    return handler
+
+
 def register_local_workspace_tools(
     registry: ToolRegistry,
     *,
     fs: FileSystemTool,
     edit: EditTool,
+    shell: ShellTool,
+    test: TestTool | None = None,
 ) -> None:
-    """Register all five FS/Edit tools against ``registry``.
+    """Register the local FS/Edit/Shell tools against ``registry``.
 
     Idempotency is the registry's responsibility (duplicate names raise
     :class:`ToolValidationError`); call this exactly once at boot.
@@ -255,3 +349,6 @@ def register_local_workspace_tools(
     registry.register(_FS_GREP_SPEC, _fs_grep_handler(fs))
     registry.register(_EDIT_WRITE_SPEC, _edit_write_handler(edit))
     registry.register(_EDIT_PATCH_APPLY_SPEC, _edit_patch_apply_handler(edit))
+    registry.register(_SHELL_RUN_SPEC, _shell_run_handler(shell))
+    if test is not None:
+        registry.register(_TEST_RUN_SPEC, _test_run_handler(test))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,11 +20,15 @@ from meta_agent.infra.tools.local_handlers import (
     TOOL_FS_GREP,
     TOOL_FS_LIST_DIR,
     TOOL_FS_READ,
+    TOOL_SHELL_RUN,
+    TOOL_TEST_RUN,
     register_local_workspace_tools,
 )
 from meta_agent.infra.tools.local_workspace import (
     LocalWorkspaceEditTool,
     LocalWorkspaceFileSystemTool,
+    LocalWorkspaceShellTool,
+    LocalWorkspaceTestTool,
 )
 
 
@@ -43,11 +48,15 @@ def populated_registry() -> ToolRegistry:
         registry,
         fs=LocalWorkspaceFileSystemTool(),
         edit=LocalWorkspaceEditTool(),
+        shell=LocalWorkspaceShellTool(
+            allowed_commands=frozenset({Path(sys.executable).name, "python", "python3"})
+        ),
+        test=LocalWorkspaceTestTool(),
     )
     return registry
 
 
-def test_register_local_workspace_tools_populates_all_five(
+def test_register_local_workspace_tools_populates_all_seven(
     populated_registry: ToolRegistry,
 ) -> None:
     assert populated_registry.names() == {
@@ -56,6 +65,8 @@ def test_register_local_workspace_tools_populates_all_five(
         TOOL_FS_GREP,
         TOOL_EDIT_WRITE,
         TOOL_EDIT_PATCH_APPLY,
+        TOOL_SHELL_RUN,
+        TOOL_TEST_RUN,
     }
 
 
@@ -69,13 +80,21 @@ def test_register_is_idempotent_only_via_fresh_registry() -> None:
     register_local_workspace_tools(
         registry,
         fs=LocalWorkspaceFileSystemTool(),
-        edit=LocalWorkspaceEditTool(),
-    )
+            edit=LocalWorkspaceEditTool(),
+            shell=LocalWorkspaceShellTool(
+                allowed_commands=frozenset({Path(sys.executable).name, "python", "python3"})
+            ),
+            test=LocalWorkspaceTestTool(),
+        )
     with pytest.raises(ToolValidationError):
         register_local_workspace_tools(
             registry,
             fs=LocalWorkspaceFileSystemTool(),
             edit=LocalWorkspaceEditTool(),
+            shell=LocalWorkspaceShellTool(
+                allowed_commands=frozenset({Path(sys.executable).name, "python", "python3"})
+            ),
+            test=LocalWorkspaceTestTool(),
         )
 
 
@@ -100,6 +119,17 @@ async def test_fs_list_dir_handler_includes_subdirs(
     result = await executor.execute(call, _ctx(tmp_path))
     assert "a.txt" in result.content
     assert "z.txt" in result.content
+
+
+async def test_fs_list_dir_handler_defaults_to_root_when_path_omitted(
+    populated_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    (tmp_path / "root.txt").write_text("x", encoding="utf-8")
+    executor = ToolExecutor(populated_registry)
+    call = ToolCall(id="c2b", name=TOOL_FS_LIST_DIR, arguments={})
+    result = await executor.execute(call, _ctx(tmp_path))
+    assert result.is_error is False
+    assert "root.txt" in result.content
 
 
 async def test_fs_grep_handler_returns_formatted_hits(
@@ -159,3 +189,35 @@ async def test_unknown_tool_name_via_executor(
     result = await executor.execute(call, _ctx(tmp_path))
     assert result.is_error is True
     assert "nope" in result.content
+
+
+async def test_shell_run_handler_formats_exit_code_and_output(
+    populated_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    executor = ToolExecutor(populated_registry)
+    call = ToolCall(
+        id="c8",
+        name=TOOL_SHELL_RUN,
+        arguments={"argv": [sys.executable, "-c", "print('hi')"]},
+    )
+    result = await executor.execute(call, _ctx(tmp_path))
+    assert result.is_error is False
+    assert "exit_code=0" in result.content
+    assert "hi" in result.content
+
+
+async def test_test_run_handler_formats_suite_and_output(
+    populated_registry: ToolRegistry, tmp_path: Path
+) -> None:
+    (tmp_path / "test_ok.py").write_text("def test_ok():\n    assert 1 == 1\n", encoding="utf-8")
+    executor = ToolExecutor(populated_registry)
+    call = ToolCall(
+        id="c9",
+        name=TOOL_TEST_RUN,
+        arguments={"suite": "python_test", "targets": ["test_ok.py"]},
+    )
+    result = await executor.execute(call, _ctx(tmp_path))
+    assert result.is_error is False
+    assert "suite=python_test" in result.content
+    assert "exit_code=0" in result.content
+    assert result.metadata["suite"] == "python_test"

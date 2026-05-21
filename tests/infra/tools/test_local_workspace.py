@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,6 +17,8 @@ from meta_agent.core.ports.tools import (
 from meta_agent.infra.tools.local_workspace import (
     LocalWorkspaceEditTool,
     LocalWorkspaceFileSystemTool,
+    LocalWorkspaceShellTool,
+    LocalWorkspaceTestTool,
 )
 
 
@@ -48,6 +50,13 @@ async def test_read_respects_offset_and_max_bytes(workspace: Path) -> None:
     fs = LocalWorkspaceFileSystemTool()
     out = await fs.read(_ctx(workspace), path="f.txt", offset=2, max_bytes=3)
     assert out == "cde"
+
+
+async def test_read_caps_max_bytes_by_context_output_cap(workspace: Path) -> None:
+    (workspace / "f.txt").write_text("abcdef", encoding="utf-8")
+    fs = LocalWorkspaceFileSystemTool()
+    out = await fs.read(_ctx(workspace, output_byte_cap=2), path="f.txt", max_bytes=6)
+    assert out == "ab"
 
 
 async def test_read_rejects_dotdot_escape(workspace: Path) -> None:
@@ -115,6 +124,14 @@ async def test_list_dir_recursive(workspace: Path) -> None:
     assert "sub/nested.txt" in entries
 
 
+async def test_list_dir_respects_output_cap(workspace: Path) -> None:
+    (workspace / "a.txt").write_text("a", encoding="utf-8")
+    (workspace / "bb.txt").write_text("b", encoding="utf-8")
+    fs = LocalWorkspaceFileSystemTool()
+    entries = await fs.list_dir(_ctx(workspace, output_byte_cap=5), path="")
+    assert entries == ("a.txt",)
+
+
 async def test_list_dir_rejects_non_dir(workspace: Path) -> None:
     (workspace / "f.txt").write_text("x", encoding="utf-8")
     fs = LocalWorkspaceFileSystemTool()
@@ -140,6 +157,18 @@ async def test_grep_caps_at_max_matches(workspace: Path) -> None:
         _ctx(workspace), pattern=r"match", path_globs=("**/*.txt",), max_matches=3
     )
     assert len(hits) == 3
+
+
+async def test_grep_respects_output_cap(workspace: Path) -> None:
+    (workspace / "many.txt").write_text("match1\nmatch2\n", encoding="utf-8")
+    fs = LocalWorkspaceFileSystemTool()
+    hits = await fs.grep(
+        _ctx(workspace, output_byte_cap=20),
+        pattern=r"match",
+        path_globs=("**/*.txt",),
+        max_matches=10,
+    )
+    assert len(hits) == 1
 
 
 async def test_grep_rejects_bad_regex(workspace: Path) -> None:
@@ -221,3 +250,96 @@ async def test_patch_apply_surfaces_non_zero_exit(workspace: Path) -> None:
     )
     with pytest.raises(ToolExecutionError):
         await edit.patch_apply(_ctx(workspace), unified_diff=bad_diff)
+
+
+async def test_shell_run_returns_exit_code_and_output(workspace: Path) -> None:
+    shell = LocalWorkspaceShellTool(
+        allowed_commands=frozenset({Path(sys.executable).name, "python", "python3"})
+    )
+    outcome = await shell.run(
+        _ctx(workspace),
+        argv=(sys.executable, "-c", "print('hello-shell')"),
+    )
+    assert outcome.exit_code == 0
+    assert "hello-shell" in outcome.stdout
+    assert outcome.stderr == ""
+
+
+async def test_shell_run_rejects_command_not_in_allow_list(workspace: Path) -> None:
+    shell = LocalWorkspaceShellTool(allowed_commands=frozenset({"python"}))
+    with pytest.raises(ToolPermissionError):
+        await shell.run(_ctx(workspace), argv=("git", "--version"))
+
+
+async def test_shell_run_times_out(workspace: Path) -> None:
+    shell = LocalWorkspaceShellTool(
+        allowed_commands=frozenset({Path(sys.executable).name, "python", "python3"})
+    )
+    with pytest.raises(ToolExecutionError):
+        await shell.run(
+            _ctx(workspace),
+            argv=(sys.executable, "-c", "import time; time.sleep(1.5)"),
+            timeout_seconds=1,
+        )
+
+
+async def test_test_run_returns_exit_code_and_output(workspace: Path) -> None:
+    (workspace / "lint_ok.py").write_text("def hello() -> str:\n    return 'hi'\n", encoding="utf-8")
+    test_tool = LocalWorkspaceTestTool()
+    outcome = await test_tool.run(
+        _ctx(workspace),
+        suite="python_lint",
+        targets=("lint_ok.py",),
+    )
+    assert outcome.suite == "python_lint"
+    assert outcome.exit_code == 0
+    assert outcome.stderr == ""
+
+
+async def test_test_run_rejects_unknown_suite(workspace: Path) -> None:
+    test_tool = LocalWorkspaceTestTool()
+    with pytest.raises(ToolPermissionError):
+        await test_tool.run(_ctx(workspace), suite="go_test")
+
+
+async def test_test_run_supports_typescript_suite_override(workspace: Path) -> None:
+    (workspace / "tsconfig.json").write_text("{}", encoding="utf-8")
+    (workspace / "buggy.ts").write_text("export const x = 1;\n", encoding="utf-8")
+    test_tool = LocalWorkspaceTestTool(
+        suites={
+            "typescript_typecheck": (
+                sys.executable,
+                "-c",
+                "print('ts-ok')",
+            )
+        }
+    )
+    outcome = await test_tool.run(
+        _ctx(workspace),
+        suite="typescript_typecheck",
+        targets=("buggy.ts",),
+    )
+    assert outcome.suite == "typescript_typecheck"
+    assert outcome.exit_code == 0
+    assert "ts-ok" in outcome.stdout
+
+
+async def test_test_run_supports_typescript_test_suite_override(workspace: Path) -> None:
+    (workspace / "buggy.test.ts").write_text("it('ok', () => {});\n", encoding="utf-8")
+    test_tool = LocalWorkspaceTestTool(
+        suites={
+            "typescript_test": (
+                sys.executable,
+                "-c",
+                "print('vitest-ok')",
+            )
+        }
+    )
+    outcome = await test_tool.run(
+        _ctx(workspace),
+        suite="typescript_test",
+        targets=("buggy.test.ts",),
+    )
+    assert outcome.suite == "typescript_test"
+    assert outcome.exit_code == 0
+    assert "vitest-ok" in outcome.stdout

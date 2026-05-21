@@ -160,6 +160,31 @@ class EditOutcome(BaseModel):
     bytes_written: int = Field(default=0, ge=0)
 
 
+class ShellOutcome(BaseModel):
+    """Summary of a shell command execution inside the workspace."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    argv: tuple[str, ...] = Field(default_factory=tuple)
+    exit_code: int = Field(default=0, ge=0)
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
+
+
+class TestOutcome(BaseModel):
+    """Summary of a deterministic test-suite execution."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    suite: str = Field(..., min_length=1)
+    argv: tuple[str, ...] = Field(default_factory=tuple)
+    exit_code: int = Field(default=0, ge=0)
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
+
+
 class FileSystemTool(ABC):
     """Read-only view of a per-task workspace tree.
 
@@ -228,3 +253,53 @@ class EditTool(ABC):
         unified_diff: str,
     ) -> EditOutcome:
         """Apply a unified diff against the workspace root."""
+
+
+class ShellTool(ABC):
+    """Run allow-listed commands in the per-task workspace.
+
+    Implementations MUST execute without invoking a shell, bind the
+    current working directory to ``ctx.workspace_path`` when present,
+    and reject commands outside the adapter's allow-list with
+    :class:`ToolPermissionError`.
+
+    Non-zero exits are regular outcomes, not exceptional control flow:
+    agent loops often need the stderr/exit_code as an observation. The
+    adapter raises :class:`ToolExecutionError` only for launch-time or
+    timeout failures.
+    """
+
+    @abstractmethod
+    async def run(
+        self,
+        ctx: ToolContext,
+        *,
+        argv: tuple[str, ...],
+        timeout_seconds: int | None = None,
+    ) -> ShellOutcome:
+        """Run ``argv`` and return stdout/stderr plus the exit status."""
+
+
+class TestTool(ABC):
+    """Run an allow-listed verification suite inside the workspace.
+
+    ``suite`` is a stable product identifier (for example
+    ``python_lint`` or ``typescript_typecheck``), not an arbitrary shell
+    command. Implementations map the suite to deterministic argv and
+    may optionally scope it to ``targets`` under ``ctx.workspace_path``.
+
+    Non-zero exits are observations, not exceptional control flow.
+    Adapters raise :class:`ToolExecutionError` only for launch-time or
+    timeout failures.
+    """
+
+    @abstractmethod
+    async def run(
+        self,
+        ctx: ToolContext,
+        *,
+        suite: str,
+        targets: tuple[str, ...] = (),
+        timeout_seconds: int | None = None,
+    ) -> TestOutcome:
+        """Run ``suite`` against ``targets`` within the workspace."""

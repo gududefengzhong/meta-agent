@@ -27,6 +27,7 @@ Scope (v0):
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ from meta_agent.core.ports.llm import (
     LLMClient,
     LLMRequest,
     LLMResponse,
+    LLMUsage,
     MessageRole,
 )
 from meta_agent.core.ports.tools import ToolCall, ToolContext, ToolResult, ToolSpec
@@ -75,6 +77,15 @@ def _float_or_none(state: TaskRunState, key: str) -> float | None:
     if isinstance(raw, bool) or not isinstance(raw, int | float):
         raise GraphError(f"shell_agent: state.data[{key!r}] must be a number")
     return float(raw)
+
+
+def _positive_int_or_none(state: TaskRunState, key: str) -> int | None:
+    raw = state.data.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        raise GraphError(f"shell_agent: state.data[{key!r}] must be a positive int")
+    return raw
 
 
 def _tool_names_or_none(state: TaskRunState) -> frozenset[str] | None:
@@ -142,6 +153,8 @@ def _output_summary(
     steps: int,
     tool_invocations: int,
     truncated_by_max_steps: bool,
+    truncated_by_token_budget: bool,
+    usage: LLMUsage,
 ) -> dict[str, object]:
     return {
         "assistant_message": response.content if response else "",
@@ -150,8 +163,42 @@ def _output_summary(
         "steps": steps,
         "tool_invocations": tool_invocations,
         "truncated_by_max_steps": truncated_by_max_steps,
-        "usage": response.usage.model_dump(mode="json") if response else {},
+        "truncated_by_token_budget": truncated_by_token_budget,
+        "usage": usage.model_dump(mode="json"),
     }
+
+
+def _merge_usage(prior: object, current: LLMUsage) -> dict[str, Any]:
+    base = LLMUsage() if not isinstance(prior, dict) else LLMUsage.model_validate(prior)
+    return LLMUsage(
+        prompt_tokens=_sum_optional_int(base.prompt_tokens, current.prompt_tokens),
+        completion_tokens=_sum_optional_int(base.completion_tokens, current.completion_tokens),
+        total_tokens=_sum_optional_int(base.total_tokens, current.total_tokens),
+    ).model_dump(mode="json")
+
+
+def _usage_from_state(raw: object) -> LLMUsage:
+    return LLMUsage.model_validate(raw) if isinstance(raw, dict) else LLMUsage()
+
+
+def _sum_optional_int(left: int | None, right: int | None) -> int | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left + right
+
+
+def _tool_message_content(result: ToolResult) -> str:
+    lines: list[str] = []
+    if result.is_error:
+        lines.append("tool_status=error")
+    if result.truncated:
+        lines.append("tool_output_truncated=true")
+    if result.metadata:
+        lines.append(f"tool_metadata={json.dumps(result.metadata, sort_keys=True)}")
+    lines.append(result.content)
+    return "\n".join(lines)
 
 
 def _require_tool_caps(deps: GraphDeps) -> tuple[ToolRegistry, ToolExecutor]:
@@ -179,6 +226,19 @@ def build_shell_agent_graph(deps: GraphDeps) -> Graph:
         max_steps = _int_or_default(state, "max_steps", _DEFAULT_MAX_STEPS)
         if max_steps <= 0:
             raise GraphError("shell_agent: max_steps must be positive")
+        max_total_tokens = _positive_int_or_none(state, "max_total_tokens")
+        usage_so_far = _usage_from_state(state.data.get("_usage"))
+        if (
+            max_total_tokens is not None
+            and usage_so_far.total_tokens is not None
+            and usage_so_far.total_tokens >= max_total_tokens
+        ):
+            return NodeResult(
+                data_update={
+                    "_plan_next": "finalize",
+                    "_truncated_by_token_budget": True,
+                }
+            )
         step = _int_or_default(state, "_step", 0) + 1
         tool_names = _tool_names_or_none(state)
         specs = _select_specs(registry, tool_names)
@@ -205,6 +265,13 @@ def build_shell_agent_graph(deps: GraphDeps) -> Graph:
             else []
         )
         truncated = bool(response.tool_calls) and step >= max_steps
+        merged_usage = _merge_usage(state.data.get("_usage"), response.usage)
+        merged_usage_obj = LLMUsage.model_validate(merged_usage)
+        budget_truncated = (
+            max_total_tokens is not None
+            and merged_usage_obj.total_tokens is not None
+            and merged_usage_obj.total_tokens >= max_total_tokens
+        )
         return NodeResult(
             data_update={
                 "_messages": _dump_messages(messages),
@@ -212,8 +279,12 @@ def build_shell_agent_graph(deps: GraphDeps) -> Graph:
                 "_pending_tool_calls": pending,
                 "_plan_next": next_decision,
                 "_last_response": response.model_dump(mode="json"),
+                "_usage": merged_usage,
                 "_truncated_by_max_steps": (
                     bool(state.data.get("_truncated_by_max_steps")) or truncated
+                ),
+                "_truncated_by_token_budget": (
+                    bool(state.data.get("_truncated_by_token_budget")) or budget_truncated
                 ),
             }
         )
@@ -232,7 +303,7 @@ def build_shell_agent_graph(deps: GraphDeps) -> Graph:
             messages.append(
                 ChatMessage(
                     role=MessageRole.TOOL,
-                    content=result.content,
+                    content=_tool_message_content(result),
                     tool_call_id=result.call_id,
                 )
             )
@@ -247,6 +318,7 @@ def build_shell_agent_graph(deps: GraphDeps) -> Graph:
     async def finalize(state: TaskRunState) -> NodeResult:
         raw = state.data.get("_last_response")
         response = LLMResponse.model_validate(raw) if isinstance(raw, dict) else None
+        usage = _usage_from_state(state.data.get("_usage"))
         return NodeResult(
             data_update={
                 "output": _output_summary(
@@ -254,6 +326,10 @@ def build_shell_agent_graph(deps: GraphDeps) -> Graph:
                     steps=_int_or_default(state, "_step", 0),
                     tool_invocations=_int_or_default(state, "_tool_invocations", 0),
                     truncated_by_max_steps=bool(state.data.get("_truncated_by_max_steps")),
+                    truncated_by_token_budget=bool(
+                        state.data.get("_truncated_by_token_budget")
+                    ),
+                    usage=usage,
                 )
             }
         )

@@ -12,6 +12,7 @@ from meta_agent.core.orchestration.graphs.shell_agent import (
     SHELL_AGENT_GRAPH_ID,
     build_shell_agent_graph,
 )
+from meta_agent.core.ports.llm import LLMUsage
 from meta_agent.core.ports.tools import (
     ToolCall,
     ToolCategory,
@@ -102,6 +103,43 @@ async def test_tool_call_executes_and_observation_feeds_next_plan(tmp_path: Path
     second_request = client.calls[1]
     roles = [m.role.value for m in second_request.messages]
     assert "tool" in roles
+    tool_msg = second_request.messages[-1]
+    assert "tool_metadata" not in tool_msg.content
+
+
+async def test_tool_observation_preserves_metadata_and_truncation_signals(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+
+    async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content="abcdef",
+            truncated=True,
+            metadata={"bytes_written": "6"},
+        )
+
+    registry.register(_spec("edit_write"), handler)
+    client = FakeLLMClient(
+        responses=[
+            make_response(
+                content="",
+                tool_calls=(ToolCall(id="c1", name="edit_write", arguments={}),),
+                finish_reason="tool_call",
+            ),
+            make_response(content="done", finish_reason="stop"),
+        ]
+    )
+    deps = fake_deps(client, tool_registry=registry)
+    graph = build_shell_agent_graph(deps)
+
+    await graph.run(_state(user_prompt="hi", _workspace_path=str(tmp_path)))
+
+    tool_msg = client.calls[1].messages[-1]
+    assert tool_msg.role.value == "tool"
+    assert "tool_output_truncated=true" in tool_msg.content
+    assert 'tool_metadata={"bytes_written": "6"}' in tool_msg.content
+    assert "abcdef" in tool_msg.content
 
 
 async def test_unknown_tool_surfaces_is_error_observation_then_completes() -> None:
@@ -126,6 +164,7 @@ async def test_unknown_tool_surfaces_is_error_observation_then_completes() -> No
     second_request = client.calls[1]
     tool_msg = second_request.messages[-1]
     assert tool_msg.role.value == "tool"
+    assert "tool_status=error" in tool_msg.content
     assert "nope" in tool_msg.content
 
 
@@ -151,3 +190,54 @@ async def test_max_steps_cap_short_circuits_loop() -> None:
     assert output["truncated_by_max_steps"] is True  # type: ignore[index]
     # plan was called exactly max_steps times
     assert len(client.calls) == 2
+
+
+async def test_output_usage_accumulates_across_multiple_plan_turns(tmp_path: Path) -> None:
+    registry, _ = _registry_with("fs_read", content="hello")
+    client = FakeLLMClient(
+        responses=[
+            make_response(
+                content="",
+                tool_calls=(ToolCall(id="c1", name="fs_read", arguments={"path": "x"}),),
+                finish_reason="tool_call",
+                usage=LLMUsage(prompt_tokens=3, completion_tokens=5, total_tokens=8),
+            ),
+            make_response(
+                content="done",
+                finish_reason="stop",
+                usage=LLMUsage(prompt_tokens=7, completion_tokens=11, total_tokens=18),
+            ),
+        ]
+    )
+    graph = build_shell_agent_graph(fake_deps(client, tool_registry=registry))
+
+    final = await graph.run(_state(user_prompt="hi", _workspace_path=str(tmp_path)))
+
+    usage = final.data["output"]["usage"]  # type: ignore[index]
+    assert usage["prompt_tokens"] == 10
+    assert usage["completion_tokens"] == 16
+    assert usage["total_tokens"] == 26
+
+
+async def test_max_total_tokens_cap_short_circuits_next_plan() -> None:
+    registry, _ = _registry_with("fs_read")
+    client = FakeLLMClient(
+        responses=[
+            make_response(
+                content="",
+                tool_calls=(ToolCall(id="c1", name="fs_read", arguments={}),),
+                finish_reason="tool_call",
+                usage=LLMUsage(prompt_tokens=3, completion_tokens=5, total_tokens=8),
+            ),
+            make_response(content="should-not-run", finish_reason="stop"),
+        ]
+    )
+    graph = build_shell_agent_graph(fake_deps(client, tool_registry=registry))
+
+    final = await graph.run(_state(user_prompt="hi", max_total_tokens=8))
+
+    output = final.data["output"]
+    assert output["steps"] == 1  # type: ignore[index]
+    assert output["tool_invocations"] == 1  # type: ignore[index]
+    assert output["truncated_by_token_budget"] is True  # type: ignore[index]
+    assert len(client.calls) == 1

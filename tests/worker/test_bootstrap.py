@@ -16,8 +16,10 @@ import pytest
 from meta_agent.core.domain.task import TaskType
 from meta_agent.core.orchestration import GraphDeps
 from meta_agent.core.orchestration.graphs import (
+    BUG_FIX_V2_GRAPH_ID,
     ECHO_GRAPH_ID,
     GIT_INSPECT_GRAPH_ID,
+    SHELL_AGENT_GRAPH_ID,
     SIMPLE_CHAT_GRAPH_ID,
 )
 from meta_agent.infra.budget.llm_usage_aggregator import (
@@ -36,6 +38,17 @@ from meta_agent.infra.llm.circuit_breaking import CircuitBreakingLLMClient
 from meta_agent.infra.llm.rate_limited import RateLimitedLLMClient
 from meta_agent.infra.ratelimit.in_memory import InMemoryTokenBucketRateLimiter
 from meta_agent.infra.ratelimit.noop import NoopRateLimiter
+from meta_agent.infra.tools import (
+    DockerWorkspaceEditTool,
+    DockerWorkspaceFileSystemTool,
+    DockerWorkspaceShellTool,
+    DockerWorkspaceTestTool,
+    LocalWorkspaceEditTool,
+    LocalWorkspaceFileSystemTool,
+    LocalWorkspaceShellTool,
+    LocalWorkspaceTestTool,
+)
+from meta_agent.infra.workspace import DockerWorkspaceManager, LocalGitWorkspaceManager
 from meta_agent.worker.bootstrap import (
     WorkerSettings,
     build_budget_enforcer,
@@ -46,12 +59,18 @@ from meta_agent.worker.bootstrap import (
     build_circuit_breaker_from_env,
     build_circuit_breaking_git_provider,
     build_circuit_breaking_llm,
+    build_edit_tool,
+    build_file_system_tool,
+    build_local_tool_stack,
     build_rate_limited_git_provider,
     build_rate_limited_llm,
     build_rate_limiter,
     build_rate_limiter_from_env,
     build_registry,
+    build_shell_tool,
+    build_test_tool,
     build_worker_settings_from_env,
+    build_workspace_manager,
 )
 from tests.core.orchestration._fakes import FakeLLMClient
 
@@ -75,6 +94,9 @@ def test_settings_from_env_uses_documented_defaults() -> None:
     assert settings.block_ms == 1_000
     assert settings.openrouter.api_key == "sk-or-test-1234"
     assert settings.workspace_root == Path("/var/lib/meta-agent/workspaces")
+    assert settings.workspace_backend == "local_git"
+    assert settings.workspace_docker_image == "meta-agent:local"
+    assert settings.workspace_docker_network is None
     # Default git provider must be ``fake`` so dev/smoke environments
     # do not require a GitHub token to start the worker.
     assert settings.git_provider == "fake"
@@ -105,6 +127,11 @@ def test_settings_from_env_rejects_unknown_git_provider() -> None:
         WorkerSettings.from_env(_env(META_AGENT_GIT_PROVIDER="gitlab"))
 
 
+def test_settings_from_env_rejects_unknown_workspace_backend() -> None:
+    with pytest.raises(ValueError, match="META_AGENT_WORKSPACE_BACKEND"):
+        WorkerSettings.from_env(_env(META_AGENT_WORKSPACE_BACKEND="podman"))
+
+
 def test_settings_from_env_overrides_each_knob() -> None:
     settings = WorkerSettings.from_env(
         _env(
@@ -118,6 +145,9 @@ def test_settings_from_env_overrides_each_knob() -> None:
             META_AGENT_WORKER_DB_MIN_SIZE="2",
             META_AGENT_WORKER_DB_MAX_SIZE="20",
             META_AGENT_WORKSPACE_ROOT="/tmp/custom-ws",
+            META_AGENT_WORKSPACE_BACKEND="docker",
+            META_AGENT_WORKSPACE_DOCKER_IMAGE="python:3.12-bookworm",
+            META_AGENT_WORKSPACE_DOCKER_NETWORK="meta-agent",
         )
     )
     assert settings.db_url == "postgresql://u:p@db:5432/x"
@@ -130,6 +160,9 @@ def test_settings_from_env_overrides_each_knob() -> None:
     assert settings.db_min_size == 2
     assert settings.db_max_size == 20
     assert settings.workspace_root == Path("/tmp/custom-ws")
+    assert settings.workspace_backend == "docker"
+    assert settings.workspace_docker_image == "python:3.12-bookworm"
+    assert settings.workspace_docker_network == "meta-agent"
 
 
 def test_settings_from_env_requires_openrouter_key() -> None:
@@ -173,6 +206,7 @@ def test_build_registry_registers_builtin_graphs_and_routes_defaults() -> None:
     assert registry.get(ECHO_GRAPH_ID).graph_id == ECHO_GRAPH_ID
     assert registry.get(SIMPLE_CHAT_GRAPH_ID).graph_id == SIMPLE_CHAT_GRAPH_ID
     assert registry.get(GIT_INSPECT_GRAPH_ID).graph_id == GIT_INSPECT_GRAPH_ID
+    assert registry.resolve(TaskType.BUG_FIX).graph_id == "builtin.bug_fix"
     assert registry.resolve(TaskType.SYSTEM_ECHO).graph_id == ECHO_GRAPH_ID
     assert registry.resolve(TaskType.SYSTEM_CHAT).graph_id == SIMPLE_CHAT_GRAPH_ID
     assert registry.resolve(TaskType.SYSTEM_GIT_INSPECT).graph_id == GIT_INSPECT_GRAPH_ID
@@ -181,6 +215,140 @@ def test_build_registry_registers_builtin_graphs_and_routes_defaults() -> None:
     assert registry.requires_workspace(GIT_INSPECT_GRAPH_ID) is True
     assert registry.requires_workspace(ECHO_GRAPH_ID) is False
     assert registry.requires_workspace(SIMPLE_CHAT_GRAPH_ID) is False
+    # Without a tool stack in deps, ``shell_agent`` must stay
+    # unregistered so legacy callers (smoke harnesses, unit tests)
+    # keep working without paying for the tool surface.
+    assert registry.default_graph_id(TaskType.SYSTEM_SHELL_AGENT) is None
+
+
+def test_build_local_tool_stack_exposes_default_fs_edit_tools() -> None:
+    registry, executor = build_local_tool_stack()
+    names = {spec.name for spec in registry.list_specs()}
+    assert {
+        "fs_read",
+        "fs_list_dir",
+        "fs_grep",
+        "edit_write",
+        "edit_patch_apply",
+        "shell_run",
+        "test_run",
+    }.issubset(names)
+    # Executor must be a ToolExecutor instance (constructed against the
+    # same registry by the helper); deeper executor behaviour is
+    # covered in tests/core/capabilities/test_executor.py.
+    from meta_agent.core.capabilities import ToolExecutor
+
+    assert isinstance(executor, ToolExecutor)
+
+
+def test_build_shell_tool_defaults_to_local_git() -> None:
+    shell = build_shell_tool(WorkerSettings.from_env(_env(META_AGENT_WORKSPACE_ROOT="/tmp/ws")))
+    assert isinstance(shell, LocalWorkspaceShellTool)
+
+
+def test_build_shell_tool_selects_docker_backend() -> None:
+    shell = build_shell_tool(
+        WorkerSettings.from_env(
+            _env(
+                META_AGENT_WORKSPACE_ROOT="/tmp/ws",
+                META_AGENT_WORKSPACE_BACKEND="docker",
+            )
+        )
+    )
+    assert isinstance(shell, DockerWorkspaceShellTool)
+
+
+def test_build_file_system_tool_defaults_to_local_git() -> None:
+    tool = build_file_system_tool(
+        WorkerSettings.from_env(_env(META_AGENT_WORKSPACE_ROOT="/tmp/ws"))
+    )
+    assert isinstance(tool, LocalWorkspaceFileSystemTool)
+
+
+def test_build_file_system_tool_selects_docker_backend() -> None:
+    tool = build_file_system_tool(
+        WorkerSettings.from_env(
+            _env(
+                META_AGENT_WORKSPACE_ROOT="/tmp/ws",
+                META_AGENT_WORKSPACE_BACKEND="docker",
+            )
+        )
+    )
+    assert isinstance(tool, DockerWorkspaceFileSystemTool)
+
+
+def test_build_edit_tool_defaults_to_local_git() -> None:
+    tool = build_edit_tool(WorkerSettings.from_env(_env(META_AGENT_WORKSPACE_ROOT="/tmp/ws")))
+    assert isinstance(tool, LocalWorkspaceEditTool)
+
+
+def test_build_edit_tool_selects_docker_backend() -> None:
+    tool = build_edit_tool(
+        WorkerSettings.from_env(
+            _env(
+                META_AGENT_WORKSPACE_ROOT="/tmp/ws",
+                META_AGENT_WORKSPACE_BACKEND="docker",
+            )
+        )
+    )
+    assert isinstance(tool, DockerWorkspaceEditTool)
+
+
+def test_build_test_tool_defaults_to_local_git() -> None:
+    tool = build_test_tool(WorkerSettings.from_env(_env(META_AGENT_WORKSPACE_ROOT="/tmp/ws")))
+    assert isinstance(tool, LocalWorkspaceTestTool)
+
+
+def test_build_test_tool_selects_docker_backend() -> None:
+    tool = build_test_tool(
+        WorkerSettings.from_env(
+            _env(
+                META_AGENT_WORKSPACE_ROOT="/tmp/ws",
+                META_AGENT_WORKSPACE_BACKEND="docker",
+            )
+        )
+    )
+    assert isinstance(tool, DockerWorkspaceTestTool)
+
+
+def test_build_workspace_manager_defaults_to_local_git(tmp_path: Path) -> None:
+    manager = build_workspace_manager(
+        WorkerSettings.from_env(_env(META_AGENT_WORKSPACE_ROOT=str(tmp_path / "ws")))
+    )
+    assert isinstance(manager, LocalGitWorkspaceManager)
+
+
+def test_build_workspace_manager_selects_docker_backend(tmp_path: Path) -> None:
+    manager = build_workspace_manager(
+        WorkerSettings.from_env(
+            _env(
+                META_AGENT_WORKSPACE_ROOT=str(tmp_path / "ws"),
+                META_AGENT_WORKSPACE_BACKEND="docker",
+                META_AGENT_WORKSPACE_DOCKER_IMAGE="python:3.12-bookworm",
+            )
+        )
+    )
+    assert isinstance(manager, DockerWorkspaceManager)
+
+
+def test_build_registry_registers_shell_agent_when_tool_caps_present() -> None:
+    tool_registry, tool_executor = build_local_tool_stack()
+    deps = GraphDeps(
+        llm=FakeLLMClient(),
+        tool_registry=tool_registry,
+        tool_executor=tool_executor,
+    )
+    registry = build_registry(deps)
+    assert registry.is_materialized
+    assert registry.get("builtin.bug_fix").graph_id == "builtin.bug_fix"
+    assert registry.get(BUG_FIX_V2_GRAPH_ID).graph_id == BUG_FIX_V2_GRAPH_ID
+    assert registry.get(SHELL_AGENT_GRAPH_ID).graph_id == SHELL_AGENT_GRAPH_ID
+    assert registry.resolve(TaskType.BUG_FIX).graph_id == BUG_FIX_V2_GRAPH_ID
+    assert registry.resolve(TaskType.SYSTEM_SHELL_AGENT).graph_id == SHELL_AGENT_GRAPH_ID
+    # The shell_agent loop touches the workspace through its FS/Edit
+    # tools, so the worker must provision a per-task worktree before
+    # running it — same contract as ``builtin.bug_fix``.
+    assert registry.requires_workspace(SHELL_AGENT_GRAPH_ID) is True
 
 
 def test_build_chain_registry_registers_bug_fix_to_auto_pr() -> None:

@@ -86,6 +86,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Build local worker image for docker workspace backend
+        run: docker build -t meta-agent:local .
+
       - name: Apply migrations
         env:
           META_AGENT_DB_URL: postgresql+asyncpg://meta_agent:ci-only@localhost:5432/meta_agent

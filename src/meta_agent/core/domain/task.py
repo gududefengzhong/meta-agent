@@ -29,6 +29,7 @@ class TaskType(StrEnum):
     SYSTEM_ECHO = "system_echo"
     SYSTEM_CHAT = "system_chat"
     SYSTEM_GIT_INSPECT = "system_git_inspect"
+    SYSTEM_SHELL_AGENT = "system_shell_agent"
 
 
 class TaskState(StrEnum):
