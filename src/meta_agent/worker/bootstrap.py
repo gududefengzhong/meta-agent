@@ -71,9 +71,11 @@ from meta_agent.infra.circuitbreaker import (
     build_circuit_breaker_from_config,
 )
 from meta_agent.infra.git_provider import (
+    CircuitBreakingGitProvider,
     FakeGitProvider,
     GitHubGitProvider,
     GitHubGitProviderConfig,
+    RateLimitedGitProvider,
 )
 from meta_agent.infra.llm import (
     BudgetEnforcingLLMClient,
@@ -433,6 +435,51 @@ def build_git_provider(settings: WorkerSettings) -> GitProvider:
     return FakeGitProvider()
 
 
+def build_circuit_breaking_git_provider(
+    inner: GitProvider,
+    breaker: CircuitBreaker,
+    *,
+    provider: str,
+    audit_sink: AuditSink | None = None,
+) -> CircuitBreakingGitProvider:
+    """Wrap a raw ``inner`` git provider with the circuit-breaker decorator.
+
+    Passing ``audit_sink`` enables best-effort
+    ``git.circuit_breaker.open`` audit emission; unit tests can omit it.
+    The ``provider`` label is embedded into the breaker key and into
+    audit payloads so operators can disambiguate ``github`` from
+    ``fake`` / future backends.
+    """
+
+    return CircuitBreakingGitProvider(
+        inner,
+        breaker,
+        provider=provider,
+        audit_sink=audit_sink,
+    )
+
+
+def build_rate_limited_git_provider(
+    inner: GitProvider,
+    limiter: RateLimiter,
+    *,
+    provider: str,
+    audit_sink: AuditSink | None = None,
+) -> RateLimitedGitProvider:
+    """Wrap a (typically circuit-breaking) ``inner`` with the rate-limit decorator.
+
+    Passing ``audit_sink`` enables best-effort
+    ``git.rate_limited.denied`` audit emission; unit tests can omit it.
+    """
+
+    return RateLimitedGitProvider(
+        inner,
+        limiter,
+        provider=provider,
+        audit_sink=audit_sink,
+    )
+
+
 async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     """Open infra connections, wire :class:`WorkerLoop`, return runtime.
 
@@ -476,7 +523,25 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         fail_open=budget_config.fail_open,
         audit_sink=audit_repo,
     )
-    git_provider = build_git_provider(settings)
+    raw_git_provider = build_git_provider(settings)
+    # Mirror the LLM safety stack: breaker innermost (counts real
+    # upstream failures only), limiter outermost (deny does not reach
+    # the breaker). Both layers reuse the limiter/breaker instances
+    # already built for the LLM stack; per-resource isolation is
+    # achieved via the ``git:{provider}:tenant=...:repo=...`` key
+    # namespace, not via a separate backend.
+    breaking_git_provider = build_circuit_breaking_git_provider(
+        raw_git_provider,
+        breaker,
+        provider=settings.git_provider,
+        audit_sink=audit_repo,
+    )
+    git_provider: GitProvider = build_rate_limited_git_provider(
+        breaking_git_provider,
+        rate_limiter,
+        provider=settings.git_provider,
+        audit_sink=audit_repo,
+    )
     # Reuse the GitHub adapter's token for ``git push`` so a single
     # secret covers both PR creation (port-mediated) and pushing local
     # commits (subprocess-mediated). With the fake provider there is no
