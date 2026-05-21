@@ -23,6 +23,7 @@ from meta_agent.core.ports.llm import (
     LLMTransientError,
     MessageRole,
 )
+from meta_agent.core.ports.tools import ToolCall, ToolCategory, ToolSpec
 from meta_agent.infra.llm.config import OpenRouterConfig
 from meta_agent.infra.llm.openrouter import OpenRouterClient
 
@@ -295,3 +296,159 @@ def test_config_from_env_reads_overrides() -> None:
 def test_construct_rejects_empty_api_key() -> None:
     with pytest.raises(ValueError, match="api_key"):
         OpenRouterClient(_config(api_key=""))
+
+
+def _tool_spec() -> ToolSpec:
+    return ToolSpec(
+        name="fs_read",
+        description="read a file",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+        category=ToolCategory.FILESYSTEM,
+    )
+
+
+async def test_request_serialises_tools_and_tool_messages() -> None:
+    captured: list[bytes] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(req.content)
+        return httpx.Response(200, json=_success_body(content="done"))
+
+    client = _client(handler)
+    request = LLMRequest(
+        messages=(
+            ChatMessage(role=MessageRole.USER, content="please read"),
+            ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content="",
+                tool_calls=(
+                    ToolCall(id="call_1", name="fs_read", arguments={"path": "x"}),
+                ),
+            ),
+            ChatMessage(
+                role=MessageRole.TOOL,
+                content="x-content",
+                tool_call_id="call_1",
+            ),
+        ),
+        tools=(_tool_spec(),),
+    )
+    try:
+        await client.complete(request)
+    finally:
+        await client.close()
+
+    body = captured[0].decode()
+    assert '"tools"' in body
+    assert '"function"' in body
+    assert '"fs_read"' in body
+    assert '"tool_calls"' in body
+    assert '"tool_call_id":"call_1"' in body
+    assert '"role":"tool"' in body
+
+
+async def test_response_decodes_tool_calls_with_json_arguments() -> None:
+    body = {
+        "id": "resp-tools",
+        "model": "deepseek/deepseek-chat",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {
+                                "name": "fs_read",
+                                "arguments": '{"path": "foo.txt"}',
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    client = _client(handler)
+    try:
+        response = await client.complete(_request())
+    finally:
+        await client.close()
+
+    assert response.content == ""
+    assert response.finish_reason == "tool_call"
+    assert len(response.tool_calls) == 1
+    call = response.tool_calls[0]
+    assert call.id == "call_abc"
+    assert call.name == "fs_read"
+    assert call.arguments == {"path": "foo.txt"}
+
+
+async def test_response_with_invalid_tool_call_json_args_raises_transient() -> None:
+    body = {
+        "id": "r",
+        "model": "m",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "c",
+                            "type": "function",
+                            "function": {"name": "fs_read", "arguments": "not json"},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+    }
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    client = _client(handler, config=_config(max_retries=0))
+    try:
+        with pytest.raises(LLMTransientError):
+            await client.complete(_request())
+    finally:
+        await client.close()
+
+
+async def test_response_with_null_content_and_no_tool_calls_raises_transient() -> None:
+    body = {
+        "id": "r",
+        "model": "m",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": None},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    client = _client(handler, config=_config(max_retries=0))
+    try:
+        with pytest.raises(LLMTransientError):
+            await client.complete(_request())
+    finally:
+        await client.close()

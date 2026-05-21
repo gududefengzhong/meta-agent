@@ -15,7 +15,9 @@ on the table.
 
 Error mapping (status → exception):
 
-* 401 / 403 → :class:`GitProviderAuthError`
+* 401 → :class:`GitProviderAuthError`
+* 403 with secondary-rate-limit markers → :class:`GitProviderTransientError`
+* other 403 → :class:`GitProviderAuthError`
 * 422 / 404 / 400 → :class:`GitProviderInvalidRequestError`
 * 429 / 5xx / transport → :class:`GitProviderTransientError` (retried)
 * anything else → :class:`GitProviderError`
@@ -243,6 +245,13 @@ class GitHubGitProvider(GitProvider):
             status = response.status_code
             if 200 <= status < 300:
                 return response
+            if status == 403 and self._looks_like_secondary_rate_limit(response):
+                last_error = GitProviderTransientError(
+                    "github transient status: 403-secondary-rate-limit"
+                )
+                retry_after = self._read_retry_after(response)
+                await self._maybe_backoff(attempt, attempts, retry_after=retry_after)
+                continue
             if status == 429 or 500 <= status < 600:
                 last_error = GitProviderTransientError(f"github transient status: {status}")
                 retry_after = self._read_retry_after(response) if status == 429 else None
@@ -254,7 +263,9 @@ class GitHubGitProvider(GitProvider):
 
     @staticmethod
     def _classify_4xx(status: int) -> GitProviderError:
-        if status in (401, 403):
+        if status == 401:
+            return GitProviderAuthError(f"github auth failed: {status}")
+        if status == 403:
             return GitProviderAuthError(f"github auth failed: {status}")
         if status in (400, 404, 422):
             return GitProviderInvalidRequestError(f"github rejected request: {status}")
@@ -269,6 +280,31 @@ class GitHubGitProvider(GitProvider):
             return float(raw)
         except ValueError:
             return None
+
+    @staticmethod
+    def _looks_like_secondary_rate_limit(response: httpx.Response) -> bool:
+        """Best-effort detection for GitHub's secondary throttling.
+
+        GitHub often reports secondary rate limits as HTTP 403 rather
+        than 429. We treat those as transient when either the headers
+        or the body carry the usual rate-limit markers.
+        """
+
+        if response.headers.get("retry-after") is not None:
+            return True
+        if response.headers.get("x-ratelimit-remaining") == "0":
+            return True
+        try:
+            body = response.json()
+        except ValueError:
+            return False
+        if not isinstance(body, dict):
+            return False
+        message = body.get("message")
+        if not isinstance(message, str):
+            return False
+        lowered = message.lower()
+        return "secondary rate limit" in lowered or "abuse detection" in lowered
 
     async def _maybe_backoff(
         self, attempt: int, attempts: int, *, retry_after: float | None

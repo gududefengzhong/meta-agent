@@ -6,6 +6,9 @@ invariants the future GitHub adapter must also satisfy.
 
 from __future__ import annotations
 
+import pytest
+
+from meta_agent.core.ports.git_provider import GitProviderInvalidRequestError
 from meta_agent.infra.git_provider import FakeGitProvider
 
 
@@ -44,14 +47,12 @@ async def test_same_key_same_commit_returns_reused() -> None:
     assert second.url == first.url
 
 
-async def test_same_key_new_commit_creates_new_pr() -> None:
-    ids = iter(["pr-a", "pr-b"])
-    provider = FakeGitProvider(id_factory=lambda: next(ids))
+async def test_same_branch_new_commit_raises_invalid_request() -> None:
+    provider = FakeGitProvider(id_factory=lambda: "pr-a")
     first = await provider.open_or_reuse_pr(**_kwargs())
-    second = await provider.open_or_reuse_pr(**_kwargs(head_commit_sha="cafebabe9876"))
     assert first.pr_id == "pr-a"
-    assert second.pr_id == "pr-b"
-    assert second.action == "created"
+    with pytest.raises(GitProviderInvalidRequestError):
+        await provider.open_or_reuse_pr(**_kwargs(head_commit_sha="cafebabe9876"))
 
 
 async def test_cross_tenant_isolation_does_not_dedup() -> None:

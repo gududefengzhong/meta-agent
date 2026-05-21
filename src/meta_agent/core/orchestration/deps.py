@@ -14,10 +14,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from meta_agent.core.orchestration.graph import Graph
 from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
+
+if TYPE_CHECKING:
+    from meta_agent.core.capabilities.executor import ToolExecutor
+    from meta_agent.core.capabilities.registry import ToolRegistry
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +49,21 @@ class GraphDeps:
     bug-fix-style graphs fall back to a local-only commit and emit a
     ``push_skip_reason`` in their output. The token MUST be passed to
     ``git`` via the environment, never on the command line.
+    """
+    tool_registry: ToolRegistry | None = None
+    """Static catalogue of tools available to tool-use graphs.
+
+    Populated at boot together with :attr:`tool_executor`. Graphs that
+    do not advertise tools to the LLM (e.g. ``simple_chat``) ignore
+    this field; tool-use graphs (``shell_agent``) raise
+    :class:`GraphError` when it is ``None``.
+    """
+    tool_executor: ToolExecutor | None = None
+    """Dispatch seam translating :class:`ToolCall` -> :class:`ToolResult`.
+
+    Always paired with :attr:`tool_registry`; the executor binds the
+    same registry instance so that registry mutation after boot is the
+    only failure mode worth defending against.
     """
 
 

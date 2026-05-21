@@ -2,9 +2,9 @@
 
 ``FakeGitProvider`` does not talk to any remote: it keeps an in-process
 dictionary keyed by ``(tenant_id, repo_url, head_branch)`` and emits
-deterministic ``fake://`` URLs. It exists so the orchestration core
-can land a real ``builtin.auto_pr`` graph and a real task contract
-before a network-touching GitHub adapter is wired up.
+deterministic ``fake://`` URLs. It exists so the orchestration core can
+exercise the same branch-level PR contract as the real GitHub adapter
+without any network dependency.
 
 Cross-tenant invariant: the dedup table is keyed on ``tenant_id``, so
 two tenants pushing to the same ``(repo_url, head_branch)`` see
@@ -16,9 +16,10 @@ Reuse semantics (v1):
 * Same ``(tenant_id, repo_url, head_branch)`` + same
   ``head_commit_sha`` → ``action="reused"``, same ``pr_id`` / ``url``.
 * Same ``(tenant_id, repo_url, head_branch)`` + different
-  ``head_commit_sha`` → ``action="created"``, new ``pr_id``; the
-  previous entry for the key is replaced. Modelling force-push vs
-  new PR semantics is a real-adapter concern and is deferred.
+  ``head_commit_sha`` → raise
+  :class:`GitProviderInvalidRequestError`. Modelling force-push vs
+  PR update semantics is deferred until the port grows an explicit
+  "update existing PR" surface.
 """
 
 from __future__ import annotations
@@ -26,7 +27,11 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 
-from meta_agent.core.ports.git_provider import GitProvider, PullRequestRef
+from meta_agent.core.ports.git_provider import (
+    GitProvider,
+    GitProviderInvalidRequestError,
+    PullRequestRef,
+)
 
 
 class FakeGitProvider(GitProvider):
@@ -70,8 +75,12 @@ class FakeGitProvider(GitProvider):
         )
         key = (tenant_id, repo_url, head_branch)
         existing = self._open.get(key)
-        if existing is not None and existing.head_commit_sha == head_commit_sha:
-            return existing.model_copy(update={"action": "reused"})
+        if existing is not None:
+            if existing.head_commit_sha == head_commit_sha:
+                return existing.model_copy(update={"action": "reused"})
+            raise GitProviderInvalidRequestError(
+                f"open fake PR on {repo_url}:{head_branch} points at a different head sha"
+            )
         pr_id = self._id_factory()
         ref = PullRequestRef(
             provider=self.PROVIDER_NAME,

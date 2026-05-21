@@ -82,6 +82,22 @@ from meta_agent.core.ports.secrets import (
     Secrets,
 )
 from meta_agent.core.ports.task_submitter import FollowUpSpec, TaskSubmitter
+from meta_agent.core.ports.tools import (
+    EditOutcome,
+    EditTool,
+    FileSystemTool,
+    GrepHit,
+    ToolCall,
+    ToolCategory,
+    ToolContext,
+    ToolError,
+    ToolExecutionError,
+    ToolNotFoundError,
+    ToolPermissionError,
+    ToolResult,
+    ToolSpec,
+    ToolValidationError,
+)
 from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 
 __all__ = [
@@ -102,6 +118,9 @@ __all__ = [
     "CircuitBreakerBackendError",
     "CircuitBreakerOpenError",
     "CircuitBreakerState",
+    "EditOutcome",
+    "EditTool",
+    "FileSystemTool",
     "FinishReason",
     "FollowUpSpec",
     "GitProvider",
@@ -109,6 +128,7 @@ __all__ = [
     "GitProviderError",
     "GitProviderInvalidRequestError",
     "GitProviderTransientError",
+    "GrepHit",
     "LLMAuthError",
     "LLMBudgetExceededError",
     "LLMClient",
@@ -143,6 +163,16 @@ __all__ = [
     "TaskSubmitter",
     "TenantIsolationError",
     "TokenValidator",
+    "ToolCall",
+    "ToolCategory",
+    "ToolContext",
+    "ToolError",
+    "ToolExecutionError",
+    "ToolNotFoundError",
+    "ToolPermissionError",
+    "ToolResult",
+    "ToolSpec",
+    "ToolValidationError",
     "UsageAggregate",
     "UsageGroupBy",
     "WorkspaceError",

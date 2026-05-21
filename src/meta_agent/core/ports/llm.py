@@ -19,27 +19,40 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from meta_agent.core.domain.errors import AgentError, ErrorCategory
+from meta_agent.core.ports.tools import ToolCall, ToolSpec
 
 
 class MessageRole(StrEnum):
     """OpenAI-style chat role taxonomy.
 
-    Kept deliberately small; tool/function-call extensions land in a
-    later milestone alongside the tool-use spec.
+    ``TOOL`` carries the observation returned to the LLM after a
+    tool invocation; it MUST appear with a populated
+    :attr:`ChatMessage.tool_call_id` so the model can correlate the
+    result with the original :class:`ToolCall` it emitted.
     """
 
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
+    TOOL = "tool"
 
 
 class ChatMessage(BaseModel):
-    """A single turn in a chat completion request."""
+    """A single turn in a chat completion request.
+
+    ``tool_call_id`` is required on ``role=TOOL`` messages (the
+    correlation id of the originating :class:`ToolCall`). ``tool_calls``
+    is only meaningful on ``role=ASSISTANT`` messages that emitted one
+    or more tool calls; ``content`` may be an empty string in that case
+    because the assistant turn is "function-only".
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     role: MessageRole
     content: str
+    tool_call_id: str | None = None
+    tool_calls: tuple[ToolCall, ...] = ()
 
 
 class LLMUsage(BaseModel):
@@ -71,6 +84,14 @@ class LLMRequest(BaseModel):
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     max_tokens: int | None = Field(default=None, gt=0)
     stop: tuple[str, ...] | None = None
+    tools: tuple[ToolSpec, ...] = ()
+    """Optional tool catalogue advertised to the upstream model.
+
+    Empty tuple means a plain chat completion (no tool-use surface).
+    Adapters forward the specs verbatim as OpenAI-style ``tools`` array;
+    the LLM may respond with :attr:`LLMResponse.tool_calls` instead of
+    a final assistant message.
+    """
     metadata: dict[str, str] = Field(default_factory=dict)
     """Free-form labels propagated to provider headers when supported.
 
@@ -84,7 +105,13 @@ FinishReason = Literal["stop", "length", "content_filter", "tool_call", "other"]
 
 
 class LLMResponse(BaseModel):
-    """Provider-agnostic chat-completion response."""
+    """Provider-agnostic chat-completion response.
+
+    ``tool_calls`` is non-empty exactly when the model elected to invoke
+    one or more tools instead of (or alongside) emitting assistant text;
+    ``finish_reason`` will typically be ``"tool_call"`` in that case but
+    callers should branch on ``tool_calls`` rather than the reason.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -92,6 +119,7 @@ class LLMResponse(BaseModel):
     model: str
     finish_reason: FinishReason
     usage: LLMUsage = Field(default_factory=LLMUsage)
+    tool_calls: tuple[ToolCall, ...] = ()
     provider_response_id: str | None = None
     """Upstream response ID, useful when correlating against vendor logs."""
 
