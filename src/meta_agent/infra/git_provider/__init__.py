@@ -7,11 +7,22 @@
 - ``GitHubGitProvider``: GitHub REST 适配器（github.com / GHE），
   search→create 两段，4 类错误映射，5xx/429/transport 重试。v1 进程级
   单 token；多租户独立凭据延后里程碑。
-【目标】GitLabGitProvider 等其他远端适配器；多租户凭据隔离；熔断接入。
+- ``RateLimitedGitProvider`` / ``CircuitBreakingGitProvider``: 安全壳
+  装饰器，包住任意 ``GitProvider`` 实现；与 LLM 侧装饰器形状对齐，
+  ``key = git:{provider}:tenant={tid}:repo={url}``。
+【目标】GitLabGitProvider 等其他远端适配器；多租户凭据隔离。
 """
 
+from meta_agent.infra.git_provider.circuit_breaking import CircuitBreakingGitProvider
 from meta_agent.infra.git_provider.fake import FakeGitProvider
 from meta_agent.infra.git_provider.github import GitHubGitProvider
 from meta_agent.infra.git_provider.github_config import GitHubGitProviderConfig
+from meta_agent.infra.git_provider.rate_limited import RateLimitedGitProvider
 
-__all__ = ["FakeGitProvider", "GitHubGitProvider", "GitHubGitProviderConfig"]
+__all__ = [
+    "CircuitBreakingGitProvider",
+    "FakeGitProvider",
+    "GitHubGitProvider",
+    "GitHubGitProviderConfig",
+    "RateLimitedGitProvider",
+]
