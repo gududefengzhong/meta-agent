@@ -36,6 +36,7 @@ from meta_agent.core.capabilities.registry import ToolRegistry
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
 from meta_agent.core.orchestration.state import END, TaskRunState
+from meta_agent.core.orchestration.step_kinds import STEP_PLAN
 from meta_agent.core.ports.llm import (
     ChatMessage,
     LLMClient,
@@ -328,6 +329,7 @@ def build_shell_agent_graph(
             tools=specs,
             prompt_id=default_sp_id,
             prompt_version=default_sp_ver,
+            step_kind=STEP_PLAN,
         )
         response = await llm.complete(request)
         messages.append(

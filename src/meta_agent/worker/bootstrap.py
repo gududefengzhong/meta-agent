@@ -92,6 +92,8 @@ from meta_agent.infra.llm import (
     OpenRouterClient,
     OpenRouterConfig,
     RateLimitedLLMClient,
+    RoutingLLMClient,
+    StaticLLMRouter,
 )
 from meta_agent.infra.persistence import (
     PgAuditRepository,
@@ -150,6 +152,23 @@ _WORKSPACE_DOCKER_IMAGE_ENV = "META_AGENT_WORKSPACE_DOCKER_IMAGE"
 _WORKSPACE_DOCKER_NETWORK_ENV = "META_AGENT_WORKSPACE_DOCKER_NETWORK"
 _GIT_PROVIDER_ENV = "META_AGENT_GIT_PROVIDER"
 _WEB_ALLOWED_HOSTS_ENV = "META_AGENT_WEB_ALLOWED_HOSTS"
+_LLM_ROUTER_PLAN_MODEL_ENV = "META_AGENT_LLM_ROUTER_PLAN_MODEL"
+_LLM_ROUTER_EDIT_MODEL_ENV = "META_AGENT_LLM_ROUTER_EDIT_MODEL"
+_LLM_ROUTER_REVIEW_MODEL_ENV = "META_AGENT_LLM_ROUTER_REVIEW_MODEL"
+_LLM_ROUTER_CHAT_MODEL_ENV = "META_AGENT_LLM_ROUTER_CHAT_MODEL"
+_LLM_ROUTER_OBSERVE_MODEL_ENV = "META_AGENT_LLM_ROUTER_OBSERVE_MODEL"
+
+# Default Phase β+ multi-model routing ladder. Picks cheap, capable
+# Chinese-tier models hosted on OpenRouter so default deployments do
+# not silently bill against the premium tier. Operators override any
+# entry via env; setting the env to an empty string clears the entry
+# entirely (so ``request.model`` is left untouched for that step kind).
+_DEFAULT_LLM_ROUTER_MAPPING: dict[str, str] = {
+    "plan": "deepseek/deepseek-chat",
+    "edit": "qwen/qwen3-coder",
+    "review": "deepseek/deepseek-chat",
+    "chat": "z-ai/glm-4.5",
+}
 
 _DEFAULT_DB_URL = "postgresql://meta_agent:dev-only@localhost:5432/meta_agent"
 _DEFAULT_REDIS_URL = "redis://localhost:6379/0"
@@ -176,6 +195,34 @@ def _parse_web_allowed_hosts(raw: str | None) -> tuple[str, ...]:
     return tuple(host.strip().lower() for host in raw.split(",") if host.strip())
 
 
+def _resolve_llm_router_mapping(env: dict[str, str]) -> dict[str, str]:
+    """Compute the active step_kind → model mapping for this worker.
+
+    Starts from :data:`_DEFAULT_LLM_ROUTER_MAPPING` (cheap Chinese-tier
+    models hosted on OpenRouter) and lets env overrides shadow each
+    entry. The env value's empty string is a sentinel meaning "drop
+    this entry entirely" — useful when an operator wants the caller's
+    ``request.model`` to flow through unchanged for that step kind.
+    """
+
+    overrides: dict[str, str | None] = {
+        "plan": env.get(_LLM_ROUTER_PLAN_MODEL_ENV),
+        "edit": env.get(_LLM_ROUTER_EDIT_MODEL_ENV),
+        "review": env.get(_LLM_ROUTER_REVIEW_MODEL_ENV),
+        "chat": env.get(_LLM_ROUTER_CHAT_MODEL_ENV),
+        "observe": env.get(_LLM_ROUTER_OBSERVE_MODEL_ENV),
+    }
+    merged: dict[str, str] = dict(_DEFAULT_LLM_ROUTER_MAPPING)
+    for step_kind, override in overrides.items():
+        if override is None:
+            continue  # env unset → keep the default
+        if override.strip() == "":
+            merged.pop(step_kind, None)  # explicit empty → drop entry
+            continue
+        merged[step_kind] = override.strip()
+    return merged
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerSettings:
     """Process-level configuration for the worker entrypoint."""
@@ -193,6 +240,7 @@ class WorkerSettings:
     git_provider: str
     github: GitHubGitProviderConfig | None
     web_allowed_hosts: tuple[str, ...] = ()
+    llm_router_mapping: dict[str, str] = field(default_factory=dict)
     db_min_size: int = 1
     db_max_size: int = 5
     max_attempts: int = 3
@@ -238,6 +286,7 @@ class WorkerSettings:
             git_provider=git_provider,
             github=github_cfg,
             web_allowed_hosts=_parse_web_allowed_hosts(source.get(_WEB_ALLOWED_HOSTS_ENV)),
+            llm_router_mapping=_resolve_llm_router_mapping(source),
             db_min_size=int(source.get(_DB_MIN_SIZE_ENV, "1")),
             db_max_size=int(source.get(_DB_MAX_SIZE_ENV, "5")),
             max_attempts=int(source.get(_MAX_ATTEMPTS_ENV, "3")),
@@ -508,6 +557,21 @@ def build_rate_limiter_from_env(
     return build_rate_limiter_from_config(config, redis_client=redis_client)
 
 
+def build_routed_llm(
+    inner: LLMClient,
+    mapping: dict[str, str],
+) -> RoutingLLMClient:
+    """Wrap ``inner`` with the step-kind-aware routing decorator.
+
+    ``mapping`` comes from :func:`_resolve_llm_router_mapping`; an
+    empty mapping yields a no-op router (every
+    ``select_model`` call returns ``None``) and ``request.model``
+    flows through unchanged.
+    """
+
+    return RoutingLLMClient(inner, StaticLLMRouter(dict(mapping)))
+
+
 def build_rate_limited_llm(
     inner: LLMClient,
     limiter: RateLimiter,
@@ -752,6 +816,12 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         fail_open=budget_config.fail_open,
         audit_sink=audit_repo,
     )
+    # Routing decorator sits outermost: it rewrites ``request.model``
+    # based on ``request.step_kind`` before any downstream decorator
+    # sees the call, so budgets / rate limits / usage rows / breakers
+    # all attribute spend to the routed model rather than the caller's
+    # pre-route hint.
+    routed_llm = build_routed_llm(budget_enforcing_llm, settings.llm_router_mapping)
     raw_git_provider = build_git_provider(settings)
     # Mirror the LLM safety stack: breaker innermost (counts real
     # upstream failures only), limiter outermost (deny does not reach
@@ -801,7 +871,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     await ensure_seeded(prompt_registry)
     registry = build_registry(
         GraphDeps(
-            llm=budget_enforcing_llm,
+            llm=routed_llm,
             git_provider=git_provider,
             git_push_token=push_token,
             tool_registry=tool_registry,
@@ -826,7 +896,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
 
     async def _aclose() -> None:
         await git_provider.close()
-        await budget_enforcing_llm.close()
+        await routed_llm.close()
         await budget_enforcer.close()
         await rate_limiter.close()
         await breaker.close()
@@ -841,7 +911,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         resources={
             "pool": pool,
             "redis": redis_client,
-            "llm": budget_enforcing_llm,
+            "llm": routed_llm,
             "rate_limiter": rate_limiter,
             "circuit_breaker": breaker,
             "budget_enforcer": budget_enforcer,

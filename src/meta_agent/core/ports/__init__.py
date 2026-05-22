@@ -46,6 +46,7 @@ from meta_agent.core.ports.llm import (
     LLMUsage,
     MessageRole,
 )
+from meta_agent.core.ports.llm_router import LLMRouter
 from meta_agent.core.ports.llm_usage import (
     LLMUsageFilter,
     LLMUsageRepository,
@@ -148,6 +149,7 @@ __all__ = [
     "LLMRateLimitedError",
     "LLMRequest",
     "LLMResponse",
+    "LLMRouter",
     "LLMTransientError",
     "LLMUsage",
     "LLMUsageFilter",

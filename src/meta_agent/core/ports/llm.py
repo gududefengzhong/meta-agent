@@ -111,6 +111,17 @@ class LLMRequest(BaseModel):
     """
     prompt_version: int | None = Field(default=None, ge=1)
     """Version of the prompt asset referenced by ``prompt_id``."""
+    step_kind: str | None = Field(default=None, min_length=1, max_length=32)
+    """Coarse classification of the step that triggered the call.
+
+    Phase β+ multi-model routing: graphs tag each LLM call with one of
+    a small vocabulary (``"plan"`` / ``"edit"`` / ``"review"`` /
+    ``"chat"`` / ``"observe"``). A :class:`LLMRouter` decorator at the
+    top of the LLM stack inspects this tag and may override
+    :attr:`model`; the :class:`MeteredLLMClient` records the tag so
+    ``llm_usage_logs`` can aggregate by step kind for cost / quality
+    A/B analysis. Ad-hoc callers leave it ``None``.
+    """
 
 
 FinishReason = Literal["stop", "length", "content_filter", "tool_call", "other"]

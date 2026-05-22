@@ -44,6 +44,7 @@ from string import Template
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
 from meta_agent.core.orchestration.state import END, TaskRunState
+from meta_agent.core.orchestration.step_kinds import STEP_EDIT, STEP_PLAN
 from meta_agent.core.ports.llm import (
     ChatMessage,
     LLMClient,
@@ -385,6 +386,7 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
                 messages=_plan_messages(plan_prompt.content, issue, snapshot, prior_attempt),
                 prompt_id=plan_prompt.prompt_id,
                 prompt_version=plan_prompt.version,
+                step_kind=STEP_PLAN,
             )
         )
         return NodeResult(
@@ -414,6 +416,7 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
                 messages=_patch_messages(rendered_system, issue, plan_text, snapshot),
                 prompt_id=patch_prompt.prompt_id,
                 prompt_version=patch_prompt.version,
+                step_kind=STEP_EDIT,
             )
         )
         patches = _parse_patch(response.content, allow_list=set(targets))

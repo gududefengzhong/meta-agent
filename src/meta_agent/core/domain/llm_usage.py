@@ -76,6 +76,10 @@ class LLMUsageRecord(BaseModel):
     # one-off calls) — null means "no registered prompt drove this".
     prompt_id: str | None = Field(default=None, min_length=1, max_length=128)
     prompt_version: int | None = Field(default=None, ge=1)
+    # Phase β+ step-kind tag for multi-model routing aggregation. Free
+    # short string ("plan" / "edit" / "review" / "chat" / "observe");
+    # null when the caller did not classify the step.
+    step_kind: str | None = Field(default=None, min_length=1, max_length=32)
 
     cost_usd_micros: int | None = Field(default=None, ge=0)
     latency_ms: int = Field(..., ge=0)

@@ -37,6 +37,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
 from meta_agent.core.orchestration.state import END, TaskRunState
+from meta_agent.core.orchestration.step_kinds import STEP_REVIEW
 from meta_agent.core.ports.llm import (
     ChatMessage,
     LLMClient,
@@ -207,6 +208,7 @@ def build_code_review_graph(deps: GraphDeps) -> Graph:
             max_tokens=_optional_int(state, "max_tokens"),
             prompt_id=prompt_asset.prompt_id,
             prompt_version=prompt_asset.version,
+            step_kind=STEP_REVIEW,
         )
         return NodeResult(data_update={"_llm_request": request.model_dump(mode="json")})
 

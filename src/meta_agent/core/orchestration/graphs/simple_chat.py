@@ -23,6 +23,7 @@ from __future__ import annotations
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
 from meta_agent.core.orchestration.state import END, TaskRunState
+from meta_agent.core.orchestration.step_kinds import STEP_CHAT
 from meta_agent.core.ports.llm import (
     ChatMessage,
     LLMRequest,
@@ -76,6 +77,7 @@ def _build_request(state: TaskRunState) -> LLMRequest:
         model=_str_or_none(state, "model"),
         temperature=_float_or_none(state, "temperature"),
         max_tokens=_int_or_none(state, "max_tokens"),
+        step_kind=STEP_CHAT,
     )
 
 
