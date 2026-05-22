@@ -78,6 +78,7 @@ def test_task_type_set_contains_expected_members() -> None:
         "bug_fix",
         "code_review",
         "auto_pr",
+        "feature_impl",
         "system_echo",
         "system_chat",
         "system_git_inspect",

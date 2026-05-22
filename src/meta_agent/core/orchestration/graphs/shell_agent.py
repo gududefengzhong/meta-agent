@@ -107,11 +107,13 @@ def _select_specs(registry: ToolRegistry, names: frozenset[str] | None) -> tuple
     return tuple(spec for spec in specs if spec.name in names)
 
 
-def _build_initial_messages(state: TaskRunState) -> list[ChatMessage]:
+def _build_initial_messages(
+    state: TaskRunState, default_system_prompt: str | None = None
+) -> list[ChatMessage]:
     user_prompt = _str_or_none(state, "user_prompt")
     if not user_prompt:
         raise GraphError("shell_agent: state.data['user_prompt'] is required")
-    system_prompt = _str_or_none(state, "system_prompt")
+    system_prompt = _str_or_none(state, "system_prompt") or default_system_prompt
     messages: list[ChatMessage] = []
     if system_prompt:
         messages.append(ChatMessage(role=MessageRole.SYSTEM, content=system_prompt))
@@ -119,10 +121,12 @@ def _build_initial_messages(state: TaskRunState) -> list[ChatMessage]:
     return messages
 
 
-def _load_messages(state: TaskRunState) -> list[ChatMessage]:
+def _load_messages(
+    state: TaskRunState, default_system_prompt: str | None = None
+) -> list[ChatMessage]:
     raw = state.data.get("_messages")
     if raw is None:
-        return _build_initial_messages(state)
+        return _build_initial_messages(state, default_system_prompt)
     if not isinstance(raw, list):
         raise GraphError("shell_agent: state.data['_messages'] must be a list")
     return [ChatMessage.model_validate(item) for item in raw]
@@ -210,8 +214,23 @@ def _require_tool_caps(deps: GraphDeps) -> tuple[ToolRegistry, ToolExecutor]:
     return deps.tool_registry, deps.tool_executor
 
 
-def build_shell_agent_graph(deps: GraphDeps) -> Graph:
+def build_shell_agent_graph(
+    deps: GraphDeps,
+    *,
+    graph_id: str = SHELL_AGENT_GRAPH_ID,
+    default_system_prompt: str | None = None,
+) -> Graph:
     """Return a fresh, compiled shell_agent graph bound to ``deps``.
+
+    ``graph_id`` defaults to :data:`SHELL_AGENT_GRAPH_ID`. Callers that
+    want to reuse the same plan→tool→observe loop under a distinct
+    audit / registry identity (e.g. ``builtin.feature_impl``) pass their
+    own id; the graph topology and node behavior are identical.
+
+    ``default_system_prompt`` is consulted only when
+    ``state.data['system_prompt']`` is missing / empty. It lets a
+    derived graph (e.g. feature_impl) carry a task-family-specific
+    framing without forcing every caller to pass one explicitly.
 
     Raises :class:`GraphError` if ``deps.tool_registry`` /
     ``deps.tool_executor`` are missing; both are mandatory because this
@@ -222,7 +241,7 @@ def build_shell_agent_graph(deps: GraphDeps) -> Graph:
     registry, executor = _require_tool_caps(deps)
 
     async def plan(state: TaskRunState) -> NodeResult:
-        messages = _load_messages(state)
+        messages = _load_messages(state, default_system_prompt)
         max_steps = _int_or_default(state, "max_steps", _DEFAULT_MAX_STEPS)
         if max_steps <= 0:
             raise GraphError("shell_agent: max_steps must be positive")
@@ -292,7 +311,7 @@ def build_shell_agent_graph(deps: GraphDeps) -> Graph:
         if not isinstance(raw, list) or not raw:
             raise GraphError("shell_agent: tool_call entered with no pending tool calls")
         ctx = _build_tool_context(state)
-        messages = _load_messages(state)
+        messages = _load_messages(state, default_system_prompt)
         invocations = _int_or_default(state, "_tool_invocations", 0)
         for entry in raw:
             call = ToolCall.model_validate(entry)
@@ -336,7 +355,7 @@ def build_shell_agent_graph(deps: GraphDeps) -> Graph:
             return "tool_call"
         return "finalize"
 
-    g = Graph(SHELL_AGENT_GRAPH_ID)
+    g = Graph(graph_id)
     g.add_node("plan", plan)
     g.add_node("tool_call", tool_call)
     g.add_node("finalize", finalize)

@@ -17,7 +17,8 @@ class TaskType(StrEnum):
     """Task families.
 
     First-class business families (``BUG_FIX`` / ``CODE_REVIEW`` /
-    ``AUTO_PR``) are defined in ``docs/specs/AGENT_SPEC.md`` §L1.
+    ``AUTO_PR`` / ``FEATURE_IMPL``) are defined in
+    ``docs/specs/AGENT_SPEC.md`` (§L1 + Phase β+).
     System families (prefixed ``system_``) are reserved for built-in
     self-tests / smoke flows and never carry customer-facing semantics.
     The enum is open for extension but closed for renaming.
@@ -26,6 +27,7 @@ class TaskType(StrEnum):
     BUG_FIX = "bug_fix"
     CODE_REVIEW = "code_review"
     AUTO_PR = "auto_pr"
+    FEATURE_IMPL = "feature_impl"
     SYSTEM_ECHO = "system_echo"
     SYSTEM_CHAT = "system_chat"
     SYSTEM_GIT_INSPECT = "system_git_inspect"
