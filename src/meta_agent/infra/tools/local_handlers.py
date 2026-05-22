@@ -24,6 +24,7 @@ from typing import Any
 
 from meta_agent.core.capabilities.registry import ToolHandler, ToolRegistry
 from meta_agent.core.ports.tools import (
+    DocSearchTool,
     EditTool,
     FileSystemTool,
     ShellTool,
@@ -34,6 +35,7 @@ from meta_agent.core.ports.tools import (
     ToolResult,
     ToolSpec,
     ToolValidationError,
+    WebFetchTool,
 )
 
 TOOL_FS_READ = "fs_read"
@@ -43,6 +45,8 @@ TOOL_EDIT_WRITE = "edit_write"
 TOOL_EDIT_PATCH_APPLY = "edit_patch_apply"
 TOOL_SHELL_RUN = "shell_run"
 TOOL_TEST_RUN = "test_run"
+TOOL_WEB_FETCH = "web_fetch"
+TOOL_DOC_SEARCH = "doc_search"
 
 
 def _arg_str(args: dict[str, Any], key: str, *, required: bool = True, default: str = "") -> str:
@@ -207,6 +211,46 @@ _TEST_RUN_SPEC = ToolSpec(
     category=ToolCategory.TEST,
 )
 
+_WEB_FETCH_SPEC = ToolSpec(
+    name=TOOL_WEB_FETCH,
+    description=(
+        "Fetch a single HTTP/HTTPS URL by GET. The host must appear in the "
+        "operator-configured allow-list; binary content is refused. The "
+        "response body is bounded by the agent's output_byte_cap and may be "
+        "truncated."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "timeout_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        },
+        "required": ["url"],
+        "additionalProperties": False,
+    },
+    category=ToolCategory.WEB,
+)
+
+_DOC_SEARCH_SPEC = ToolSpec(
+    name=TOOL_DOC_SEARCH,
+    description=(
+        "Search a configured knowledge base for documents matching a "
+        "natural-language query. Returns ranked source_uri / title / "
+        "snippet entries; pair with web_fetch (or an adapter-specific "
+        "resolver) to retrieve full documents."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    category=ToolCategory.WEB,
+)
+
 
 def _fs_read_handler(fs: FileSystemTool) -> ToolHandler:
     async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
@@ -290,6 +334,71 @@ def _shell_run_handler(shell: ShellTool) -> ToolHandler:
     return handler
 
 
+def _arg_float_or_none(args: dict[str, Any], key: str) -> float | None:
+    if key not in args or args[key] is None:
+        return None
+    value = args[key]
+    if isinstance(value, bool):
+        raise ToolValidationError(f"argument {key!r} must be a number or null")
+    if isinstance(value, int | float):
+        return float(value)
+    raise ToolValidationError(f"argument {key!r} must be a number or null")
+
+
+def _web_fetch_handler(web: WebFetchTool) -> ToolHandler:
+    async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
+        url = _arg_str(call.arguments, "url")
+        timeout_seconds = _arg_float_or_none(call.arguments, "timeout_seconds")
+        outcome = await web.fetch(ctx, url=url, timeout_seconds=timeout_seconds)
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content=(
+                f"final_url={outcome.final_url}\n"
+                f"status={outcome.status}\n"
+                f"content_type={outcome.content_type}\n"
+                f"bytes_received={outcome.bytes_received}\n"
+                f"---\n{outcome.content}"
+            ),
+            truncated=outcome.truncated,
+            is_error=not (200 <= outcome.status < 300),
+            metadata={
+                "status": str(outcome.status),
+                "content_type": outcome.content_type,
+                "bytes_received": str(outcome.bytes_received),
+            },
+        )
+
+    return handler
+
+
+def _doc_search_handler(search: DocSearchTool) -> ToolHandler:
+    async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
+        query = _arg_str(call.arguments, "query")
+        limit = _arg_int(call.arguments, "limit", default=5)
+        hits = await search.search(ctx, query=query, limit=limit)
+        if not hits:
+            return ToolResult(
+                call_id=call.id,
+                name=call.name,
+                content=f"no documents matched query {query!r}",
+                metadata={"hits": "0"},
+            )
+        lines = [
+            f"[{idx + 1}] score={hit.score:.3f} uri={hit.source_uri}\n"
+            f"title: {hit.title}\nsnippet: {hit.snippet}"
+            for idx, hit in enumerate(hits)
+        ]
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content="\n\n".join(lines),
+            metadata={"hits": str(len(hits))},
+        )
+
+    return handler
+
+
 def _test_run_handler(test: TestTool) -> ToolHandler:
     async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
         suite = _arg_str(call.arguments, "suite")
@@ -329,8 +438,15 @@ def register_local_workspace_tools(
     edit: EditTool,
     shell: ShellTool,
     test: TestTool | None = None,
+    web_fetch: WebFetchTool | None = None,
+    doc_search: DocSearchTool | None = None,
 ) -> None:
     """Register the local FS/Edit/Shell tools against ``registry``.
+
+    ``web_fetch`` and ``doc_search`` are optional — bootstraps that do
+    not configure the WEB surface (no domain allow-list, no doc
+    corpus) simply skip those registrations, and the agent loop never
+    sees the tools.
 
     Idempotency is the registry's responsibility (duplicate names raise
     :class:`ToolValidationError`); call this exactly once at boot.
@@ -344,3 +460,7 @@ def register_local_workspace_tools(
     registry.register(_SHELL_RUN_SPEC, _shell_run_handler(shell))
     if test is not None:
         registry.register(_TEST_RUN_SPEC, _test_run_handler(test))
+    if web_fetch is not None:
+        registry.register(_WEB_FETCH_SPEC, _web_fetch_handler(web_fetch))
+    if doc_search is not None:
+        registry.register(_DOC_SEARCH_SPEC, _doc_search_handler(doc_search))
