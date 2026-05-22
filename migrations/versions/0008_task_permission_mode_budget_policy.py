@@ -57,9 +57,7 @@ def upgrade() -> None:
     )
     # Backfill any legacy ``awaiting_human`` rows to the renamed value.
     op.execute(
-        sa.text(
-            "UPDATE tasks SET state = 'awaiting_approval' WHERE state = 'awaiting_human'"
-        )
+        sa.text("UPDATE tasks SET state = 'awaiting_approval' WHERE state = 'awaiting_human'")
     )
     # Partial index keyed on tasks that the γ sweeper / approval API
     # need to find quickly. Most tasks are in terminal states; the
@@ -76,9 +74,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_tasks_awaiting_approval", table_name="tasks")
     op.execute(
-        sa.text(
-            "UPDATE tasks SET state = 'awaiting_human' WHERE state = 'awaiting_approval'"
-        )
+        sa.text("UPDATE tasks SET state = 'awaiting_human' WHERE state = 'awaiting_approval'")
     )
     op.drop_column("tasks", "budget_policy")
     op.drop_column("tasks", "permission_mode")
