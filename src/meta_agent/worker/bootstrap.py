@@ -67,6 +67,7 @@ from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
 from meta_agent.core.ports.llm_usage import LLMUsageRepository
 from meta_agent.core.ports.rate_limiter import RateLimiter
+from meta_agent.core.ports.tools import DocSearchTool, WebFetchTool
 from meta_agent.infra.budget import (
     BudgetConfig,
     NoopBudgetEnforcer,
@@ -119,6 +120,7 @@ from meta_agent.infra.tools import (
     DockerWorkspaceFileSystemTool,
     DockerWorkspaceShellTool,
     DockerWorkspaceTestTool,
+    HttpxWebFetchTool,
     LocalWorkspaceEditTool,
     LocalWorkspaceFileSystemTool,
     LocalWorkspaceShellTool,
@@ -147,6 +149,7 @@ _WORKSPACE_BACKEND_ENV = "META_AGENT_WORKSPACE_BACKEND"
 _WORKSPACE_DOCKER_IMAGE_ENV = "META_AGENT_WORKSPACE_DOCKER_IMAGE"
 _WORKSPACE_DOCKER_NETWORK_ENV = "META_AGENT_WORKSPACE_DOCKER_NETWORK"
 _GIT_PROVIDER_ENV = "META_AGENT_GIT_PROVIDER"
+_WEB_ALLOWED_HOSTS_ENV = "META_AGENT_WEB_ALLOWED_HOSTS"
 
 _DEFAULT_DB_URL = "postgresql://meta_agent:dev-only@localhost:5432/meta_agent"
 _DEFAULT_REDIS_URL = "redis://localhost:6379/0"
@@ -159,6 +162,18 @@ _DEFAULT_WORKSPACE_DOCKER_IMAGE = "meta-agent:local"
 _DEFAULT_GIT_PROVIDER = "fake"
 _SUPPORTED_WORKSPACE_BACKENDS = ("local_git", "docker")
 _SUPPORTED_GIT_PROVIDERS = ("fake", "github")
+
+
+def _parse_web_allowed_hosts(raw: str | None) -> tuple[str, ...]:
+    """Parse ``META_AGENT_WEB_ALLOWED_HOSTS`` (comma-separated) into a tuple.
+
+    An empty / unset value yields ``()`` — the worker then leaves the
+    ``WebFetchTool`` unregistered and the agent never sees it.
+    """
+
+    if not raw:
+        return ()
+    return tuple(host.strip().lower() for host in raw.split(",") if host.strip())
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +192,7 @@ class WorkerSettings:
     workspace_docker_network: str | None
     git_provider: str
     github: GitHubGitProviderConfig | None
+    web_allowed_hosts: tuple[str, ...] = ()
     db_min_size: int = 1
     db_max_size: int = 5
     max_attempts: int = 3
@@ -221,6 +237,7 @@ class WorkerSettings:
             workspace_docker_network=source.get(_WORKSPACE_DOCKER_NETWORK_ENV) or None,
             git_provider=git_provider,
             github=github_cfg,
+            web_allowed_hosts=_parse_web_allowed_hosts(source.get(_WEB_ALLOWED_HOSTS_ENV)),
             db_min_size=int(source.get(_DB_MIN_SIZE_ENV, "1")),
             db_max_size=int(source.get(_DB_MAX_SIZE_ENV, "5")),
             max_attempts=int(source.get(_MAX_ATTEMPTS_ENV, "3")),
@@ -306,11 +323,28 @@ def build_test_tool(settings: WorkerSettings) -> LocalWorkspaceTestTool | Docker
     )
 
 
+def build_web_fetch_tool(settings: WorkerSettings) -> HttpxWebFetchTool | None:
+    """Instantiate :class:`HttpxWebFetchTool` when an allow-list is set.
+
+    Returns ``None`` when ``META_AGENT_WEB_ALLOWED_HOSTS`` is empty so
+    the worker bootstrap leaves the ``web_fetch`` tool unregistered —
+    the agent loop simply does not see it and cannot reach outbound
+    HTTP. This is the conservative default; operators must opt in to
+    web fetch explicitly.
+    """
+
+    if not settings.web_allowed_hosts:
+        return None
+    return HttpxWebFetchTool(allowed_hosts=frozenset(settings.web_allowed_hosts))
+
+
 def build_local_tool_stack(
     fs: LocalWorkspaceFileSystemTool | DockerWorkspaceFileSystemTool | None = None,
     edit: LocalWorkspaceEditTool | DockerWorkspaceEditTool | None = None,
     shell: LocalWorkspaceShellTool | DockerWorkspaceShellTool | None = None,
     test: LocalWorkspaceTestTool | DockerWorkspaceTestTool | None = None,
+    web_fetch: WebFetchTool | None = None,
+    doc_search: DocSearchTool | None = None,
 ) -> tuple[ToolRegistry, ToolExecutor]:
     """Materialize the default local-workspace tool stack.
 
@@ -319,6 +353,12 @@ def build_local_tool_stack(
     :mod:`meta_agent.infra.tools`, and binds a
     :class:`ToolExecutor` to it. Returned pair is ready to attach to
     :class:`GraphDeps` for ``shell_agent``-style tool-use graphs.
+
+    The WEB-category tools (``web_fetch`` / ``doc_search``) are
+    optional. Callers that pass ``None`` for both keep the legacy
+    Phase β tool surface; callers that wire them get the Phase β+ web
+    surface registered alongside the existing FS / Edit / Shell / Test
+    handlers.
     """
 
     registry = ToolRegistry()
@@ -328,6 +368,8 @@ def build_local_tool_stack(
         edit=edit or LocalWorkspaceEditTool(),
         shell=shell or LocalWorkspaceShellTool(),
         test=test or LocalWorkspaceTestTool(),
+        web_fetch=web_fetch,
+        doc_search=doc_search,
     )
     return registry, ToolExecutor(registry)
 
@@ -737,12 +779,18 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     # Local-workspace tool stack feeds the ``shell_agent`` tool-use loop.
     # Containment for FS/Edit lives in the adapters; the executor binds
     # the same registry instance so registry mutation post-boot is the
-    # only race worth defending against.
+    # only race worth defending against. ``web_fetch`` only registers
+    # when ``META_AGENT_WEB_ALLOWED_HOSTS`` is configured — without an
+    # allow-list the agent never gets outbound HTTP. The Phase β+
+    # ``doc_search`` adapter is operator-supplied (no canned corpus),
+    # so it stays unregistered in this path.
+    web_fetch_tool = build_web_fetch_tool(settings)
     tool_registry, tool_executor = build_local_tool_stack(
         fs=build_file_system_tool(settings),
         edit=build_edit_tool(settings),
         shell=build_shell_tool(settings),
         test=build_test_tool(settings),
+        web_fetch=web_fetch_tool,
     )
     # Prompt registry: Postgres-backed source of truth (shared across
     # workers) wrapped in a TTL cache so per-request fetches do not
@@ -782,6 +830,8 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         await budget_enforcer.close()
         await rate_limiter.close()
         await breaker.close()
+        if web_fetch_tool is not None:
+            await web_fetch_tool.close()
         await redis_client.aclose()
         await pool.close()
 

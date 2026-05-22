@@ -84,6 +84,8 @@ from meta_agent.core.ports.secrets import (
 )
 from meta_agent.core.ports.task_submitter import FollowUpSpec, TaskSubmitter
 from meta_agent.core.ports.tools import (
+    DocHit,
+    DocSearchTool,
     EditOutcome,
     EditTool,
     FileSystemTool,
@@ -102,6 +104,8 @@ from meta_agent.core.ports.tools import (
     ToolResult,
     ToolSpec,
     ToolValidationError,
+    WebFetchOutcome,
+    WebFetchTool,
 )
 from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 
@@ -123,6 +127,8 @@ __all__ = [
     "CircuitBreakerBackendError",
     "CircuitBreakerOpenError",
     "CircuitBreakerState",
+    "DocHit",
+    "DocSearchTool",
     "EditOutcome",
     "EditTool",
     "FileSystemTool",
@@ -186,6 +192,8 @@ __all__ = [
     "ToolValidationError",
     "UsageAggregate",
     "UsageGroupBy",
+    "WebFetchOutcome",
+    "WebFetchTool",
     "WorkspaceError",
     "WorkspaceManager",
 ]

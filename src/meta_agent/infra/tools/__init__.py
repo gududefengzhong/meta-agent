@@ -9,6 +9,7 @@ not per-tool, so a future Docker / Firecracker backend can be added
 as a sibling module without restructuring the import graph.
 """
 
+from meta_agent.infra.tools.doc_search import DocEntry, InMemoryDocSearchTool
 from meta_agent.infra.tools.docker_workspace import (
     DockerWorkspaceEditTool,
     DockerWorkspaceFileSystemTool,
@@ -16,6 +17,7 @@ from meta_agent.infra.tools.docker_workspace import (
     DockerWorkspaceTestTool,
 )
 from meta_agent.infra.tools.local_handlers import (
+    TOOL_DOC_SEARCH,
     TOOL_EDIT_PATCH_APPLY,
     TOOL_EDIT_WRITE,
     TOOL_FS_GREP,
@@ -23,6 +25,7 @@ from meta_agent.infra.tools.local_handlers import (
     TOOL_FS_READ,
     TOOL_SHELL_RUN,
     TOOL_TEST_RUN,
+    TOOL_WEB_FETCH,
     register_local_workspace_tools,
 )
 from meta_agent.infra.tools.local_workspace import (
@@ -31,8 +34,10 @@ from meta_agent.infra.tools.local_workspace import (
     LocalWorkspaceShellTool,
     LocalWorkspaceTestTool,
 )
+from meta_agent.infra.tools.web_fetch import HttpxWebFetchTool
 
 __all__ = [
+    "TOOL_DOC_SEARCH",
     "TOOL_EDIT_PATCH_APPLY",
     "TOOL_EDIT_WRITE",
     "TOOL_FS_GREP",
@@ -40,10 +45,14 @@ __all__ = [
     "TOOL_FS_READ",
     "TOOL_SHELL_RUN",
     "TOOL_TEST_RUN",
+    "TOOL_WEB_FETCH",
+    "DocEntry",
     "DockerWorkspaceEditTool",
     "DockerWorkspaceFileSystemTool",
     "DockerWorkspaceShellTool",
     "DockerWorkspaceTestTool",
+    "HttpxWebFetchTool",
+    "InMemoryDocSearchTool",
     "LocalWorkspaceEditTool",
     "LocalWorkspaceFileSystemTool",
     "LocalWorkspaceShellTool",

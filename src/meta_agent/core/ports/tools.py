@@ -49,6 +49,14 @@ class ToolCategory(StrEnum):
     EDIT = "edit"
     SHELL = "shell"
     TEST = "test"
+    WEB = "web"
+    """Outbound HTTP fetch + searchable doc / knowledge-base access.
+
+    Phase β+ adds two ``WEB`` tools: ``web_fetch`` (single URL → text)
+    and ``doc_search`` (query → ranked snippets). Both go through the
+    α-phase safety shell (rate limit / circuit breaker / per-tool
+    accounting) — no tool may bypass that layer.
+    """
 
 
 class ToolSpec(BaseModel):
@@ -303,3 +311,93 @@ class TestTool(ABC):
         timeout_seconds: float | None = None,
     ) -> TestOutcome:
         """Run ``suite`` against ``targets`` within the workspace."""
+
+
+class WebFetchOutcome(BaseModel):
+    """Result of a single :class:`WebFetchTool.fetch` call.
+
+    Adapters MUST populate ``content_type`` and ``final_url`` even on
+    success — callers (and the LLM observing the tool result) often
+    need the redirect target to make sense of the response. ``status``
+    is the HTTP status code; non-2xx outcomes still return normally
+    (with ``content`` carrying whatever the upstream sent) so the
+    agent loop can reason about them, matching the
+    ``ShellTool`` / ``TestTool`` convention.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    final_url: str = Field(..., min_length=1)
+    status: int = Field(..., ge=100, le=599)
+    content_type: str
+    content: str
+    truncated: bool = False
+    bytes_received: int = Field(..., ge=0)
+
+
+class WebFetchTool(ABC):
+    """Outbound HTTP GET against a vetted domain allow-list.
+
+    The adapter is the single chokepoint for outbound HTTP from agent
+    loops: it enforces the domain allow-list, applies a size cap, and
+    raises :class:`ToolPermissionError` when the URL falls outside the
+    allow-list. Network errors and timeouts surface as
+    :class:`ToolExecutionError`; non-2xx HTTP responses are *not*
+    errors — they return a populated :class:`WebFetchOutcome` so the
+    agent loop can inspect the status.
+
+    Binary content (anything whose ``Content-Type`` is not text-shaped)
+    MUST be refused with :class:`ToolValidationError`; the LLM
+    consumes UTF-8 text only and silently base64-encoding bytes would
+    hide the failure.
+    """
+
+    @abstractmethod
+    async def fetch(
+        self,
+        ctx: ToolContext,
+        *,
+        url: str,
+        timeout_seconds: float | None = None,
+    ) -> WebFetchOutcome:
+        """Fetch ``url`` and return its decoded body bounded by ``ctx.output_byte_cap``."""
+
+
+class DocHit(BaseModel):
+    """A single result returned by :class:`DocSearchTool.search`.
+
+    ``source_uri`` is opaque to the LLM but stable across calls —
+    callers re-fetch the full document by passing it back through
+    ``WebFetchTool`` or an adapter-specific resolver. ``score`` is
+    adapter-internal (cosine distance, BM25, keyword overlap) and is
+    only useful for ordering hits within a single search response.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_uri: str = Field(..., min_length=1)
+    title: str
+    snippet: str
+    score: float = Field(..., ge=0.0)
+
+
+class DocSearchTool(ABC):
+    """Searchable knowledge-base surface.
+
+    The default Phase β+ adapter is in-memory keyword-scored, but the
+    Port stays narrow so future adapters (OSS / COS / vendor doc
+    APIs) can drop in without touching graph code. Implementations
+    MUST clamp ``limit`` to a sensible upper bound (the in-memory
+    adapter uses 20) and MUST return an empty tuple — never raise —
+    when the query is well-formed but matches nothing.
+    """
+
+    @abstractmethod
+    async def search(
+        self,
+        ctx: ToolContext,
+        *,
+        query: str,
+        limit: int = 5,
+    ) -> tuple[DocHit, ...]:
+        """Rank documents against ``query`` and return up to ``limit`` hits."""
