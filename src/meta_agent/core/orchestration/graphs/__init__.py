@@ -16,6 +16,8 @@
   commit as a pull request via the :class:`GitProvider` port.
 * ``builtin.shell_agent`` — Phase β tool-use loop: plan / tool_call /
   observe iteration against the injected :class:`ToolRegistry`.
+* ``builtin.feature_impl`` — Phase β+ first track: shell_agent under a
+  feature-implementation framing, exposing ``TaskType.FEATURE_IMPL``.
 """
 
 from meta_agent.core.orchestration.graphs.auto_pr import (
@@ -38,6 +40,10 @@ from meta_agent.core.orchestration.graphs.echo import (
     ECHO_GRAPH_ID,
     build_echo_graph,
 )
+from meta_agent.core.orchestration.graphs.feature_impl import (
+    FEATURE_IMPL_GRAPH_ID,
+    build_feature_impl_graph,
+)
 from meta_agent.core.orchestration.graphs.git_inspect import (
     GIT_INSPECT_GRAPH_ID,
     build_git_inspect_graph,
@@ -57,6 +63,7 @@ __all__ = [
     "BUG_FIX_V2_GRAPH_ID",
     "CODE_REVIEW_GRAPH_ID",
     "ECHO_GRAPH_ID",
+    "FEATURE_IMPL_GRAPH_ID",
     "GIT_INSPECT_GRAPH_ID",
     "SHELL_AGENT_GRAPH_ID",
     "SIMPLE_CHAT_GRAPH_ID",
@@ -65,6 +72,7 @@ __all__ = [
     "build_bug_fix_v2_graph",
     "build_code_review_graph",
     "build_echo_graph",
+    "build_feature_impl_graph",
     "build_git_inspect_graph",
     "build_shell_agent_graph",
     "build_simple_chat_graph",
