@@ -67,7 +67,7 @@ from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
 from meta_agent.core.ports.llm_usage import LLMUsageRepository
 from meta_agent.core.ports.rate_limiter import RateLimiter
-from meta_agent.core.ports.tools import DocSearchTool, WebFetchTool
+from meta_agent.core.ports.tools import CodeRetrievalTool, DocSearchTool, WebFetchTool
 from meta_agent.infra.budget import (
     BudgetConfig,
     NoopBudgetEnforcer,
@@ -127,6 +127,7 @@ from meta_agent.infra.tools import (
     LocalWorkspaceFileSystemTool,
     LocalWorkspaceShellTool,
     LocalWorkspaceTestTool,
+    TreeSitterCodeRetrievalTool,
     register_local_workspace_tools,
 )
 from meta_agent.infra.workspace import (
@@ -394,6 +395,7 @@ def build_local_tool_stack(
     test: LocalWorkspaceTestTool | DockerWorkspaceTestTool | None = None,
     web_fetch: WebFetchTool | None = None,
     doc_search: DocSearchTool | None = None,
+    code_retrieval: CodeRetrievalTool | None = None,
 ) -> tuple[ToolRegistry, ToolExecutor]:
     """Materialize the default local-workspace tool stack.
 
@@ -403,11 +405,13 @@ def build_local_tool_stack(
     :class:`ToolExecutor` to it. Returned pair is ready to attach to
     :class:`GraphDeps` for ``shell_agent``-style tool-use graphs.
 
-    The WEB-category tools (``web_fetch`` / ``doc_search``) are
-    optional. Callers that pass ``None`` for both keep the legacy
-    Phase β tool surface; callers that wire them get the Phase β+ web
-    surface registered alongside the existing FS / Edit / Shell / Test
-    handlers.
+    The WEB-category tools (``web_fetch`` / ``doc_search``) and
+    CODE_INDEX-category tools (``code_search`` / ``get_definition`` /
+    ``get_references`` / ``outline``) are optional. Phase β+ code
+    retrieval defaults to a tree-sitter on-demand adapter — the
+    worker bootstrap passes :class:`TreeSitterCodeRetrievalTool` here
+    so the tools are registered by default, but unit-test callers may
+    pass ``None`` to opt out.
     """
 
     registry = ToolRegistry()
@@ -419,6 +423,7 @@ def build_local_tool_stack(
         test=test or LocalWorkspaceTestTool(),
         web_fetch=web_fetch,
         doc_search=doc_search,
+        code_retrieval=code_retrieval,
     )
     return registry, ToolExecutor(registry)
 
@@ -855,12 +860,17 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     # ``doc_search`` adapter is operator-supplied (no canned corpus),
     # so it stays unregistered in this path.
     web_fetch_tool = build_web_fetch_tool(settings)
+    # CodeRetrievalTool is on by default: it is stateless, has no
+    # network egress, and reads only the per-task worktree, so there
+    # is no policy reason to keep it behind a flag.
+    code_retrieval_tool = TreeSitterCodeRetrievalTool()
     tool_registry, tool_executor = build_local_tool_stack(
         fs=build_file_system_tool(settings),
         edit=build_edit_tool(settings),
         shell=build_shell_tool(settings),
         test=build_test_tool(settings),
         web_fetch=web_fetch_tool,
+        code_retrieval=code_retrieval_tool,
     )
     # Prompt registry: Postgres-backed source of truth (shared across
     # workers) wrapped in a TTL cache so per-request fetches do not

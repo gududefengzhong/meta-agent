@@ -24,6 +24,7 @@ from typing import Any
 
 from meta_agent.core.capabilities.registry import ToolHandler, ToolRegistry
 from meta_agent.core.ports.tools import (
+    CodeRetrievalTool,
     DocSearchTool,
     EditTool,
     FileSystemTool,
@@ -47,6 +48,10 @@ TOOL_SHELL_RUN = "shell_run"
 TOOL_TEST_RUN = "test_run"
 TOOL_WEB_FETCH = "web_fetch"
 TOOL_DOC_SEARCH = "doc_search"
+TOOL_CODE_SEARCH = "code_search"
+TOOL_GET_DEFINITION = "get_definition"
+TOOL_GET_REFERENCES = "get_references"
+TOOL_OUTLINE = "outline"
 
 
 def _arg_str(args: dict[str, Any], key: str, *, required: bool = True, default: str = "") -> str:
@@ -251,6 +256,88 @@ _DOC_SEARCH_SPEC = ToolSpec(
     category=ToolCategory.WEB,
 )
 
+_CODE_SEARCH_SPEC = ToolSpec(
+    name=TOOL_CODE_SEARCH,
+    description=(
+        "Search the workspace for code matching a regex query. Returns "
+        "ranked hits enriched with the enclosing symbol (function / "
+        "class / method) when the file's language is supported. No "
+        "persistent index — every call reads the live worktree."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "path_globs": {"type": "array", "items": {"type": "string"}},
+            "language": {"type": ["string", "null"]},
+            "limit": {"type": "integer", "minimum": 1},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    category=ToolCategory.CODE_INDEX,
+)
+
+_GET_DEFINITION_SPEC = ToolSpec(
+    name=TOOL_GET_DEFINITION,
+    description=(
+        "Locate every definition site of a symbol (function / class / "
+        "method) inside the workspace. Symbol must be a plain "
+        "identifier. Returns file paths + line ranges."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "language": {"type": ["string", "null"]},
+            "path_globs": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["symbol"],
+        "additionalProperties": False,
+    },
+    category=ToolCategory.CODE_INDEX,
+)
+
+_GET_REFERENCES_SPEC = ToolSpec(
+    name=TOOL_GET_REFERENCES,
+    description=(
+        "Return every file:line where a symbol is referenced. This is "
+        "an identifier-level grep with word boundaries; it does not "
+        "perform full type-aware resolution."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string"},
+            "language": {"type": ["string", "null"]},
+            "path_globs": {"type": "array", "items": {"type": "string"}},
+            "limit": {"type": "integer", "minimum": 1},
+        },
+        "required": ["symbol"],
+        "additionalProperties": False,
+    },
+    category=ToolCategory.CODE_INDEX,
+)
+
+_OUTLINE_SPEC = ToolSpec(
+    name=TOOL_OUTLINE,
+    description=(
+        "Return the top-level / nested symbol outline of a file "
+        "(classes, functions, methods, interfaces). Pair with "
+        "fs_read / get_definition once a relevant symbol is "
+        "identified."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    },
+    category=ToolCategory.CODE_INDEX,
+)
+
 
 def _fs_read_handler(fs: FileSystemTool) -> ToolHandler:
     async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
@@ -372,6 +459,142 @@ def _web_fetch_handler(web: WebFetchTool) -> ToolHandler:
     return handler
 
 
+def _code_search_handler(code: CodeRetrievalTool) -> ToolHandler:
+    async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
+        query = _arg_str(call.arguments, "query")
+        path_globs = _arg_str_tuple(call.arguments, "path_globs", default=("**/*",))
+        language = _arg_str(call.arguments, "language", required=False, default="") or None
+        limit = _arg_int(call.arguments, "limit", default=20)
+        hits = await code.search(
+            ctx,
+            query=query,
+            path_globs=path_globs,
+            language=language,
+            limit=limit,
+        )
+        if not hits:
+            return ToolResult(
+                call_id=call.id,
+                name=call.name,
+                content=f"no matches for query {query!r}",
+                metadata={"hits": "0"},
+            )
+        lines = [
+            (
+                f"[{idx + 1}] {hit.path}:{hit.line_no}"
+                + (
+                    f" ({hit.symbol_kind.value} {hit.symbol})"
+                    if hit.symbol and hit.symbol_kind is not None
+                    else ""
+                )
+                + f"\n    {hit.snippet}"
+            )
+            for idx, hit in enumerate(hits)
+        ]
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content="\n".join(lines),
+            metadata={"hits": str(len(hits))},
+        )
+
+    return handler
+
+
+def _get_definition_handler(code: CodeRetrievalTool) -> ToolHandler:
+    async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
+        symbol = _arg_str(call.arguments, "symbol")
+        path_globs = _arg_str_tuple(call.arguments, "path_globs", default=("**/*",))
+        language = _arg_str(call.arguments, "language", required=False, default="") or None
+        locations = await code.get_definition(
+            ctx, symbol=symbol, language=language, path_globs=path_globs
+        )
+        if not locations:
+            return ToolResult(
+                call_id=call.id,
+                name=call.name,
+                content=f"no definition found for {symbol!r}",
+                metadata={"hits": "0"},
+            )
+        lines = [
+            (
+                f"[{idx + 1}] {loc.path}:{loc.line_no}"
+                + (f"-{loc.end_line_no}" if loc.end_line_no is not None else "")
+                + f" ({loc.symbol_kind.value})\n    {loc.snippet}"
+            )
+            for idx, loc in enumerate(locations)
+        ]
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content="\n".join(lines),
+            metadata={"hits": str(len(locations))},
+        )
+
+    return handler
+
+
+def _get_references_handler(code: CodeRetrievalTool) -> ToolHandler:
+    async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
+        symbol = _arg_str(call.arguments, "symbol")
+        path_globs = _arg_str_tuple(call.arguments, "path_globs", default=("**/*",))
+        language = _arg_str(call.arguments, "language", required=False, default="") or None
+        limit = _arg_int(call.arguments, "limit", default=200)
+        locations = await code.get_references(
+            ctx,
+            symbol=symbol,
+            language=language,
+            path_globs=path_globs,
+            limit=limit,
+        )
+        if not locations:
+            return ToolResult(
+                call_id=call.id,
+                name=call.name,
+                content=f"no references found for {symbol!r}",
+                metadata={"hits": "0"},
+            )
+        body = "\n".join(f"{loc.path}:{loc.line_no}: {loc.snippet}" for loc in locations)
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content=body,
+            metadata={"hits": str(len(locations))},
+        )
+
+    return handler
+
+
+def _outline_handler(code: CodeRetrievalTool) -> ToolHandler:
+    async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
+        path = _arg_str(call.arguments, "path")
+        entries = await code.outline(ctx, path=path)
+        if not entries:
+            return ToolResult(
+                call_id=call.id,
+                name=call.name,
+                content=f"no symbols extracted from {path!r}",
+                metadata={"entries": "0"},
+            )
+        lines = [
+            (
+                "  " * entry.depth
+                + f"{entry.line_no}"
+                + (f"-{entry.end_line_no}" if entry.end_line_no is not None else "")
+                + f": {entry.symbol_kind.value} {entry.symbol}"
+            )
+            for entry in entries
+        ]
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content="\n".join(lines),
+            metadata={"entries": str(len(entries))},
+        )
+
+    return handler
+
+
 def _doc_search_handler(search: DocSearchTool) -> ToolHandler:
     async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
         query = _arg_str(call.arguments, "query")
@@ -440,6 +663,7 @@ def register_local_workspace_tools(
     test: TestTool | None = None,
     web_fetch: WebFetchTool | None = None,
     doc_search: DocSearchTool | None = None,
+    code_retrieval: CodeRetrievalTool | None = None,
 ) -> None:
     """Register the local FS/Edit/Shell tools against ``registry``.
 
@@ -464,3 +688,8 @@ def register_local_workspace_tools(
         registry.register(_WEB_FETCH_SPEC, _web_fetch_handler(web_fetch))
     if doc_search is not None:
         registry.register(_DOC_SEARCH_SPEC, _doc_search_handler(doc_search))
+    if code_retrieval is not None:
+        registry.register(_CODE_SEARCH_SPEC, _code_search_handler(code_retrieval))
+        registry.register(_GET_DEFINITION_SPEC, _get_definition_handler(code_retrieval))
+        registry.register(_GET_REFERENCES_SPEC, _get_references_handler(code_retrieval))
+        registry.register(_OUTLINE_SPEC, _outline_handler(code_retrieval))

@@ -20,6 +20,9 @@ dependencies = [
     "pydantic>=2.7",
     "redis>=7.4.0",
     "ruff>=0.15.13",
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-typescript>=0.23",
     "uvicorn[standard]>=0.47.0",
 ]
 
