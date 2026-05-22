@@ -39,6 +39,7 @@ import json
 import os
 import re
 from pathlib import Path
+from string import Template
 
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
@@ -49,8 +50,11 @@ from meta_agent.core.ports.llm import (
     LLMRequest,
     MessageRole,
 )
+from meta_agent.core.ports.prompt_registry import PromptRegistry
 
 BUG_FIX_GRAPH_ID = "builtin.bug_fix"
+BUG_FIX_PLAN_PROMPT_ID = "bug_fix.plan.system"
+BUG_FIX_PATCH_PROMPT_ID = "bug_fix.patch.system"
 
 _MAX_FILES = 3
 _MAX_FILE_BYTES = 10 * 1024
@@ -144,15 +148,11 @@ async def _run_subprocess(
 
 
 def _plan_messages(
+    system: str,
     issue: str,
     files: dict[str, str],
     prior_attempt: dict[str, str] | None = None,
 ) -> tuple[ChatMessage, ...]:
-    system = (
-        "You are a code repair agent. Read the issue and the listed files, "
-        "then write a concise plan (at most 6 lines) describing the minimal "
-        "change required to fix the bug. Do not output code yet; only the plan."
-    )
     parts: list[str] = [f"Issue:\n{issue}", "Current files:"]
     for path, content in files.items():
         parts.append(f"\n--- {path} ---\n{content}")
@@ -194,15 +194,9 @@ def _route_after_verify(state: TaskRunState) -> str:
     return "plan"
 
 
-def _patch_messages(issue: str, plan: str, files: dict[str, str]) -> tuple[ChatMessage, ...]:
-    listing = ", ".join(repr(p) for p in files)
-    system = (
-        "You are a code patcher. Apply the provided plan to fix the issue. "
-        'Return ONLY JSON of the form {"files":[{"path":"<rel>","content":"<full>"}]}. '
-        f"You may only modify files in this allow-list: [{listing}]. "
-        f"At most {_MAX_FILES} files; each file at most {_MAX_FILE_BYTES} bytes. "
-        "Emit the FULL new content of each modified file, not a diff."
-    )
+def _patch_messages(
+    system: str, issue: str, plan: str, files: dict[str, str]
+) -> tuple[ChatMessage, ...]:
     parts: list[str] = [f"Issue:\n{issue}", f"\nPlan:\n{plan}", "\nCurrent files:"]
     for path, content in files.items():
         parts.append(f"\n--- {path} ---\n{content}")
@@ -344,6 +338,18 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
 
     llm: LLMClient = deps.llm
     push_token: str | None = deps.git_push_token
+    # Capture deps.prompt_registry lazily — the registry guard fires at
+    # node execution time, not build time, so legacy bootstraps that
+    # pre-date Phase β+ (no PromptRegistry wired) can still materialise
+    # the registry mapping without exploding.
+
+    def _require_prompt_registry() -> PromptRegistry:
+        if deps.prompt_registry is None:
+            raise GraphError(
+                "bug_fix requires deps.prompt_registry; wire a PromptRegistry "
+                "through GraphDeps at boot"
+            )
+        return deps.prompt_registry
 
     async def plan(state: TaskRunState) -> NodeResult:
         issue = _required_str(state, "issue_description")
@@ -371,8 +377,15 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
                 "verifier_output": str(prior_report.get("output", "")),
             }
             attempts_so_far += 1
+        plan_prompt = await _require_prompt_registry().fetch(
+            BUG_FIX_PLAN_PROMPT_ID, tenant_id=state.tenant_id
+        )
         response = await llm.complete(
-            LLMRequest(messages=_plan_messages(issue, snapshot, prior_attempt))
+            LLMRequest(
+                messages=_plan_messages(plan_prompt.content, issue, snapshot, prior_attempt),
+                prompt_id=plan_prompt.prompt_id,
+                prompt_version=plan_prompt.version,
+            )
         )
         return NodeResult(
             data_update={
@@ -388,8 +401,20 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
         targets = _target_files(state)
         workspace = Path(_required_str(state, "_workspace_path"))
         snapshot = _read_snapshot(workspace, targets)
+        patch_prompt = await _require_prompt_registry().fetch(
+            BUG_FIX_PATCH_PROMPT_ID, tenant_id=state.tenant_id
+        )
+        rendered_system = Template(patch_prompt.content).safe_substitute(
+            allow_list=", ".join(repr(p) for p in snapshot),
+            max_files=_MAX_FILES,
+            max_file_bytes=_MAX_FILE_BYTES,
+        )
         response = await llm.complete(
-            LLMRequest(messages=_patch_messages(issue, plan_text, snapshot))
+            LLMRequest(
+                messages=_patch_messages(rendered_system, issue, plan_text, snapshot),
+                prompt_id=patch_prompt.prompt_id,
+                prompt_version=patch_prompt.version,
+            )
         )
         patches = _parse_patch(response.content, allow_list=set(targets))
         sha, diff_stat, files_changed = await _commit_patch(workspace, patches, issue, branch)

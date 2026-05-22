@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from meta_agent.core.capabilities.executor import ToolExecutor
 from meta_agent.core.capabilities.registry import ToolRegistry
+from meta_agent.core.domain.prompt_asset import PromptAsset
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.ports.llm import (
     FinishReason,
@@ -14,7 +16,10 @@ from meta_agent.core.ports.llm import (
     LLMResponse,
     LLMUsage,
 )
+from meta_agent.core.ports.prompt_registry import PromptRegistry
 from meta_agent.core.ports.tools import ToolCall
+from meta_agent.infra.prompt_registry.in_memory import InMemoryPromptRegistry
+from meta_agent.infra.prompt_registry.seeds import BUILTIN_PROMPT_SEEDS
 
 
 class FakeLLMClient(LLMClient):
@@ -80,12 +85,41 @@ def make_response(
     )
 
 
+_SEED_TIMESTAMP = datetime(2026, 5, 22, tzinfo=UTC)
+
+
+def make_seeded_prompt_registry() -> PromptRegistry:
+    """Return an :class:`InMemoryPromptRegistry` populated with built-in seeds.
+
+    The production ``ensure_seeded`` helper is async; this synchronous
+    variant exists only to keep ``fake_deps()`` callable from sync
+    setup code without dragging an event loop into the construction
+    path. The resulting registry is functionally identical for the
+    purposes of unit tests.
+    """
+
+    registry = InMemoryPromptRegistry()
+    for seed in BUILTIN_PROMPT_SEEDS:
+        registry._rows.append(
+            PromptAsset(
+                prompt_id=seed.prompt_id,
+                version=1,
+                tenant_id=None,
+                content=seed.content,
+                description=seed.description,
+                created_at=_SEED_TIMESTAMP,
+            )
+        )
+    return registry
+
+
 def fake_deps(
     client: LLMClient | None = None,
     *,
     git_push_token: str | None = None,
     tool_registry: ToolRegistry | None = None,
     tool_executor: ToolExecutor | None = None,
+    prompt_registry: PromptRegistry | None = None,
 ) -> GraphDeps:
     """Build a :class:`GraphDeps` with an opinionated :class:`FakeLLMClient`.
 
@@ -93,13 +127,22 @@ def fake_deps(
     a default :class:`ToolExecutor` is materialised against it so
     callers can write ``fake_deps(client, tool_registry=reg)`` without
     constructing the executor by hand.
+
+    ``prompt_registry`` defaults to an :class:`InMemoryPromptRegistry`
+    pre-seeded with every built-in prompt (matching what
+    :func:`meta_agent.worker.bootstrap.build_registry` does at boot).
+    Tests that want to exercise the "missing registry" path can pass
+    a sentinel via :class:`dataclasses.replace` after construction.
     """
 
     if tool_registry is not None and tool_executor is None:
         tool_executor = ToolExecutor(tool_registry)
+    if prompt_registry is None:
+        prompt_registry = make_seeded_prompt_registry()
     return GraphDeps(
         llm=client if client is not None else FakeLLMClient(),
         git_push_token=git_push_token,
         tool_registry=tool_registry,
         tool_executor=tool_executor,
+        prompt_registry=prompt_registry,
     )

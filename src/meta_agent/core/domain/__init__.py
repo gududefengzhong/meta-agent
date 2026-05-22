@@ -10,6 +10,7 @@ from meta_agent.core.domain.checkpoint import TaskCheckpoint
 from meta_agent.core.domain.errors import AgentError, ErrorCategory
 from meta_agent.core.domain.llm_usage import LLMUsageRecord, LLMUsageStatus
 from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
+from meta_agent.core.domain.prompt_asset import PromptAsset, compute_content_hash
 from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import Task, TaskState, TaskType
 from meta_agent.core.domain.tenant import Tenant
@@ -24,6 +25,7 @@ __all__ = [
     "LLMUsageStatus",
     "OutboxEvent",
     "OutboxStatus",
+    "PromptAsset",
     "Session",
     "Task",
     "TaskCheckpoint",
@@ -31,4 +33,5 @@ __all__ = [
     "TaskType",
     "Tenant",
     "Workspace",
+    "compute_content_hash",
 ]

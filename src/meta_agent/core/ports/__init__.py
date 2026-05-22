@@ -53,6 +53,7 @@ from meta_agent.core.ports.llm_usage import (
     UsageGroupBy,
 )
 from meta_agent.core.ports.message import MessageEnvelope, MessageHandler
+from meta_agent.core.ports.prompt_registry import PromptNotFoundError, PromptRegistry
 from meta_agent.core.ports.queue import (
     MessageConsumer,
     MessagePublisher,
@@ -152,6 +153,8 @@ __all__ = [
     "MessageRole",
     "OutboxRepository",
     "Principal",
+    "PromptNotFoundError",
+    "PromptRegistry",
     "PullRequestAction",
     "PullRequestRef",
     "QueueError",

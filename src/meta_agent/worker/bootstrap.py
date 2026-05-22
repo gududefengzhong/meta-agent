@@ -102,6 +102,11 @@ from meta_agent.infra.persistence import (
     build_pool,
 )
 from meta_agent.infra.persistence.pool import PoolConfig
+from meta_agent.infra.prompt_registry import (
+    CachingPromptRegistry,
+    PgPromptRegistry,
+    ensure_seeded,
+)
 from meta_agent.infra.queue import RedisStreamConsumer
 from meta_agent.infra.ratelimit import (
     NoopRateLimiter,
@@ -739,6 +744,13 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         shell=build_shell_tool(settings),
         test=build_test_tool(settings),
     )
+    # Prompt registry: Postgres-backed source of truth (shared across
+    # workers) wrapped in a TTL cache so per-request fetches do not
+    # round-trip the DB. Seed reconciliation runs on every boot — it is
+    # idempotent and inserts ``version=N+1`` whenever a seed's content
+    # hash drifts from the latest registered version.
+    prompt_registry = CachingPromptRegistry(PgPromptRegistry(pool))
+    await ensure_seeded(prompt_registry)
     registry = build_registry(
         GraphDeps(
             llm=budget_enforcing_llm,
@@ -746,6 +758,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
             git_push_token=push_token,
             tool_registry=tool_registry,
             tool_executor=tool_executor,
+            prompt_registry=prompt_registry,
         )
     )
     workspaces = build_workspace_manager(settings)
