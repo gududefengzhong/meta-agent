@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+from string import Template
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -43,8 +44,10 @@ from meta_agent.core.ports.llm import (
     LLMResponse,
     MessageRole,
 )
+from meta_agent.core.ports.prompt_registry import PromptRegistry
 
 CODE_REVIEW_GRAPH_ID = "builtin.code_review"
+CODE_REVIEW_SYSTEM_PROMPT_ID = "code_review.system"
 
 _MAX_DIFF_BYTES = 64 * 1024
 _MAX_FINDINGS = 50
@@ -119,41 +122,9 @@ def _strip_fence(text: str) -> str:
     return match.group(1) if match else text
 
 
-def _build_request(state: TaskRunState) -> LLMRequest:
-    diff_text = _required_str(state, "diff_text")
-    if len(diff_text.encode("utf-8")) > _MAX_DIFF_BYTES:
-        raise GraphError(f"code_review: diff_text exceeds max_diff_bytes={_MAX_DIFF_BYTES}")
-    context = _optional_str(state, "context")
-    pr_title = _optional_str(state, "pr_title")
-    messages = _review_messages(diff_text=diff_text, context=context, pr_title=pr_title)
-    return LLMRequest(
-        messages=messages,
-        model=_optional_str(state, "model"),
-        temperature=_optional_float(state, "temperature"),
-        max_tokens=_optional_int(state, "max_tokens"),
-    )
-
-
 def _review_messages(
-    *, diff_text: str, context: str | None, pr_title: str | None
+    *, system: str, diff_text: str, context: str | None, pr_title: str | None
 ) -> tuple[ChatMessage, ...]:
-    system = (
-        "You are a senior code reviewer. Read the unified diff and any "
-        "supplied context, then return ONLY a single JSON object matching "
-        "this schema (no prose, no fences):\n"
-        '{"verdict":"approve"|"request_changes"|"comment",'
-        '"summary":"<one-paragraph reviewer summary>",'
-        '"findings":[{"category":"bug"|"regression"|"security"|"test_gap"|"style"|"other",'
-        '"severity":"blocker"|"major"|"minor"|"info",'
-        '"file":"<repo-relative path or null>",'
-        '"line_range":"<e.g. 12-18 or null>",'
-        '"message":"<what is wrong and why>",'
-        '"suggested_action":"<what to change or null>"}],'
-        '"confidence":<float 0.0-1.0>}\n'
-        f"Emit at most {_MAX_FINDINGS} findings. Prefer fewer, higher-signal "
-        "findings over volume. Focus on behavior regressions, missing "
-        "tests, security risks and obvious bugs."
-    )
     user_parts: list[str] = []
     if pr_title:
         user_parts.append(f"PR title:\n{pr_title}")
@@ -205,8 +176,42 @@ def build_code_review_graph(deps: GraphDeps) -> Graph:
 
     llm: LLMClient = deps.llm
 
+    def _require_prompt_registry() -> PromptRegistry:
+        if deps.prompt_registry is None:
+            raise GraphError(
+                "code_review requires deps.prompt_registry; wire a PromptRegistry "
+                "through GraphDeps at boot"
+            )
+        return deps.prompt_registry
+
     async def prepare(state: TaskRunState) -> NodeResult:
-        request = _build_request(state)
+        diff_text = _required_str(state, "diff_text")
+        if len(diff_text.encode("utf-8")) > _MAX_DIFF_BYTES:
+            raise GraphError(
+                f"code_review: diff_text exceeds max_diff_bytes={_MAX_DIFF_BYTES}"
+            )
+        context = _optional_str(state, "context")
+        pr_title = _optional_str(state, "pr_title")
+        prompt_asset = await _require_prompt_registry().fetch(
+            CODE_REVIEW_SYSTEM_PROMPT_ID, tenant_id=state.tenant_id
+        )
+        rendered_system = Template(prompt_asset.content).safe_substitute(
+            max_findings=_MAX_FINDINGS
+        )
+        messages = _review_messages(
+            system=rendered_system,
+            diff_text=diff_text,
+            context=context,
+            pr_title=pr_title,
+        )
+        request = LLMRequest(
+            messages=messages,
+            model=_optional_str(state, "model"),
+            temperature=_optional_float(state, "temperature"),
+            max_tokens=_optional_int(state, "max_tokens"),
+            prompt_id=prompt_asset.prompt_id,
+            prompt_version=prompt_asset.version,
+        )
         return NodeResult(data_update={"_llm_request": request.model_dump(mode="json")})
 
     async def review(state: TaskRunState) -> NodeResult:

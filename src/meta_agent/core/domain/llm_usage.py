@@ -71,6 +71,12 @@ class LLMUsageRecord(BaseModel):
     finish_reason: str | None = None
     provider_response_id: str | None = None
 
+    # Phase β+ prompt provenance. Nullable because not every call
+    # originates from a registered prompt (smoke harnesses, ad-hoc
+    # one-off calls) — null means "no registered prompt drove this".
+    prompt_id: str | None = Field(default=None, min_length=1, max_length=128)
+    prompt_version: int | None = Field(default=None, ge=1)
+
     cost_usd_micros: int | None = Field(default=None, ge=0)
     latency_ms: int = Field(..., ge=0)
 

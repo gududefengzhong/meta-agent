@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from meta_agent.core.orchestration.graph import Graph
 from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
+from meta_agent.core.ports.prompt_registry import PromptRegistry
 
 if TYPE_CHECKING:
     from meta_agent.core.capabilities.executor import ToolExecutor
@@ -64,6 +65,16 @@ class GraphDeps:
     Always paired with :attr:`tool_registry`; the executor binds the
     same registry instance so that registry mutation after boot is the
     only failure mode worth defending against.
+    """
+    prompt_registry: PromptRegistry | None = None
+    """Versioned source of system / user prompts (Phase β+).
+
+    Graphs that resolve their prompts through this registry attach the
+    resulting ``(prompt_id, version)`` pair to every outgoing
+    :class:`LLMRequest`, which is what later phases (multi-model A/B,
+    SWE-bench regression) need to make sense of cost / quality deltas.
+    ``None`` means "no registry available" — graphs that require one
+    must guard explicitly and raise :class:`GraphError`.
     """
 
 

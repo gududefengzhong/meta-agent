@@ -99,6 +99,18 @@ class LLMRequest(BaseModel):
     for secrets — adapters must refuse to forward any key matching
     ``*_token`` / ``*_key`` patterns to avoid accidental leakage.
     """
+    prompt_id: str | None = Field(default=None, min_length=1, max_length=128)
+    """Identifier of the prompt asset that produced ``messages[0..]``.
+
+    Phase β+ provenance: when a graph resolves its system / user prompts
+    through :class:`PromptRegistry`, it MUST set ``prompt_id`` (and
+    ``prompt_version`` below) on the outgoing request so
+    ``llm_usage_logs`` can join each call back to the exact registered
+    template that drove it. Ad-hoc callers that compose messages by
+    hand leave both fields ``None``.
+    """
+    prompt_version: int | None = Field(default=None, ge=1)
+    """Version of the prompt asset referenced by ``prompt_id``."""
 
 
 FinishReason = Literal["stop", "length", "content_filter", "tool_call", "other"]

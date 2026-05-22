@@ -7,11 +7,21 @@ records, and so that the task family carries a default system prompt
 tuned for natural-language feature requirements rather than the bare
 loop framing.
 
+Phase β+ PR 2 update: the default system prompt now lives in the
+versioned :class:`PromptRegistry` under
+:data:`FEATURE_IMPL_SYSTEM_PROMPT_ID`, not as a Python string literal
+in this module. The graph still injects it whenever
+``state.data['system_prompt']`` is empty — the resolution happens at
+plan time via ``deps.prompt_registry`` and the resulting
+``(prompt_id, version)`` is attached to every outgoing
+:class:`LLMRequest`.
+
 State contract (``state.data``):
 
 * ``user_prompt`` (required): natural-language feature request.
-* ``system_prompt`` (optional): caller-supplied framing. When absent
-  or empty, :data:`DEFAULT_FEATURE_IMPL_SYSTEM_PROMPT` is injected.
+* ``system_prompt`` (optional): caller-supplied raw framing. When
+  present this wins over the registry; the LLM call records no
+  ``prompt_id`` because provenance belongs to the caller.
 * All other shell_agent state keys (``model``, ``max_steps``,
   ``max_total_tokens``, ``tool_names``, ``target_files`` hint,
   ``verify_suites`` hint) flow through unchanged.
@@ -30,46 +40,21 @@ from meta_agent.core.orchestration.graph import Graph
 from meta_agent.core.orchestration.graphs.shell_agent import build_shell_agent_graph
 
 FEATURE_IMPL_GRAPH_ID = "builtin.feature_impl"
-
-DEFAULT_FEATURE_IMPL_SYSTEM_PROMPT = """\
-You are an autonomous feature-implementation agent operating inside a
-per-task git worktree. You receive a natural-language feature request
-and must drive it to completion using the provided tools.
-
-Operating loop:
-1. Read the relevant code. Use fs_list_dir / fs_read / fs_grep before
-   proposing edits; do not invent file paths or APIs.
-2. Plan a minimal change. Prefer the smallest set of files that
-   satisfies the request; do not refactor unrelated code.
-3. Apply edits with edit_write or edit_patch_apply. Each edit must
-   keep the codebase in a runnable state.
-4. Run the appropriate verifier suite via test_run (lint, type-check,
-   tests). Treat verifier failures as feedback: read the output,
-   adjust, and re-run.
-5. Stop when the verifier passes and the request is satisfied. Reply
-   with a short summary of what you changed and why.
-
-Constraints:
-- Do not call git, network, or shell commands beyond the provided
-  tools. The shell_run tool's allow-list is intentionally narrow.
-- Do not fabricate test results. Only claim a suite passed after you
-  saw test_run return is_error=False for it.
-- If the request is ambiguous or the codebase blocks implementation,
-  stop and explain rather than guessing.\
-"""
+FEATURE_IMPL_SYSTEM_PROMPT_ID = "feature_impl.system"
 
 
 def build_feature_impl_graph(deps: GraphDeps) -> Graph:
     """Return a fresh, compiled feature_impl graph bound to ``deps``.
 
     Delegates to :func:`build_shell_agent_graph` with a feature-impl
-    graph id and the default framing prompt. ``deps.tool_registry`` and
-    ``deps.tool_executor`` are mandatory; absence raises
+    graph id and a registry-backed default system prompt id.
+    ``deps.tool_registry``, ``deps.tool_executor`` and
+    ``deps.prompt_registry`` are all mandatory; absence raises
     :class:`GraphError` from the underlying builder.
     """
 
     return build_shell_agent_graph(
         deps,
         graph_id=FEATURE_IMPL_GRAPH_ID,
-        default_system_prompt=DEFAULT_FEATURE_IMPL_SYSTEM_PROMPT,
+        default_system_prompt_id=FEATURE_IMPL_SYSTEM_PROMPT_ID,
     )

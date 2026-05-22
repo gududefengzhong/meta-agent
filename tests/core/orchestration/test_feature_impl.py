@@ -4,9 +4,11 @@ feature_impl shares all node logic with ``builtin.shell_agent``; these
 tests cover only the deltas:
 
 * The graph identity propagates to ``Graph.graph_id``.
-* When ``state.data['system_prompt']`` is missing, the module-level
-  default prompt is injected into the first plan call.
-* A caller-supplied ``system_prompt`` still wins.
+* When ``state.data['system_prompt']`` is missing, the registered
+  ``feature_impl.system`` prompt is fetched and injected.
+* A caller-supplied ``system_prompt`` still wins (no registry lookup).
+* The outgoing :class:`LLMRequest` carries the resolved
+  ``prompt_id`` + ``prompt_version`` for provenance.
 * The worker bootstrap registers the graph as the default handler for
   ``TaskType.FEATURE_IMPL`` whenever tool capabilities are present.
 """
@@ -20,8 +22,8 @@ from meta_agent.core.domain.task import TaskType
 from meta_agent.core.orchestration import TaskRunState
 from meta_agent.core.orchestration.graph import GraphError
 from meta_agent.core.orchestration.graphs.feature_impl import (
-    DEFAULT_FEATURE_IMPL_SYSTEM_PROMPT,
     FEATURE_IMPL_GRAPH_ID,
+    FEATURE_IMPL_SYSTEM_PROMPT_ID,
     build_feature_impl_graph,
 )
 from meta_agent.core.ports.llm import MessageRole
@@ -75,9 +77,10 @@ async def test_graph_id_propagates_through_builder() -> None:
     assert graph.graph_id != "builtin.shell_agent"
 
 
-async def test_default_system_prompt_injected_when_state_omits_one() -> None:
+async def test_default_system_prompt_resolved_from_registry() -> None:
     client = FakeLLMClient(response=make_response(content="final"))
-    graph = build_feature_impl_graph(fake_deps(client, tool_registry=_empty_registry()))
+    deps = fake_deps(client, tool_registry=_empty_registry())
+    graph = build_feature_impl_graph(deps)
 
     await graph.run(_state(user_prompt="add a function"))
 
@@ -85,10 +88,16 @@ async def test_default_system_prompt_injected_when_state_omits_one() -> None:
     request = client.calls[0]
     system_messages = [m for m in request.messages if m.role == MessageRole.SYSTEM]
     assert len(system_messages) == 1
-    assert system_messages[0].content == DEFAULT_FEATURE_IMPL_SYSTEM_PROMPT
+    # The injected system message matches the registered seed verbatim.
+    assert deps.prompt_registry is not None
+    seed = await deps.prompt_registry.fetch(FEATURE_IMPL_SYSTEM_PROMPT_ID)
+    assert system_messages[0].content == seed.content
+    # Provenance flows to the LLMRequest.
+    assert request.prompt_id == FEATURE_IMPL_SYSTEM_PROMPT_ID
+    assert request.prompt_version == seed.version
 
 
-async def test_caller_system_prompt_overrides_default() -> None:
+async def test_caller_system_prompt_overrides_registry_and_drops_provenance() -> None:
     client = FakeLLMClient(response=make_response(content="final"))
     graph = build_feature_impl_graph(fake_deps(client, tool_registry=_empty_registry()))
 
@@ -98,6 +107,9 @@ async def test_caller_system_prompt_overrides_default() -> None:
     system_messages = [m for m in request.messages if m.role == MessageRole.SYSTEM]
     assert len(system_messages) == 1
     assert system_messages[0].content == "custom framing"
+    # Caller-owned text means no registered prompt drove the call.
+    assert request.prompt_id is None
+    assert request.prompt_version is None
 
 
 async def test_user_prompt_still_required() -> None:

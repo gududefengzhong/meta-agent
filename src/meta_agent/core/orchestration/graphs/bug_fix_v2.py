@@ -29,6 +29,7 @@ import asyncio
 import os
 import re
 from pathlib import Path
+from string import Template
 
 from meta_agent.core.capabilities.executor import ToolExecutor
 from meta_agent.core.orchestration.deps import GraphDeps
@@ -38,9 +39,11 @@ from meta_agent.core.orchestration.graphs.shell_agent import (
     build_shell_agent_graph,
 )
 from meta_agent.core.orchestration.state import END, TaskRunState
+from meta_agent.core.ports.prompt_registry import PromptRegistry
 from meta_agent.core.ports.tools import ToolCall, ToolContext
 
 BUG_FIX_V2_GRAPH_ID = "builtin.bug_fix_v2"
+BUG_FIX_V2_SYSTEM_PROMPT_ID = "bug_fix_v2.system"
 
 _MAX_REPLAN_ATTEMPTS = 1
 _DEFAULT_MAX_STEPS = 8
@@ -125,15 +128,16 @@ def _route_after_verify(state: TaskRunState) -> str:
     return "prepare"
 
 
-def _system_prompt(targets: list[str]) -> str:
+def _render_system_prompt(template: str, targets: list[str]) -> str:
+    """Apply the ``$allow_list`` placeholder of the seed template.
+
+    Uses :class:`string.Template` rather than ``str.format`` so seed
+    text containing literal ``{`` / ``}`` (JSON schema snippets,
+    f-string-looking braces) does not need escaping in the registry.
+    """
+
     listing = ", ".join(repr(path) for path in targets)
-    return (
-        "You are a code repair agent working inside a dedicated task workspace. "
-        "Use the available tools to inspect files, modify code, and optionally run "
-        "safe verification commands. Only edit files in this allow-list: "
-        f"[{listing}]. Prefer the smallest viable fix. When the change is ready, "
-        "stop calling tools and reply with a one-line summary of what you changed."
-    )
+    return Template(template).safe_substitute(allow_list=listing)
 
 
 def _user_prompt(
@@ -340,6 +344,14 @@ def build_bug_fix_v2_graph(deps: GraphDeps) -> Graph:
         raise GraphError("bug_fix_v2 requires deps.tool_executor")
     tool_executor = deps.tool_executor
 
+    def _require_prompt_registry() -> PromptRegistry:
+        if deps.prompt_registry is None:
+            raise GraphError(
+                "bug_fix_v2 requires deps.prompt_registry; wire a PromptRegistry "
+                "through GraphDeps at boot"
+            )
+        return deps.prompt_registry
+
     async def prepare(state: TaskRunState) -> NodeResult:
         issue = _required_str(state, "issue_description")
         workspace = Path(_required_str(state, "_workspace_path"))
@@ -366,13 +378,18 @@ def build_bug_fix_v2_graph(deps: GraphDeps) -> Graph:
             and all(isinstance(name, str) for name in tool_names_raw)
             else _DEFAULT_TOOL_NAMES
         )
+        prompt_asset = await _require_prompt_registry().fetch(
+            BUG_FIX_V2_SYSTEM_PROMPT_ID, tenant_id=state.tenant_id
+        )
         inner_state = TaskRunState(
             task_id=state.task_id,
             tenant_id=state.tenant_id,
             trace_id=state.trace_id,
             graph_id=SHELL_AGENT_GRAPH_ID,
             data={
-                "system_prompt": _system_prompt(targets),
+                "system_prompt": _render_system_prompt(prompt_asset.content, targets),
+                "system_prompt_id": prompt_asset.prompt_id,
+                "system_prompt_version": prompt_asset.version,
                 "user_prompt": _user_prompt(
                     issue=issue,
                     targets=targets,

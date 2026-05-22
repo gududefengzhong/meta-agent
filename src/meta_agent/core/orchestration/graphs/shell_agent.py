@@ -219,6 +219,7 @@ def build_shell_agent_graph(
     *,
     graph_id: str = SHELL_AGENT_GRAPH_ID,
     default_system_prompt: str | None = None,
+    default_system_prompt_id: str | None = None,
 ) -> Graph:
     """Return a fresh, compiled shell_agent graph bound to ``deps``.
 
@@ -227,21 +228,81 @@ def build_shell_agent_graph(
     audit / registry identity (e.g. ``builtin.feature_impl``) pass their
     own id; the graph topology and node behavior are identical.
 
-    ``default_system_prompt`` is consulted only when
-    ``state.data['system_prompt']`` is missing / empty. It lets a
-    derived graph (e.g. feature_impl) carry a task-family-specific
-    framing without forcing every caller to pass one explicitly.
+    System-prompt resolution at plan time (first matching rule wins):
+
+    1. ``state.data['system_prompt']`` (caller-supplied raw text). No
+       ``prompt_id`` is attached to the outgoing LLMRequest in this
+       case — the caller owns provenance.
+    2. ``default_system_prompt_id`` resolved through
+       ``deps.prompt_registry``. The resulting ``prompt_id`` +
+       ``version`` are attached to every LLMRequest the graph makes,
+       so ``llm_usage_logs`` can join back to the exact registered
+       template.
+    3. ``default_system_prompt`` (legacy raw text). No ``prompt_id``
+       attribution.
+    4. No system message.
 
     Raises :class:`GraphError` if ``deps.tool_registry`` /
     ``deps.tool_executor`` are missing; both are mandatory because this
-    graph's whole purpose is the tool-use loop.
+    graph's whole purpose is the tool-use loop. Also raises if
+    ``default_system_prompt_id`` is set but ``deps.prompt_registry`` is
+    not.
     """
 
     llm: LLMClient = deps.llm
     registry, executor = _require_tool_caps(deps)
+    # The prompt-registry guard fires at plan-time, not build-time, so
+    # bootstraps that pre-register graphs without a wired registry can
+    # still materialise the registry mapping. The first plan call that
+    # actually needs the registry raises if it is still missing.
+
+    async def _resolve_default_prompt(
+        state: TaskRunState,
+    ) -> tuple[str | None, str | None, int | None]:
+        """Resolve the default system prompt + its registry identity.
+
+        Returns ``(content, prompt_id, version)``:
+
+        * When ``state.data['system_prompt']`` is set the caller already
+          supplied the rendered text via ``_load_messages``; we return
+          ``content=None`` so ``_load_messages`` keeps using the caller
+          text, and we pass through any caller-supplied
+          ``system_prompt_id`` / ``system_prompt_version`` as
+          provenance. This is the path used by graphs that compose
+          shell_agent (e.g. bug_fix_v2) and render templates themselves.
+        * Otherwise, if the builder was wired with
+          ``default_system_prompt_id``, we fetch from the registry and
+          return the asset's content and full provenance.
+        * Otherwise we fall back to the legacy raw
+          ``default_system_prompt`` with no provenance.
+        """
+
+        if _str_or_none(state, "system_prompt"):
+            sid = _str_or_none(state, "system_prompt_id")
+            sver_raw = state.data.get("system_prompt_version")
+            if sver_raw is not None and (
+                isinstance(sver_raw, bool) or not isinstance(sver_raw, int)
+            ):
+                raise GraphError(
+                    "shell_agent: state.data['system_prompt_version'] must be int"
+                )
+            sver = sver_raw if isinstance(sver_raw, int) else None
+            return None, sid, sver
+        if default_system_prompt_id is None:
+            return default_system_prompt, None, None
+        if deps.prompt_registry is None:
+            raise GraphError(
+                "shell_agent: default_system_prompt_id requires deps.prompt_registry; "
+                "wire a PromptRegistry through GraphDeps at boot"
+            )
+        asset = await deps.prompt_registry.fetch(
+            default_system_prompt_id, tenant_id=state.tenant_id
+        )
+        return asset.content, asset.prompt_id, asset.version
 
     async def plan(state: TaskRunState) -> NodeResult:
-        messages = _load_messages(state, default_system_prompt)
+        default_sp, default_sp_id, default_sp_ver = await _resolve_default_prompt(state)
+        messages = _load_messages(state, default_sp)
         max_steps = _int_or_default(state, "max_steps", _DEFAULT_MAX_STEPS)
         if max_steps <= 0:
             raise GraphError("shell_agent: max_steps must be positive")
@@ -267,6 +328,8 @@ def build_shell_agent_graph(
             temperature=_float_or_none(state, "temperature"),
             max_tokens=_int_or_default(state, "max_tokens", 0) or None,
             tools=specs,
+            prompt_id=default_sp_id,
+            prompt_version=default_sp_ver,
         )
         response = await llm.complete(request)
         messages.append(
