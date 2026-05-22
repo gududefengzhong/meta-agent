@@ -95,9 +95,9 @@ async def test_tenant_version_pin_does_not_fall_back_silently_to_other_scope() -
     registry = InMemoryPromptRegistry()
     await registry.register(_asset(version=1, content="global"))
     await registry.register(_asset(version=3, tenant_id="t-1", content="tenant"))
-    assert (
-        await registry.fetch_or_none("test.system", version=3, tenant_id="t-1")
-    ).content == "tenant"
+    tenant_hit = await registry.fetch_or_none("test.system", version=3, tenant_id="t-1")
+    assert tenant_hit is not None
+    assert tenant_hit.content == "tenant"
     assert await registry.fetch_or_none("test.system", version=3, tenant_id="t-2") is None
 
 

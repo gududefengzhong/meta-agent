@@ -100,7 +100,7 @@ def make_seeded_prompt_registry() -> PromptRegistry:
 
     registry = InMemoryPromptRegistry()
     for seed in BUILTIN_PROMPT_SEEDS:
-        registry._rows.append(  # type: ignore[attr-defined]
+        registry._rows.append(
             PromptAsset(
                 prompt_id=seed.prompt_id,
                 version=1,
