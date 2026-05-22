@@ -50,6 +50,15 @@ class ToolCategory(StrEnum):
     SHELL = "shell"
     TEST = "test"
     WEB = "web"
+    CODE_INDEX = "code_index"
+    """Symbolic code search + outline / definition / references.
+
+    Phase β+ PR 5 adds an on-demand retrieval surface (tree-sitter +
+    grep) keyed to the per-task worktree. No persistent index; every
+    call reads the live workspace, so the results always reflect the
+    current state (and refactor-heavy iterations stay correct without
+    re-indexing).
+    """
     """Outbound HTTP fetch + searchable doc / knowledge-base access.
 
     Phase β+ adds two ``WEB`` tools: ``web_fetch`` (single URL → text)
@@ -401,3 +410,122 @@ class DocSearchTool(ABC):
         limit: int = 5,
     ) -> tuple[DocHit, ...]:
         """Rank documents against ``query`` and return up to ``limit`` hits."""
+
+
+class SymbolKind(StrEnum):
+    """Coarse classification of a code-symbol definition.
+
+    Adapters MUST pick the closest enum value; languages that surface
+    finer distinctions (TypeScript ``interface`` vs ``class``,
+    Python ``classmethod`` vs ``staticmethod``) flatten to the nearest
+    common bucket. Callers branch on ``OTHER`` for unknown kinds.
+    """
+
+    FUNCTION = "function"
+    METHOD = "method"
+    CLASS = "class"
+    INTERFACE = "interface"
+    VARIABLE = "variable"
+    CONSTANT = "constant"
+    OTHER = "other"
+
+
+class CodeHit(BaseModel):
+    """One ranked hit returned by :meth:`CodeRetrievalTool.search`.
+
+    ``score`` is adapter-internal (keyword match count, fuzz distance,
+    …). It only orders hits within a single response — comparing
+    across responses or adapters is not meaningful.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str = Field(..., min_length=1)
+    line_no: int = Field(..., ge=1)
+    symbol: str | None = None
+    symbol_kind: SymbolKind | None = None
+    snippet: str
+    score: float = Field(..., ge=0.0)
+
+
+class CodeLocation(BaseModel):
+    """A single file location returned by definition / reference lookups."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str = Field(..., min_length=1)
+    line_no: int = Field(..., ge=1)
+    end_line_no: int | None = Field(default=None, ge=1)
+    symbol: str = Field(..., min_length=1)
+    symbol_kind: SymbolKind = SymbolKind.OTHER
+    snippet: str
+
+
+class OutlineEntry(BaseModel):
+    """A single top-level / nested symbol in a file outline."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    line_no: int = Field(..., ge=1)
+    end_line_no: int | None = Field(default=None, ge=1)
+    symbol: str = Field(..., min_length=1)
+    symbol_kind: SymbolKind = SymbolKind.OTHER
+    depth: int = Field(default=0, ge=0)
+    """Nesting depth: ``0`` for top-level, ``1`` for direct children, …"""
+
+
+class CodeRetrievalTool(ABC):
+    """Symbol-aware code search bound to ``ctx.workspace_path``.
+
+    Phase β+ PR 5 surface. The implementation is intentionally
+    stateless: every call walks the live workspace, parses on demand,
+    and returns. There is no persistent index, no version table, and
+    no refresh signalling — refactor-heavy iterations stay correct by
+    construction. Implementations MUST refuse paths outside
+    ``ctx.workspace_path`` (or raise :class:`ToolValidationError` when
+    one is not set).
+    """
+
+    @abstractmethod
+    async def search(
+        self,
+        ctx: ToolContext,
+        *,
+        query: str,
+        path_globs: tuple[str, ...] = ("**/*",),
+        language: str | None = None,
+        limit: int = 20,
+    ) -> tuple[CodeHit, ...]:
+        """Ranked hits combining keyword match + symbol-aware enrichment."""
+
+    @abstractmethod
+    async def get_definition(
+        self,
+        ctx: ToolContext,
+        *,
+        symbol: str,
+        language: str | None = None,
+        path_globs: tuple[str, ...] = ("**/*",),
+    ) -> tuple[CodeLocation, ...]:
+        """Locate every definition of ``symbol`` within the workspace."""
+
+    @abstractmethod
+    async def get_references(
+        self,
+        ctx: ToolContext,
+        *,
+        symbol: str,
+        language: str | None = None,
+        path_globs: tuple[str, ...] = ("**/*",),
+        limit: int = 200,
+    ) -> tuple[CodeLocation, ...]:
+        """Return file:line entries where ``symbol`` is referenced."""
+
+    @abstractmethod
+    async def outline(
+        self,
+        ctx: ToolContext,
+        *,
+        path: str,
+    ) -> tuple[OutlineEntry, ...]:
+        """Return the top-level / nested symbol outline of ``path``."""
