@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from meta_agent.core.domain.errors import ErrorCategory
 from meta_agent.core.domain.llm_usage import LLMUsageStatus
-from meta_agent.core.domain.task import TaskState, TaskType
+from meta_agent.core.domain.task import BudgetPolicy, PermissionMode, TaskState, TaskType
 from meta_agent.core.orchestration.result import TaskError, TaskResultStatus
 from meta_agent.core.ports.llm_usage import UsageGroupBy
 
@@ -33,6 +33,11 @@ class SubmitTaskRequest(BaseModel):
     # (tenant_id, idempotency_key) ensures exactly-once submission.
     idempotency_key: str | None = Field(default=None, min_length=1)
     session_id: str | None = Field(default=None, min_length=1)
+    # Phase γ-A trust-surface configuration. Defaults preserve the
+    # legacy zero-friction behaviour; callers opt into human-in-the-loop
+    # gates by setting ``permission_mode``.
+    permission_mode: PermissionMode = PermissionMode.AUTO
+    budget_policy: BudgetPolicy = BudgetPolicy.NONE
 
 
 class TaskResponse(BaseModel):
@@ -46,8 +51,34 @@ class TaskResponse(BaseModel):
     task_type: TaskType
     trace_id: str
     session_id: str | None
+    permission_mode: PermissionMode
+    budget_policy: BudgetPolicy
     created_at: datetime
     updated_at: datetime
+
+
+class ApprovalRequest(BaseModel):
+    """Body of ``POST /v1/tasks/{task_id}/approve`` and ``/reject``.
+
+    ``feedback`` is an optional free-text hint injected into the
+    resumed graph state under ``_human_feedback``; downstream nodes
+    can incorporate it (e.g. as a replan hint).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    feedback: str | None = Field(default=None, max_length=10_000)
+
+
+class AbortRequest(BaseModel):
+    """Body of ``POST /v1/tasks/{task_id}/abort``.
+
+    ``reason`` is reserved for audit emission (γ-B); ignored at γ-A.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=1_000)
 
 
 class TaskResultResponse(BaseModel):

@@ -43,6 +43,7 @@ from string import Template
 
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
+from meta_agent.core.orchestration.human_gate import build_human_gate
 from meta_agent.core.orchestration.state import END, TaskRunState
 from meta_agent.core.orchestration.step_kinds import STEP_EDIT, STEP_PLAN
 from meta_agent.core.ports.llm import (
@@ -178,17 +179,28 @@ def _replan_attempts(state: TaskRunState) -> int:
     return raw if isinstance(raw, int) and raw >= 0 else 0
 
 
+_PRE_PUSH_GATE_ID = "before_push"
+
+
 def _route_after_verify(state: TaskRunState) -> str:
-    """Conditional edge out of ``verify``: pass → push, fail → replan / push.
+    """Conditional edge out of ``verify``: pass → push (or gate), fail → replan / push.
 
     The router is pure: it only reads the verifier report and the
     replan counter. The counter itself is bumped inside ``plan`` on
     entry, so this function is safe to call any number of times.
+
+    When the task's ``_permission_mode`` is ``approve_before_push``
+    *and* the verifier passed, the router redirects to the
+    ``human_gate`` node so the operator approves the push step;
+    other modes go straight to ``push``.
     """
 
     report = state.data.get("_verifier_report")
     passed = isinstance(report, dict) and bool(report.get("passed"))
+    permission_mode = state.data.get("_permission_mode")
     if passed:
+        if permission_mode == "approve_before_push":
+            return "human_gate"
         return "push"
     if _replan_attempts(state) >= _MAX_REPLAN_ATTEMPTS:
         return "push"
@@ -542,14 +554,26 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
     g.add_node("plan", plan)
     g.add_node("patch", patch)
     g.add_node("verify", verify)
+    # Phase γ-A: a single ``human_gate`` between verify and push. The
+    # router only sends the state here when ``permission_mode``
+    # requires it; ``auto`` tasks bypass the gate entirely.
+    g.add_node(
+        "human_gate",
+        build_human_gate(gate_id=_PRE_PUSH_GATE_ID, next_node_when_approved="push"),
+    )
     g.add_node("push", push)
     g.add_node("finalize", finalize)
     g.set_entry("plan")
     g.add_edge("plan", "patch")
     g.add_edge("patch", "verify")
-    # ``verify`` is the only conditional edge: pass → push, fail →
-    # back to plan up to ``_MAX_REPLAN_ATTEMPTS`` times, then push.
+    # ``verify`` is the only conditional edge: pass → push (or gate
+    # if ``permission_mode=approve_before_push``), fail → back to
+    # plan up to ``_MAX_REPLAN_ATTEMPTS`` times, then push.
     g.add_conditional("verify", _route_after_verify)
+    # The gate node always overrides its next_node at runtime (push
+    # on approve, END on reject). The declared edge is the compile-
+    # time fallback, never reached at runtime.
+    g.add_edge("human_gate", "push")
     g.add_edge("push", "finalize")
     g.add_edge("finalize", END)
     g.compile()

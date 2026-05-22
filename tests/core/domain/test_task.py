@@ -65,10 +65,11 @@ def test_task_state_set_contains_expected_members() -> None:
     expected = {
         "pending",
         "running",
-        "awaiting_human",
+        "awaiting_approval",
         "succeeded",
         "failed",
         "cancelled",
+        "expired",
     }
     assert {s.value for s in TaskState} == expected
 

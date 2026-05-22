@@ -27,10 +27,18 @@ class NodeResult:
     ``data_update`` is shallow-merged into the state's ``data``.
     ``next_node`` may pin an explicit destination; when ``None`` the
     graph's registered edge or router for the current node decides.
+
+    ``awaiting_approval=True`` is the Phase γ pause signal: the
+    runtime stops without advancing ``current_node`` and without
+    marking ``finished``, so the worker can transition the task into
+    ``TaskState.AWAITING_APPROVAL`` and ack the message. The same
+    node is re-executed on resume, and is expected to advance once it
+    sees the approval payload merged into ``state.data``.
     """
 
     data_update: dict[str, object] = field(default_factory=dict)
     next_node: str | None = None
+    awaiting_approval: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,12 +126,19 @@ class Graph:
     async def step(self, state: TaskRunState) -> TaskRunState:
         """Execute one node and return the resulting state.
 
-        Calling ``step`` on a finished state is a no-op (returns the
-        same instance). If the state is at :data:`START`, the entry
-        node is executed; otherwise ``state.current_node`` is.
+        Calling ``step`` on a finished or paused state is a no-op
+        (returns the same instance). If the state is at :data:`START`,
+        the entry node is executed; otherwise ``state.current_node``
+        is.
+
+        When the executed node returns ``awaiting_approval=True``, the
+        runtime merges ``data_update`` into the state, marks the state
+        as paused (``awaiting_approval=True``) and keeps
+        ``current_node`` pointing at the gate node so resume can
+        re-execute it.
         """
 
-        if state.finished:
+        if state.finished or state.awaiting_approval:
             return state
         if self._entry is None:
             raise GraphError("graph is not compiled (entry missing)")
@@ -131,6 +146,16 @@ class Graph:
         if current not in self._nodes:
             raise GraphError(f"state points at unknown node {current!r}")
         result = await self._nodes[current](state)
+        if result.awaiting_approval:
+            # Pause: stay at the gate node, do NOT call _resolve_next.
+            # Sequence still advances so the checkpoint repo can
+            # distinguish "before gate fired" from "at gate, awaiting".
+            return state.advance(
+                next_node=current,
+                data_update=result.data_update,
+                finished=False,
+                awaiting_approval=True,
+            )
         advanced = state.advance(next_node=current, data_update=result.data_update)
         next_node = self._resolve_next(current, advanced, result.next_node)
         return advanced.model_copy(
@@ -141,10 +166,10 @@ class Graph:
         )
 
     async def run(self, state: TaskRunState, *, max_steps: int = 1000) -> TaskRunState:
-        """Drive :meth:`step` until the state is finished or the cap is hit."""
+        """Drive :meth:`step` until the state is finished, paused, or capped."""
 
         steps = 0
-        while not state.finished:
+        while not state.finished and not state.awaiting_approval:
             if steps >= max_steps:
                 raise GraphError(f"graph exceeded max_steps={max_steps}")
             state = await self.step(state)

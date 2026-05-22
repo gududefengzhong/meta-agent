@@ -17,16 +17,27 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from meta_agent.api.deps import (
+    get_approval_gateway,
     get_db_pool,
     get_outbox_repo,
     get_request_ctx,
     get_task_repo,
     get_task_topic,
 )
-from meta_agent.api.schemas import SubmitTaskRequest, TaskResponse, TaskResultResponse
+from meta_agent.api.schemas import (
+    AbortRequest,
+    ApprovalRequest,
+    SubmitTaskRequest,
+    TaskResponse,
+    TaskResultResponse,
+)
 from meta_agent.core.domain.outbox import OutboxEvent
 from meta_agent.core.domain.task import Task, TaskState
 from meta_agent.infra.persistence import DatabasePool, PgOutboxRepository, PgTaskRepository
+from meta_agent.infra.persistence.approval_gateway import (
+    TaskApprovalGateway,
+    TaskNotAwaitingApprovalError,
+)
 from meta_agent.infra.security.context import RequestContext, bind_context
 
 router = APIRouter(tags=["tasks"])
@@ -59,6 +70,8 @@ async def submit_task(
         task_type=body.task_type,
         graph_id=body.graph_id,
         state=TaskState.PENDING,
+        permission_mode=body.permission_mode,
+        budget_policy=body.budget_policy,
         input_payload=body.input_payload,
         created_at=now,
         updated_at=now,
@@ -89,6 +102,8 @@ async def submit_task(
         task_type=task.task_type,
         trace_id=task.trace_id,
         session_id=task.session_id,
+        permission_mode=task.permission_mode,
+        budget_policy=task.budget_policy,
         created_at=task.created_at,
         updated_at=task.updated_at,
     )
@@ -118,6 +133,8 @@ async def get_task(
         task_type=task.task_type,
         trace_id=task.trace_id,
         session_id=task.session_id,
+        permission_mode=task.permission_mode,
+        budget_policy=task.budget_policy,
         created_at=task.created_at,
         updated_at=task.updated_at,
     )
@@ -149,4 +166,86 @@ async def get_task_result(
         node_sequence=result.node_sequence,
         started_at=result.started_at,
         finished_at=result.finished_at,
+    )
+
+
+@router.post(
+    "/tasks/{task_id}/approve",
+    response_model=TaskResponse,
+    summary="Approve a task paused at a human_gate",
+)
+async def approve_task(
+    task_id: str,
+    body: ApprovalRequest,
+    ctx: RequestContext = Depends(get_request_ctx),
+    gateway: TaskApprovalGateway = Depends(get_approval_gateway),
+) -> TaskResponse:
+    """Resume a task currently in ``AWAITING_APPROVAL``.
+
+    Atomically writes a new checkpoint that carries the operator's
+    decision (and optional feedback), flips the task row back to
+    ``RUNNING``, and enqueues a fresh outbox event so the next
+    available worker picks the task up and resumes from the gate.
+    """
+
+    with bind_context(ctx):
+        try:
+            task = await gateway.approve(ctx.tenant_id, task_id, feedback=body.feedback)
+        except TaskNotAwaitingApprovalError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+    return TaskResponse(
+        task_id=task.task_id,
+        tenant_id=task.tenant_id,
+        state=task.state,
+        task_type=task.task_type,
+        trace_id=task.trace_id,
+        session_id=task.session_id,
+        permission_mode=task.permission_mode,
+        budget_policy=task.budget_policy,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+    )
+
+
+@router.post(
+    "/tasks/{task_id}/abort",
+    response_model=TaskResponse,
+    summary="Abort a task paused at a human_gate",
+)
+async def abort_task(
+    task_id: str,
+    body: AbortRequest,
+    ctx: RequestContext = Depends(get_request_ctx),
+    gateway: TaskApprovalGateway = Depends(get_approval_gateway),
+) -> TaskResponse:
+    """Terminate a paused task as ``CANCELLED``.
+
+    No checkpoint is appended (the task does not resume) and no
+    :class:`TaskResult` is written — ``cancelled`` lives outside the
+    result contract by design. ``reason`` is reserved for audit
+    emission in γ-B; ignored here.
+    """
+
+    with bind_context(ctx):
+        try:
+            task = await gateway.abort(ctx.tenant_id, task_id, reason=body.reason)
+        except TaskNotAwaitingApprovalError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+    return TaskResponse(
+        task_id=task.task_id,
+        tenant_id=task.tenant_id,
+        state=task.state,
+        task_type=task.task_type,
+        trace_id=task.trace_id,
+        session_id=task.session_id,
+        permission_mode=task.permission_mode,
+        budget_policy=task.budget_policy,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
     )

@@ -8,7 +8,13 @@ from typing import Any
 
 import asyncpg
 
-from meta_agent.core.domain.task import Task, TaskState, TaskType
+from meta_agent.core.domain.task import (
+    BudgetPolicy,
+    PermissionMode,
+    Task,
+    TaskState,
+    TaskType,
+)
 from meta_agent.core.orchestration.result import TaskResult
 from meta_agent.core.ports.repository import (
     TERMINAL_TASK_STATES,
@@ -30,6 +36,8 @@ def _row_to_task(row: dict[str, Any]) -> Task:
         task_type=TaskType(row["task_type"]),
         graph_id=row["graph_id"],
         state=TaskState(row["state"]),
+        permission_mode=PermissionMode(row.get("permission_mode") or "auto"),
+        budget_policy=BudgetPolicy(row.get("budget_policy") or "none"),
         input_payload=row["input_payload"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -42,14 +50,21 @@ class PgTaskRepository(TaskRepository):
     _UPSERT = """
         INSERT INTO tasks (
             task_id, tenant_id, session_id, principal_id, trace_id,
-            idempotency_key, task_type, graph_id, state, input_payload,
-            created_at, updated_at
+            idempotency_key, task_type, graph_id, state,
+            permission_mode, budget_policy,
+            input_payload, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            $10, $11,
+            $12::jsonb, $13, $14
+        )
         ON CONFLICT (task_id) DO UPDATE SET
             session_id = EXCLUDED.session_id,
             graph_id = EXCLUDED.graph_id,
             state = EXCLUDED.state,
+            permission_mode = EXCLUDED.permission_mode,
+            budget_policy = EXCLUDED.budget_policy,
             input_payload = EXCLUDED.input_payload,
             updated_at = EXCLUDED.updated_at
     """
@@ -60,19 +75,45 @@ class PgTaskRepository(TaskRepository):
         "SELECT * FROM tasks WHERE tenant_id = $1 AND state = $2 ORDER BY created_at LIMIT $3"
     )
 
+    # Cross-tenant scan used by worker startup to find tasks that were
+    # mid-run when the worker died. No tenant_id filter on purpose: the
+    # call site is the dispatcher, not a tenant-bound request handler.
+    _LIST_BY_STATE_CROSS_TENANT = (
+        "SELECT * FROM tasks WHERE state = $1 ORDER BY created_at LIMIT $2"
+    )
+
     _UPDATE_STATE = (
         "UPDATE tasks SET state = $3, updated_at = $4 WHERE tenant_id = $1 AND task_id = $2"
     )
 
+    # Phase γ-A pause transition. Atomic guard on ``state = 'running'``
+    # so a redelivered worker cannot pause a task that another worker
+    # has already advanced past the gate or completed.
+    _SET_AWAITING_APPROVAL = (
+        "UPDATE tasks SET state = 'awaiting_approval', updated_at = $3 "
+        "WHERE tenant_id = $1 AND task_id = $2 AND state = 'running'"
+    )
+
+    # Phase γ-A resume transition. Atomic guard on
+    # ``state = 'awaiting_approval'`` so two operators racing through
+    # the approve API cannot both flip the row to RUNNING (the second
+    # write becomes a no-op and we surface it as an illegal
+    # transition).
+    _TRANSITION_FROM_AWAITING = (
+        "UPDATE tasks SET state = $3, updated_at = $4 "
+        "WHERE tenant_id = $1 AND task_id = $2 AND state = 'awaiting_approval'"
+    )
+
     # Atomic terminal write. The guard ``state NOT IN ('succeeded',
-    # 'failed', 'cancelled')`` prevents a redelivered worker from
-    # overwriting a result, and lets us treat ``complete()`` as a true
-    # state-machine transition rather than a blind upsert.
+    # 'failed', 'cancelled', 'expired')`` prevents a redelivered
+    # worker from overwriting a result, and lets us treat
+    # ``complete()`` as a true state-machine transition rather than a
+    # blind upsert.
     _COMPLETE = (
         "UPDATE tasks "
         "SET state = $3, result_json = $4::jsonb, updated_at = $5 "
         "WHERE tenant_id = $1 AND task_id = $2 "
-        "AND state NOT IN ('succeeded', 'failed', 'cancelled')"
+        "AND state NOT IN ('succeeded', 'failed', 'cancelled', 'expired')"
     )
 
     _GET_RESULT = "SELECT result_json FROM tasks WHERE tenant_id = $1 AND task_id = $2"
@@ -108,6 +149,8 @@ class PgTaskRepository(TaskRepository):
             task.task_type.value,
             task.graph_id,
             task.state.value,
+            task.permission_mode.value,
+            task.budget_policy.value,
             task.input_payload,
             task.created_at,
             task.updated_at,
@@ -140,6 +183,90 @@ class PgTaskRepository(TaskRepository):
         check_tenant(tenant_id)
         async with self._pool.acquire() as conn:
             await conn.execute(self._UPDATE_STATE, tenant_id, task_id, new_state.value, updated_at)
+
+    async def list_running_for_resume(self, limit: int = 100) -> list[Task]:
+        """Cross-tenant scan of tasks left in ``RUNNING`` by a crashed worker.
+
+        Used at worker startup before any tenant context is bound, so
+        the call deliberately skips :func:`check_tenant`. Callers must
+        bind a per-task context before doing anything with each row.
+        """
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                self._LIST_BY_STATE_CROSS_TENANT,
+                TaskState.RUNNING.value,
+                limit,
+            )
+        return [_row_to_task(dict(r)) for r in rows]
+
+    async def set_awaiting_approval(
+        self,
+        tenant_id: str,
+        task_id: str,
+        updated_at: datetime,
+    ) -> None:
+        """Atomically transition ``RUNNING`` → ``AWAITING_APPROVAL``.
+
+        Raises :class:`IllegalTaskTransitionError` when the WHERE guard
+        rejects the write (row missing for this tenant, or task is no
+        longer in ``RUNNING`` — e.g. another worker already finished
+        it). The guard makes the pause transition safe under redelivery.
+        """
+
+        check_tenant(tenant_id)
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(self._SET_AWAITING_APPROVAL, tenant_id, task_id, updated_at)
+        if status.endswith(" 0"):
+            raise IllegalTaskTransitionError(
+                f"task {task_id!r} cannot transition to AWAITING_APPROVAL: "
+                "row missing or not in RUNNING"
+            )
+
+    async def transition_from_awaiting_approval(
+        self,
+        tenant_id: str,
+        task_id: str,
+        new_state: TaskState,
+        updated_at: datetime,
+        *,
+        conn: asyncpg.Connection[Any] | None = None,
+    ) -> None:
+        """Atomic transition out of ``AWAITING_APPROVAL``.
+
+        ``new_state`` is whatever the resume path wants the task to
+        become — typically ``RUNNING`` for approve, ``CANCELLED`` for
+        abort, or ``EXPIRED`` for the long-tail sweeper.
+
+        Raises :class:`IllegalTaskTransitionError` when the WHERE guard
+        rejects the write (row not currently in
+        ``AWAITING_APPROVAL`` — e.g. two operators raced approve and
+        the loser sees the second write succeed against ``RUNNING``).
+        """
+
+        check_tenant(tenant_id)
+        if conn is None:
+            async with self._pool.acquire() as inner_conn:
+                status = await inner_conn.execute(
+                    self._TRANSITION_FROM_AWAITING,
+                    tenant_id,
+                    task_id,
+                    new_state.value,
+                    updated_at,
+                )
+        else:
+            status = await conn.execute(
+                self._TRANSITION_FROM_AWAITING,
+                tenant_id,
+                task_id,
+                new_state.value,
+                updated_at,
+            )
+        if status.endswith(" 0"):
+            raise IllegalTaskTransitionError(
+                f"task {task_id!r} cannot transition from AWAITING_APPROVAL to "
+                f"{new_state.value!r}: row missing or in a different state"
+            )
 
     async def complete(
         self,

@@ -18,6 +18,12 @@ from meta_agent.core.orchestration.graph import (
     NodeResult,
     RouterFn,
 )
+from meta_agent.core.orchestration.human_gate import (
+    HUMAN_DECISION_KEY,
+    HUMAN_FEEDBACK_KEY,
+    HUMAN_GATE_AT_KEY,
+    build_human_gate,
+)
 from meta_agent.core.orchestration.registry import GraphRegistry
 from meta_agent.core.orchestration.result import (
     TaskError,
@@ -29,6 +35,9 @@ from meta_agent.core.orchestration.state import END, START, TaskRunState
 
 __all__ = [
     "END",
+    "HUMAN_DECISION_KEY",
+    "HUMAN_FEEDBACK_KEY",
+    "HUMAN_GATE_AT_KEY",
     "START",
     "Graph",
     "GraphDeps",
@@ -46,4 +55,5 @@ __all__ = [
     "TaskResultStatus",
     "TaskRunState",
     "bug_fix_to_auto_pr_policy",
+    "build_human_gate",
 ]
