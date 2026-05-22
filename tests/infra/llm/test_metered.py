@@ -176,6 +176,41 @@ async def test_recorder_failure_does_not_break_call(
     assert any("record_failed" in rec.getMessage() for rec in caplog.records)
 
 
+async def test_ok_path_records_step_kind_from_request() -> None:
+    client, recorder, _ = _make_client()
+    request = LLMRequest(
+        messages=(ChatMessage(role=MessageRole.USER, content="hi"),),
+        model="openai/gpt-4o",
+        step_kind="plan",
+        prompt_id="x.y",
+        prompt_version=1,
+    )
+    with bind_context(_ctx()):
+        await client.complete(request)
+    assert len(recorder.records) == 1
+    r = recorder.records[0]
+    assert r.step_kind == "plan"
+    assert r.prompt_id == "x.y"
+    assert r.prompt_version == 1
+
+
+async def test_error_path_records_step_kind_from_request() -> None:
+    def boom(_req: LLMRequest) -> LLMResponse:
+        raise LLMTransientError("upstream 503")
+
+    inner = FakeLLMClient(handler=boom)
+    client, recorder, _ = _make_client(inner=inner)
+    request = LLMRequest(
+        messages=(ChatMessage(role=MessageRole.USER, content="hi"),),
+        model="openai/gpt-4o",
+        step_kind="edit",
+    )
+    with bind_context(_ctx()), pytest.raises(LLMTransientError):
+        await client.complete(request)
+    assert len(recorder.records) == 1
+    assert recorder.records[0].step_kind == "edit"
+
+
 async def test_close_delegates_to_inner() -> None:
     client, _, inner = _make_client()
     await client.close()

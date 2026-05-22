@@ -101,6 +101,36 @@ def test_settings_from_env_uses_documented_defaults() -> None:
     # do not require a GitHub token to start the worker.
     assert settings.git_provider == "fake"
     assert settings.github is None
+    # The default LLM-router mapping prefers cheap Chinese-tier models
+    # on OpenRouter so unconfigured deployments do not silently bill
+    # against the premium tier. Operators override per-step via env.
+    assert settings.llm_router_mapping == {
+        "plan": "deepseek/deepseek-chat",
+        "edit": "qwen/qwen3-coder",
+        "review": "deepseek/deepseek-chat",
+        "chat": "z-ai/glm-4.5",
+    }
+
+
+def test_settings_llm_router_env_overrides_one_step_kind() -> None:
+    settings = WorkerSettings.from_env(
+        _env(META_AGENT_LLM_ROUTER_EDIT_MODEL="qwen/qwen-2.5-coder-32b-instruct")
+    )
+    assert settings.llm_router_mapping["edit"] == "qwen/qwen-2.5-coder-32b-instruct"
+    # Other defaults stay intact.
+    assert settings.llm_router_mapping["plan"] == "deepseek/deepseek-chat"
+
+
+def test_settings_llm_router_empty_env_drops_default_entry() -> None:
+    # Empty string is the sentinel for "leave request.model untouched".
+    settings = WorkerSettings.from_env(_env(META_AGENT_LLM_ROUTER_CHAT_MODEL=""))
+    assert "chat" not in settings.llm_router_mapping
+    assert settings.llm_router_mapping["plan"] == "deepseek/deepseek-chat"
+
+
+def test_settings_llm_router_adds_observe_when_env_supplies_it() -> None:
+    settings = WorkerSettings.from_env(_env(META_AGENT_LLM_ROUTER_OBSERVE_MODEL="z-ai/glm-4.6"))
+    assert settings.llm_router_mapping["observe"] == "z-ai/glm-4.6"
 
 
 def test_settings_from_env_selects_github_provider() -> None:
