@@ -36,9 +36,7 @@ class InMemoryPromptRegistry(PromptRegistry):
         version: int | None = None,
         tenant_id: str | None = None,
     ) -> PromptAsset:
-        asset = await self.fetch_or_none(
-            prompt_id, version=version, tenant_id=tenant_id
-        )
+        asset = await self.fetch_or_none(prompt_id, version=version, tenant_id=tenant_id)
         if asset is None:
             raise PromptNotFoundError(prompt_id, version)
         return asset
@@ -91,11 +89,7 @@ class InMemoryPromptRegistry(PromptRegistry):
     ) -> PromptAsset | None:
         # Tenant precedence: prefer tenant_id match, fall back to global (None).
         for scope in (tenant_id, None) if tenant_id is not None else (None,):
-            rows = [
-                r
-                for r in self._rows
-                if r.prompt_id == prompt_id and r.tenant_id == scope
-            ]
+            rows = [r for r in self._rows if r.prompt_id == prompt_id and r.tenant_id == scope]
             if not rows:
                 continue
             if version is not None:

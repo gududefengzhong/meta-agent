@@ -73,9 +73,7 @@ class CachingPromptRegistry(PromptRegistry):
         version: int | None = None,
         tenant_id: str | None = None,
     ) -> PromptAsset:
-        asset = await self.fetch_or_none(
-            prompt_id, version=version, tenant_id=tenant_id
-        )
+        asset = await self.fetch_or_none(prompt_id, version=version, tenant_id=tenant_id)
         if asset is None:
             raise PromptNotFoundError(prompt_id, version)
         return asset
@@ -94,9 +92,7 @@ class CachingPromptRegistry(PromptRegistry):
             if entry is not None and entry.expires_at > now:
                 return entry.asset
         # Cache miss / expired — go to inner.
-        asset = await self._inner.fetch_or_none(
-            prompt_id, version=version, tenant_id=tenant_id
-        )
+        asset = await self._inner.fetch_or_none(prompt_id, version=version, tenant_id=tenant_id)
         ttl = self._ttl if asset is not None else self._negative_ttl
         async with self._lock:
             self._cache[key] = _CacheEntry(asset=asset, expires_at=self._monotonic() + ttl)

@@ -283,9 +283,7 @@ def build_shell_agent_graph(
             if sver_raw is not None and (
                 isinstance(sver_raw, bool) or not isinstance(sver_raw, int)
             ):
-                raise GraphError(
-                    "shell_agent: state.data['system_prompt_version'] must be int"
-                )
+                raise GraphError("shell_agent: state.data['system_prompt_version'] must be int")
             sver = sver_raw if isinstance(sver_raw, int) else None
             return None, sid, sver
         if default_system_prompt_id is None:

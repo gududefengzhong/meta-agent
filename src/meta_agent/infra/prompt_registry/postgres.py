@@ -100,9 +100,7 @@ class PgPromptRegistry(PromptRegistry):
         version: int | None = None,
         tenant_id: str | None = None,
     ) -> PromptAsset:
-        asset = await self.fetch_or_none(
-            prompt_id, version=version, tenant_id=tenant_id
-        )
+        asset = await self.fetch_or_none(prompt_id, version=version, tenant_id=tenant_id)
         if asset is None:
             raise PromptNotFoundError(prompt_id, version)
         return asset
@@ -122,9 +120,7 @@ class PgPromptRegistry(PromptRegistry):
                         self._FETCH_SPECIFIC_TENANT, prompt_id, version, tenant_id
                     )
                 else:
-                    row = await conn.fetchrow(
-                        self._FETCH_LATEST_TENANT, prompt_id, tenant_id
-                    )
+                    row = await conn.fetchrow(self._FETCH_LATEST_TENANT, prompt_id, tenant_id)
                 if row is not None:
                     return _row_to_asset(dict(row))
             if version is not None:

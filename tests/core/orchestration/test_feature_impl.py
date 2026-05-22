@@ -113,9 +113,7 @@ async def test_caller_system_prompt_overrides_registry_and_drops_provenance() ->
 
 
 async def test_user_prompt_still_required() -> None:
-    graph = build_feature_impl_graph(
-        fake_deps(FakeLLMClient(), tool_registry=_empty_registry())
-    )
+    graph = build_feature_impl_graph(fake_deps(FakeLLMClient(), tool_registry=_empty_registry()))
 
     with pytest.raises(GraphError, match="user_prompt"):
         await graph.run(_state())

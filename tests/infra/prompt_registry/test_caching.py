@@ -68,9 +68,7 @@ async def test_fetch_after_ttl_expiry_refetches_inner() -> None:
 async def test_negative_result_cached_briefly() -> None:
     clock = _Clock()
     inner = _CountingRegistry()
-    caching = CachingPromptRegistry(
-        inner, ttl_seconds=60, negative_ttl_seconds=5, monotonic=clock
-    )
+    caching = CachingPromptRegistry(inner, ttl_seconds=60, negative_ttl_seconds=5, monotonic=clock)
     assert await caching.fetch_or_none("nope") is None
     assert await caching.fetch_or_none("nope") is None
     assert inner.fetch_calls == 1
@@ -127,6 +125,4 @@ class _CountingRegistry(InMemoryPromptRegistry):
         tenant_id: str | None = None,
     ) -> PromptAsset | None:
         self.fetch_calls += 1
-        return await super().fetch_or_none(
-            prompt_id, version=version, tenant_id=tenant_id
-        )
+        return await super().fetch_or_none(prompt_id, version=version, tenant_id=tenant_id)

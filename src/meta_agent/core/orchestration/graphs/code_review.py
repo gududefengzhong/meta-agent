@@ -187,17 +187,13 @@ def build_code_review_graph(deps: GraphDeps) -> Graph:
     async def prepare(state: TaskRunState) -> NodeResult:
         diff_text = _required_str(state, "diff_text")
         if len(diff_text.encode("utf-8")) > _MAX_DIFF_BYTES:
-            raise GraphError(
-                f"code_review: diff_text exceeds max_diff_bytes={_MAX_DIFF_BYTES}"
-            )
+            raise GraphError(f"code_review: diff_text exceeds max_diff_bytes={_MAX_DIFF_BYTES}")
         context = _optional_str(state, "context")
         pr_title = _optional_str(state, "pr_title")
         prompt_asset = await _require_prompt_registry().fetch(
             CODE_REVIEW_SYSTEM_PROMPT_ID, tenant_id=state.tenant_id
         )
-        rendered_system = Template(prompt_asset.content).safe_substitute(
-            max_findings=_MAX_FINDINGS
-        )
+        rendered_system = Template(prompt_asset.content).safe_substitute(max_findings=_MAX_FINDINGS)
         messages = _review_messages(
             system=rendered_system,
             diff_text=diff_text,

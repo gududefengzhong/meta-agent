@@ -143,8 +143,7 @@ BUILTIN_PROMPT_SEEDS: tuple[PromptSeed, ...] = (
     PromptSeed(
         prompt_id="bug_fix_v2.system",
         description=(
-            "System framing for the bug_fix_v2 graph (tool-use loop). "
-            "Placeholder: $allow_list."
+            "System framing for the bug_fix_v2 graph (tool-use loop). Placeholder: $allow_list."
         ),
         content=_BUG_FIX_V2_SYSTEM,
     ),

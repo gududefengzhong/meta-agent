@@ -71,9 +71,7 @@ async def test_registered_prompt_id_lands_on_llm_usage_logs(db_pool: DatabasePoo
         # share the same indexed path as billing), then drop down to
         # SQL for the column-level prompt_id / prompt_version
         # assertions.
-        aggregate = await usage_repo.aggregate_since(
-            tenant_id, datetime(2020, 1, 1, tzinfo=UTC)
-        )
+        aggregate = await usage_repo.aggregate_since(tenant_id, datetime(2020, 1, 1, tzinfo=UTC))
     assert aggregate.tokens_used >= 1
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
