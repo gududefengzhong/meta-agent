@@ -901,8 +901,14 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         workspaces=workspaces,
         submitter=submitter,
         chain_registry=chain_registry,
+        outbox=outbox_repo,
+        task_topic=settings.task_topic,
         config=WorkerConfig(max_attempts=settings.max_attempts, block_ms=settings.block_ms),
     )
+    # Phase γ-A startup recovery: re-enqueue any task left in RUNNING
+    # by the previous worker generation. Best-effort — errors are
+    # audited per task and do not block worker startup.
+    await worker.recover_in_flight()
 
     async def _aclose() -> None:
         await git_provider.close()

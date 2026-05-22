@@ -21,6 +21,8 @@ from meta_agent.infra.persistence import (
     PgOutboxRepository,
     PgTaskRepository,
 )
+from meta_agent.infra.persistence.approval_gateway import TaskApprovalGateway
+from meta_agent.infra.persistence.checkpoint_repo import PgCheckpointRepository
 from meta_agent.infra.queue import RedisStreamPublisher
 from meta_agent.infra.security.context import RequestContext
 
@@ -70,6 +72,28 @@ def get_audit_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgAuditReposito
 def get_llm_usage_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgLLMUsageRepository:
     """Construct a :class:`PgLLMUsageRepository` from the shared pool."""
     return PgLLMUsageRepository(pool)
+
+
+def get_checkpoint_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgCheckpointRepository:
+    """Construct a :class:`PgCheckpointRepository` from the shared pool."""
+    return PgCheckpointRepository(pool)
+
+
+def get_approval_gateway(
+    pool: DatabasePool = Depends(get_db_pool),
+    task_repo: PgTaskRepository = Depends(get_task_repo),
+    checkpoint_repo: PgCheckpointRepository = Depends(get_checkpoint_repo),
+    outbox_repo: PgOutboxRepository = Depends(get_outbox_repo),
+    topic: str = Depends(get_task_topic),
+) -> TaskApprovalGateway:
+    """Construct the Phase γ-A :class:`TaskApprovalGateway`."""
+    return TaskApprovalGateway(
+        pool=pool,
+        task_repo=task_repo,
+        checkpoint_repo=checkpoint_repo,
+        outbox_repo=outbox_repo,
+        task_topic=topic,
+    )
 
 
 # ── Request context ───────────────────────────────────────────────────────────

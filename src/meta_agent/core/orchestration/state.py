@@ -27,6 +27,13 @@ class TaskRunState(BaseModel):
     lifetime of a run and must never be mutated. ``current_node`` is
     the next node to execute; ``START`` before the first step and
     ``END`` once the graph has completed.
+
+    ``awaiting_approval`` is the Phase γ pause flag: when ``True`` the
+    graph runtime stops without setting ``finished``, the worker
+    transitions the task to ``TaskState.AWAITING_APPROVAL`` and
+    releases its message. On resume the flag is cleared and the
+    runtime re-executes ``current_node`` (which is still the
+    ``human_gate`` node that paused execution).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -39,6 +46,7 @@ class TaskRunState(BaseModel):
     sequence: int = Field(default=0, ge=0)
     data: dict[str, object] = Field(default_factory=dict)
     finished: bool = False
+    awaiting_approval: bool = False
     error: str | None = None
 
     def advance(
@@ -47,6 +55,7 @@ class TaskRunState(BaseModel):
         next_node: str,
         data_update: dict[str, object] | None = None,
         finished: bool | None = None,
+        awaiting_approval: bool | None = None,
         error: str | None = None,
     ) -> Self:
         """Return a new state with the cursor moved and ``data`` merged.
@@ -54,19 +63,23 @@ class TaskRunState(BaseModel):
         ``data_update`` is shallow-merged into ``data``; callers wanting
         to drop a key must pass an explicit sentinel value rather than
         relying on absence. ``finished`` defaults to ``True`` exactly
-        when ``next_node`` equals :data:`END`.
+        when ``next_node`` equals :data:`END`. ``awaiting_approval``
+        defaults to ``False`` and is set explicitly by the runtime
+        when a ``human_gate`` node pauses the run.
         """
 
         merged: dict[str, object] = dict(self.data)
         if data_update:
             merged.update(data_update)
         resolved_finished = finished if finished is not None else next_node == END
+        resolved_awaiting = awaiting_approval if awaiting_approval is not None else False
         return self.model_copy(
             update={
                 "current_node": next_node,
                 "sequence": self.sequence + 1,
                 "data": merged,
                 "finished": resolved_finished,
+                "awaiting_approval": resolved_awaiting,
                 "error": error,
             }
         )

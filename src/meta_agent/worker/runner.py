@@ -13,6 +13,7 @@ from typing import Protocol
 
 from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.domain.checkpoint import TaskCheckpoint
+from meta_agent.core.domain.outbox import OutboxEvent
 from meta_agent.core.domain.task import Task, TaskState
 from meta_agent.core.domain.workspace import Workspace
 from meta_agent.core.orchestration import (
@@ -33,6 +34,7 @@ from meta_agent.core.ports.repository import (
     AuditRepository,
     CheckpointRepository,
     IllegalTaskTransitionError,
+    OutboxRepository,
     TaskRepository,
 )
 from meta_agent.core.ports.task_submitter import TaskSubmitter
@@ -86,6 +88,8 @@ class WorkerLoop:
         workspaces: WorkspaceManager | None = None,
         submitter: TaskSubmitter | None = None,
         chain_registry: TaskChainRegistry | None = None,
+        outbox: OutboxRepository | None = None,
+        task_topic: str = "task.commands",
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], str] | None = None,
         config: WorkerConfig | None = None,
@@ -102,11 +106,71 @@ class WorkerLoop:
         # smoke-only deployments depend on.
         self._submitter = submitter
         self._chain_registry = chain_registry
+        # ``outbox`` is the re-enqueue path used by
+        # :meth:`recover_in_flight`. ``None`` disables recovery (unit
+        # tests and smoke harnesses that explicitly don't need it).
+        self._outbox = outbox
+        self._task_topic = task_topic
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._config = config or WorkerConfig()
         self._stop_event: asyncio.Event = asyncio.Event()
         self._running: bool = False
+
+    async def recover_in_flight(self, *, limit: int = 100) -> int:
+        """Re-enqueue tasks left in ``RUNNING`` by a crashed worker.
+
+        Phase γ-A: scan the ``tasks`` table cross-tenant for any row
+        still marked ``RUNNING`` (the previous worker died between a
+        graph step and the terminal ``complete()`` / ack) and emit a
+        fresh outbox event so the dispatcher re-publishes the command
+        to the queue. The next available worker rehydrates from the
+        latest checkpoint and continues from where the crash
+        interrupted execution.
+
+        Returns the number of tasks re-enqueued. ``0`` when the worker
+        was wired without an outbox (unit-test mode) or when no
+        ``RUNNING`` tasks remain.
+        """
+
+        if self._outbox is None:
+            return 0
+        rows = await self._tasks.list_running_for_resume(limit=limit)
+        count = 0
+        for task in rows:
+            ctx = _task_to_context(task)
+            now = self._clock()
+            event = OutboxEvent(
+                event_id=self._id_factory(),
+                tenant_id=task.tenant_id,
+                trace_id=task.trace_id,
+                aggregate_type="task",
+                aggregate_id=task.task_id,
+                topic=self._task_topic,
+                payload=dict(task.input_payload),
+                idempotency_key=f"recover:{task.task_id}:{int(now.timestamp())}",
+                created_at=now,
+            )
+            with bind_context(ctx):
+                try:
+                    await self._outbox.enqueue(event)
+                except Exception as exc:
+                    await self._audit(
+                        ctx,
+                        "worker.recover_failed",
+                        payload={
+                            "task_id": task.task_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    continue
+                await self._audit(
+                    ctx,
+                    "worker.task_recovered",
+                    payload={"task_id": task.task_id},
+                )
+            count += 1
+        return count
 
     async def run_once(self) -> int:
         """Process one batch. Returns the number of messages handled."""
@@ -236,9 +300,43 @@ class WorkerLoop:
             await self._tasks.update_state(
                 task.tenant_id, task.task_id, TaskState.RUNNING, started_at
             )
-        while not state.finished:
+        while not state.finished and not state.awaiting_approval:
             state = await graph.step(state)
             await self._persist_step(task, state)
+        if state.awaiting_approval:
+            # Phase γ-A pause: the graph hit a ``human_gate``.
+            # Transition the task to ``AWAITING_APPROVAL`` atomically
+            # (the WHERE-guard against ``RUNNING`` makes the write
+            # safe under message redelivery), ack the queue message so
+            # no live resources are held while waiting, and return.
+            # The operator's approve / abort API call re-enqueues the
+            # task via the outbox dispatcher.
+            paused_at = self._clock()
+            try:
+                await self._tasks.set_awaiting_approval(task.tenant_id, task.task_id, paused_at)
+            except IllegalTaskTransitionError:
+                # Another worker already advanced past this state;
+                # treat it the same as the existing "already terminal"
+                # branch in ``_dispatch``.
+                await self._audit(
+                    ctx,
+                    "worker.task_already_advanced",
+                    payload={"task_id": task.task_id, "attempted": "awaiting_approval"},
+                )
+                await self._stream.ack(msg.entry_id)
+                return
+            gate_id = state.data.get("_human_gate_at")
+            await self._audit(
+                ctx,
+                "task.awaiting_approval",
+                payload={
+                    "task_id": task.task_id,
+                    "sequence": state.sequence,
+                    "gate_id": gate_id if isinstance(gate_id, str) else None,
+                },
+            )
+            await self._stream.ack(msg.entry_id)
+            return
         finished_at = self._clock()
         result, terminal_state = self._build_result(task, graph, state, started_at, finished_at)
         try:
@@ -416,12 +514,21 @@ class WorkerLoop:
     async def _load_state(self, task: Task, graph: Graph) -> TaskRunState:
         latest = await self._checkpoints.latest(task.tenant_id, task.task_id)
         if latest is None:
+            # Seed the graph-level data dict with the task-level
+            # trust-surface configuration so router nodes can branch
+            # on it (e.g. ``bug_fix`` routes to ``human_gate`` instead
+            # of ``push`` when ``permission_mode != auto``). Both
+            # keys are reserved namespaces and graph code is the only
+            # consumer.
+            data: dict[str, object] = dict(task.input_payload)
+            data["_permission_mode"] = task.permission_mode.value
+            data["_budget_policy"] = task.budget_policy.value
             return TaskRunState(
                 task_id=task.task_id,
                 tenant_id=task.tenant_id,
                 trace_id=task.trace_id,
                 graph_id=graph.graph_id,
-                data=dict(task.input_payload),
+                data=data,
             )
         return TaskRunState.model_validate(latest.state_snapshot)
 

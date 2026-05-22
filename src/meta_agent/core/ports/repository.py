@@ -79,7 +79,12 @@ class IllegalTaskTransitionError(RepositoryError):
 # "state + result_json" atomic write idempotent under concurrent
 # redelivery.
 TERMINAL_TASK_STATES: frozenset[TaskState] = frozenset(
-    {TaskState.SUCCEEDED, TaskState.FAILED, TaskState.CANCELLED}
+    {
+        TaskState.SUCCEEDED,
+        TaskState.FAILED,
+        TaskState.CANCELLED,
+        TaskState.EXPIRED,
+    }
 )
 
 
@@ -108,6 +113,43 @@ class TaskRepository(ABC):
         new_state: TaskState,
         updated_at: datetime,
     ) -> None: ...
+
+    @abstractmethod
+    async def list_running_for_resume(self, limit: int = 100) -> list[Task]:
+        """Cross-tenant list of tasks left in ``RUNNING`` by a crashed worker.
+
+        Used at worker startup to re-enqueue mid-run tasks; the call
+        deliberately skips the tenant guard so it can scan every
+        tenant in one query before any context is bound.
+        """
+
+    @abstractmethod
+    async def set_awaiting_approval(
+        self,
+        tenant_id: str,
+        task_id: str,
+        updated_at: datetime,
+    ) -> None:
+        """Atomically transition ``RUNNING`` → ``AWAITING_APPROVAL``.
+
+        Raises :class:`IllegalTaskTransitionError` when the row is
+        missing or no longer in ``RUNNING``.
+        """
+
+    @abstractmethod
+    async def transition_from_awaiting_approval(
+        self,
+        tenant_id: str,
+        task_id: str,
+        new_state: TaskState,
+        updated_at: datetime,
+    ) -> None:
+        """Atomic transition out of ``AWAITING_APPROVAL``.
+
+        Backs the approve / abort / expire paths; raises
+        :class:`IllegalTaskTransitionError` if the task is no longer
+        paused.
+        """
 
     @abstractmethod
     async def complete(

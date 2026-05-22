@@ -53,6 +53,44 @@ class FakeTaskRepo(TaskRepository):
             :limit
         ]
 
+    async def list_running_for_resume(self, limit: int = 100) -> list[Task]:
+        # Cross-tenant scan, no guard — mirrors the SQL adapter's
+        # "dispatcher-mode" semantics used by ``WorkerLoop.recover_in_flight``.
+        return [t for t in self.rows.values() if t.state == TaskState.RUNNING][:limit]
+
+    async def set_awaiting_approval(
+        self,
+        tenant_id: str,
+        task_id: str,
+        updated_at: datetime,
+    ) -> None:
+        key = (tenant_id, task_id)
+        existing = self.rows.get(key)
+        if existing is None or existing.state != TaskState.RUNNING:
+            raise IllegalTaskTransitionError(
+                f"task {task_id!r} cannot transition to AWAITING_APPROVAL: "
+                "row missing or not in RUNNING"
+            )
+        self.rows[key] = existing.model_copy(
+            update={"state": TaskState.AWAITING_APPROVAL, "updated_at": updated_at}
+        )
+
+    async def transition_from_awaiting_approval(
+        self,
+        tenant_id: str,
+        task_id: str,
+        new_state: TaskState,
+        updated_at: datetime,
+    ) -> None:
+        key = (tenant_id, task_id)
+        existing = self.rows.get(key)
+        if existing is None or existing.state != TaskState.AWAITING_APPROVAL:
+            raise IllegalTaskTransitionError(
+                f"task {task_id!r} cannot transition from AWAITING_APPROVAL to "
+                f"{new_state.value!r}: row missing or in a different state"
+            )
+        self.rows[key] = existing.model_copy(update={"state": new_state, "updated_at": updated_at})
+
     async def update_state(
         self,
         tenant_id: str,

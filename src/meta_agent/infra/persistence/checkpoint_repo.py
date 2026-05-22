@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import asyncpg
+
 from meta_agent.core.domain.checkpoint import TaskCheckpoint
 from meta_agent.core.ports.repository import CheckpointRepository
 from meta_agent.infra.persistence._guard import check_tenant
@@ -49,17 +51,40 @@ class PgCheckpointRepository(CheckpointRepository):
     async def append(self, checkpoint: TaskCheckpoint) -> None:
         check_tenant(checkpoint.tenant_id)
         async with self._pool.acquire() as conn:
-            await conn.execute(
-                self._APPEND,
-                checkpoint.checkpoint_id,
-                checkpoint.task_id,
-                checkpoint.tenant_id,
-                checkpoint.trace_id,
-                checkpoint.node_name,
-                checkpoint.sequence,
-                checkpoint.state_snapshot,
-                checkpoint.created_at,
-            )
+            await self._append_with_conn(checkpoint, conn)
+
+    async def append_in_conn(
+        self,
+        checkpoint: TaskCheckpoint,
+        conn: asyncpg.Connection[Any],
+    ) -> None:
+        """Append on an externally-supplied connection.
+
+        Lets the Phase γ-A approval gateway compose the new checkpoint
+        write (which encodes the operator's decision into the resumed
+        state) with the task-state transition and outbox enqueue
+        inside a single transaction.
+        """
+
+        check_tenant(checkpoint.tenant_id)
+        await self._append_with_conn(checkpoint, conn)
+
+    async def _append_with_conn(
+        self,
+        checkpoint: TaskCheckpoint,
+        conn: asyncpg.Connection[Any],
+    ) -> None:
+        await conn.execute(
+            self._APPEND,
+            checkpoint.checkpoint_id,
+            checkpoint.task_id,
+            checkpoint.tenant_id,
+            checkpoint.trace_id,
+            checkpoint.node_name,
+            checkpoint.sequence,
+            checkpoint.state_snapshot,
+            checkpoint.created_at,
+        )
 
     async def latest(self, tenant_id: str, task_id: str) -> TaskCheckpoint | None:
         check_tenant(tenant_id)
