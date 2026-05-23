@@ -27,6 +27,11 @@ from meta_agent.core.domain.trajectory import (
     TrajectoryPage,
     TrajectoryUsageItem,
 )
+from meta_agent.core.domain.webhook import (
+    WebhookDelivery,
+    WebhookDeliveryStatus,
+    WebhookSubscription,
+)
 from meta_agent.core.domain.workspace import Workspace
 
 __all__ = [
@@ -52,6 +57,9 @@ __all__ = [
     "TrajectoryItem",
     "TrajectoryPage",
     "TrajectoryUsageItem",
+    "WebhookDelivery",
+    "WebhookDeliveryStatus",
+    "WebhookSubscription",
     "Workspace",
     "compute_content_hash",
 ]

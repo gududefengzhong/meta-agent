@@ -41,6 +41,7 @@ from meta_agent.core.ports.task_submitter import TaskSubmitter
 from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 from meta_agent.infra.queue.redis_consumer import DeliveredMessage
 from meta_agent.infra.security.context import RequestContext, bind_context
+from meta_agent.infra.webhook.fanout import WebhookFanout
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class WorkerLoop:
         chain_registry: TaskChainRegistry | None = None,
         outbox: OutboxRepository | None = None,
         task_topic: str = "task.commands",
+        webhook_fanout: WebhookFanout | None = None,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], str] | None = None,
         config: WorkerConfig | None = None,
@@ -111,6 +113,10 @@ class WorkerLoop:
         # tests and smoke harnesses that explicitly don't need it).
         self._outbox = outbox
         self._task_topic = task_topic
+        # ``webhook_fanout`` is the γ-B-2 audit → webhook bridge.
+        # ``None`` disables the bridge entirely (unit tests, dev runs
+        # without outbound webhooks configured).
+        self._webhook_fanout = webhook_fanout
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._config = config or WorkerConfig()
@@ -620,6 +626,11 @@ class WorkerLoop:
             occurred_at=self._clock(),
         )
         await self._audits.append(event)
+        # Phase γ-B-2 fanout: best-effort emission to subscribed webhook
+        # endpoints. Failures are swallowed inside the fanout itself —
+        # the audit row is already committed and is the recovery anchor.
+        if self._webhook_fanout is not None:
+            await self._webhook_fanout.fanout(event)
 
 
 def _envelope_to_context(envelope: MessageEnvelope) -> RequestContext:
