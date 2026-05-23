@@ -1,0 +1,75 @@
+{
+  "name": "meta-agent-vscode",
+  "displayName": "meta-agent",
+  "description": "Run meta-agent tasks from VS Code with streaming output and inline permission prompts.",
+  "version": "0.1.0",
+  "publisher": "meta-agent",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onCommand:metaAgent.run",
+    "onCommand:metaAgent.tail"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "metaAgent.run",
+        "title": "meta-agent: Run task",
+        "category": "meta-agent"
+      },
+      {
+        "command": "metaAgent.tail",
+        "title": "meta-agent: Tail existing task",
+        "category": "meta-agent"
+      }
+    ],
+    "configuration": {
+      "title": "meta-agent",
+      "properties": {
+        "metaAgent.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL of the meta-agent API."
+        },
+        "metaAgent.token": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Bearer token used for `/v1/*` calls. Set this via VS Code's secret storage in production; storing it in plain settings is for local dev only."
+        },
+        "metaAgent.permissionMode": {
+          "type": "string",
+          "default": "plan",
+          "enum": [
+            "auto",
+            "approve_before_push",
+            "approve_each_tool",
+            "plan"
+          ],
+          "enumDescriptions": [
+            "Zero friction; no approval prompts.",
+            "Approve once before a git push.",
+            "Approve every tool call (granular, noisy on long tasks).",
+            "Approve each planning step as a batch (recommended default)."
+          ],
+          "description": "Permission mode submitted with new tasks. Existing tasks keep whatever mode they were created with."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "tsc --noEmit -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}
