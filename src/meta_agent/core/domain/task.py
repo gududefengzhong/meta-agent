@@ -63,17 +63,29 @@ class TaskState(StrEnum):
 
 
 class PermissionMode(StrEnum):
-    """Per-task human-in-the-loop policy (Phase γ).
+    """Per-task human-in-the-loop policy (Phase γ + δ-1).
 
     Composes orthogonally with :class:`BudgetPolicy`. ``auto`` is the
     legacy zero-friction behaviour; the ``approve_*`` modes inject
     explicit ``human_gate`` checkpoints at well-defined points in the
     graph topology.
+
+    Inline-permission modes (δ-1) use the :class:`PermissionGate`
+    rendezvous instead of the operator-driven AWAITING_APPROVAL flow:
+
+    * ``approve_each_tool`` — gate before every tool call (granular,
+      can feel noisy on long sessions)
+    * ``plan`` — gate once per *planning step* (the assistant's
+      message + its proposed batch of tool calls). Right balance for
+      "tell me what you're going to do, I'll approve, then go" UX.
+      After approval the planning step's tool calls all execute; the
+      next planning step triggers a fresh prompt
     """
 
     AUTO = "auto"
     APPROVE_BEFORE_PUSH = "approve_before_push"
     APPROVE_EACH_TOOL = "approve_each_tool"
+    PLAN = "plan"
 
 
 class BudgetPolicy(StrEnum):

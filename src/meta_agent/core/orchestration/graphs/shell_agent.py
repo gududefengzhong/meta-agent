@@ -35,7 +35,7 @@ from typing import Any
 
 from meta_agent.core.capabilities.executor import ToolExecutor
 from meta_agent.core.capabilities.registry import ToolRegistry
-from meta_agent.core.domain.permission import PermissionPrompt
+from meta_agent.core.domain.permission import PermissionDecision, PermissionPrompt
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
 from meta_agent.core.orchestration.llm_streaming import aggregate_stream_to_response
@@ -307,6 +307,82 @@ async def _gated_execute(
     return await executor.execute(call, tool_ctx)
 
 
+_PLAN_PROMPT_TOOL_NAME = "<plan>"
+"""Sentinel ``tool_name`` for plan-mode prompts.
+
+Lets a single permission prompt carry the assistant's planning
+step (text + a batch of proposed tool calls) without changing the
+:class:`PermissionPrompt` schema. Clients render plan prompts
+differently from per-tool prompts by branching on this value.
+"""
+
+
+async def _request_plan_decision(
+    state: TaskRunState,
+    calls: list[ToolCall],
+    gate: PermissionGate,
+) -> PermissionDecision | None:
+    """Emit one gate covering all pending tool calls; return the decision.
+
+    Returns ``None`` when the gate times out so the caller can treat
+    every tool as denied (the safer default — silent client must
+    not green-light a batch action). ``state.data`` is mutated with
+    the assigned ``_plan_prompt_id`` so synthetic deny ToolResults
+    can carry it as metadata for trace correlation.
+    """
+
+    prompt_id = f"prm-plan-{uuid.uuid4()}"
+    state.data["_plan_prompt_id"] = prompt_id  # for trace metadata only
+    summary = _str_or_none(state, "_pending_plan_summary") or ""
+    prompt = PermissionPrompt(
+        prompt_id=prompt_id,
+        tenant_id=state.tenant_id,
+        task_id=state.task_id,
+        tool_name=_PLAN_PROMPT_TOOL_NAME,
+        summary=summary,
+        payload={
+            "tool_calls": [
+                {"id": call.id, "name": call.name, "arguments": dict(call.arguments)}
+                for call in calls
+            ],
+        },
+        created_at=datetime.now(UTC),
+    )
+    try:
+        return await gate.request(prompt, timeout_seconds=_PERMISSION_DECISION_TIMEOUT_S)
+    except PermissionTimeoutError:
+        return None
+
+
+def _plan_prompt_id_from_state(state: TaskRunState) -> str:
+    raw = state.data.get("_plan_prompt_id")
+    return raw if isinstance(raw, str) else ""
+
+
+def _synthetic_deny_result(
+    call: ToolCall,
+    *,
+    reason: str | None,
+    outcome: str,
+    prompt_id: str,
+) -> ToolResult:
+    if outcome == "timeout":
+        content = "[plan_timeout] user did not respond in time; tool was skipped"
+    else:
+        reason_suffix = f": {reason}" if reason else ""
+        content = f"[plan_denied] user denied the plan{reason_suffix}"
+    return ToolResult(
+        call_id=call.id,
+        name=call.name,
+        content=content,
+        is_error=True,
+        metadata={
+            "permission_outcome": outcome,
+            "prompt_id": prompt_id,
+        },
+    )
+
+
 def _require_tool_caps(deps: GraphDeps) -> tuple[ToolRegistry, ToolExecutor]:
     if deps.tool_registry is None or deps.tool_executor is None:
         raise GraphError(
@@ -460,6 +536,12 @@ def build_shell_agent_graph(
                 "_pending_tool_calls": pending,
                 "_plan_next": next_decision,
                 "_last_response": response.model_dump(mode="json"),
+                # δ-1 plan mode: cache the plan summary (assistant
+                # text) so ``tool_call`` can carry it on the gate
+                # prompt without re-reading messages. Cheap to store
+                # even when plan mode isn't active — overwritten each
+                # planning step.
+                "_pending_plan_summary": response.content,
                 "_usage": merged_usage,
                 "_truncated_by_max_steps": (
                     bool(state.data.get("_truncated_by_max_steps")) or truncated
@@ -477,28 +559,57 @@ def build_shell_agent_graph(
         ctx = _build_tool_context(state)
         messages = _load_messages(state, default_system_prompt)
         invocations = _int_or_default(state, "_tool_invocations", 0)
-        requires_approval = (
-            _str_or_none(state, "_permission_mode") == "approve_each_tool"
-            and deps.permission_gate is not None
-        )
-        for entry in raw:
-            call = ToolCall.model_validate(entry)
-            result: ToolResult
-            if requires_approval:
-                # ``permission_gate`` is non-None here per the guard
-                # above; mypy needs the explicit assignment.
-                assert deps.permission_gate is not None
-                result = await _gated_execute(
-                    call, ctx, executor, gate=deps.permission_gate, state=state
+        permission_mode = _str_or_none(state, "_permission_mode")
+        gate = deps.permission_gate
+        calls = [ToolCall.model_validate(entry) for entry in raw]
+
+        # Plan mode: one gate covering the whole planning step. The
+        # prompt carries the assistant's plan text + every pending
+        # tool call so the user reviews the batch holistically.
+        if permission_mode == "plan" and gate is not None:
+            plan_decision = await _request_plan_decision(state, calls, gate)
+            for call in calls:
+                result: ToolResult
+                if plan_decision is None or plan_decision.allow:
+                    result = await executor.execute(call, ctx)
+                else:
+                    result = _synthetic_deny_result(
+                        call,
+                        reason=plan_decision.reason if plan_decision else None,
+                        outcome="timeout" if plan_decision is None else "denied",
+                        prompt_id=_plan_prompt_id_from_state(state),
+                    )
+                invocations += 1
+                messages.append(
+                    ChatMessage(
+                        role=MessageRole.TOOL,
+                        content=_tool_message_content(result),
+                        tool_call_id=result.call_id,
+                    )
                 )
+            return NodeResult(
+                data_update={
+                    "_messages": _dump_messages(messages),
+                    "_pending_tool_calls": [],
+                    "_tool_invocations": invocations,
+                }
+            )
+
+        # Per-tool gate (approve_each_tool) or no gate (auto).
+        requires_approval = permission_mode == "approve_each_tool" and gate is not None
+        for call in calls:
+            tool_result: ToolResult
+            if requires_approval:
+                assert gate is not None  # narrowed by the guard above
+                tool_result = await _gated_execute(call, ctx, executor, gate=gate, state=state)
             else:
-                result = await executor.execute(call, ctx)
+                tool_result = await executor.execute(call, ctx)
             invocations += 1
             messages.append(
                 ChatMessage(
                     role=MessageRole.TOOL,
-                    content=_tool_message_content(result),
-                    tool_call_id=result.call_id,
+                    content=_tool_message_content(tool_result),
+                    tool_call_id=tool_result.call_id,
                 )
             )
         return NodeResult(
