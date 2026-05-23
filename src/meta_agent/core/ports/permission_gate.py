@@ -35,6 +35,7 @@ broadcaster to grow request-response semantics it doesn't need.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
 
 from meta_agent.core.domain.permission import PermissionDecision, PermissionPrompt
 
@@ -80,6 +81,29 @@ class PermissionGate(ABC):
         MUST be silently swallowed — the API has no way to
         distinguish "stale" from "spurious" and raising would force
         the API to retain prompt-issuance state it shouldn't own.
+        """
+
+    @abstractmethod
+    async def subscribe_prompts(
+        self,
+        *,
+        tenant_id: str,
+        task_id: str,
+    ) -> AsyncGenerator[PermissionPrompt, None]:
+        """API-side: stream prompts published for ``(tenant_id, task_id)``.
+
+        The API's SSE endpoint uses this to surface prompts to the
+        connected client (VS Code / CLI) in real time. Pub/sub
+        semantics: a subscriber receives only prompts published
+        while it is subscribed; prompts before / after are dropped.
+
+        The returned iterator MUST be closeable via the standard
+        async-generator ``aclose`` protocol so the API can release
+        backend resources when the client disconnects.
+
+        ``async def`` because the backend MUST register the
+        subscriber before returning — a lazy generator could race
+        with a fast ``request`` and drop the prompt.
         """
 
     @abstractmethod

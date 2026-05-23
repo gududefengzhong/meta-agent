@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import sys
+from collections.abc import Awaitable, Callable
 from typing import Any, TextIO
 
 from meta_agent.cli.client import (
@@ -22,6 +23,14 @@ from meta_agent.cli.client import (
     CLIError,
     TaskClient,
 )
+
+PromptDecider = Callable[[dict[str, Any]], Awaitable[tuple[bool, str | None]]]
+"""Coroutine that turns a permission prompt into ``(allow, reason)``.
+
+Production wiring uses :func:`_prompt_user_for_decision` to ask via
+the controlling terminal; tests inject a deterministic decider so
+no real stdin is touched.
+"""
 
 
 async def cmd_submit(args: argparse.Namespace, client: TaskClient) -> int:
@@ -53,13 +62,19 @@ async def cmd_tail(args: argparse.Namespace, client: TaskClient) -> int:
     state. The two SSE streams run as concurrent asyncio tasks; the
     function returns once either the LLM stream closes (terminal
     event emitted) or the lifecycle stream observes a terminal state.
+
+    Interactive permission prompts are handled when
+    ``--no-interactive`` is NOT set: a stdin y/n prompt routes the
+    user's decision back via ``POST /permissions/.../decide``.
     """
+    decider = None if args.no_interactive else _prompt_user_for_decision
     return await _tail_until_terminal(
         client,
         args.task_id,
         chunks_to=sys.stdout,
         events_to=sys.stderr,
         show_events=not args.quiet_events,
+        decider=decider,
     )
 
 
@@ -76,12 +91,14 @@ async def cmd_run(args: argparse.Namespace, client: TaskClient) -> int:
     if not isinstance(task_id, str):
         raise CLIError(2, "server response missing task_id")
     print(f"task: {task_id}", file=sys.stderr)
+    decider = None if args.no_interactive else _prompt_user_for_decision
     return await _tail_until_terminal(
         client,
         task_id,
         chunks_to=sys.stdout,
         events_to=sys.stderr,
         show_events=not args.quiet_events,
+        decider=decider,
     )
 
 
@@ -109,8 +126,15 @@ async def _tail_until_terminal(
     chunks_to: TextIO,
     events_to: TextIO,
     show_events: bool,
+    decider: PromptDecider | None = None,
 ) -> int:
-    """Multiplex LLM chunks + lifecycle events; return exit code from final task state."""
+    """Multiplex LLM chunks + lifecycle events + permission prompts.
+
+    Returns the exit code from the final task state. When ``decider``
+    is supplied (production: terminal y/n; tests: scripted), the
+    function also subscribes to the per-task permission stream and
+    POSTs each decision back via ``client.decide_permission``.
+    """
 
     final_state: dict[str, str | None] = {"value": None}
 
@@ -131,18 +155,36 @@ async def _tail_until_terminal(
                 events_to.write(f"[{action}]\n")
                 events_to.flush()
 
+    async def prompt_loop() -> None:
+        assert decider is not None  # only spawned when a decider is wired
+        async for prompt in client.stream_permission_prompts(task_id):
+            prompt_id_raw = prompt.get("prompt_id") if isinstance(prompt, dict) else None
+            if not isinstance(prompt_id_raw, str):
+                continue
+            allow, reason = await decider(prompt)
+            with contextlib.suppress(CLIError):
+                await client.decide_permission(task_id, prompt_id_raw, allow=allow, reason=reason)
+
     chunk_task = asyncio.create_task(chunk_loop(), name="cli-llm-stream")
     event_task = asyncio.create_task(event_loop(), name="cli-events")
+    prompt_task: asyncio.Task[None] | None = None
+    if decider is not None:
+        prompt_task = asyncio.create_task(prompt_loop(), name="cli-permissions")
     try:
         # The lifecycle stream is the authoritative signal for completion —
         # it emits a synthetic ``task.terminal`` row carrying the final
-        # state when the task transitions. The LLM stream typically
-        # closes shortly after but is not the source of truth.
+        # state when the task transitions. The LLM stream and the
+        # permission stream typically close shortly after but are not
+        # the source of truth.
         await event_task
     finally:
         chunk_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, CLIError):
             await chunk_task
+        if prompt_task is not None:
+            prompt_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, CLIError):
+                await prompt_task
 
     chunks_to.write("\n")
     chunks_to.flush()
@@ -150,3 +192,38 @@ async def _tail_until_terminal(
     if final_state["value"] == "succeeded":
         return EXIT_OK
     return EXIT_TASK_FAILED
+
+
+async def _prompt_user_for_decision(
+    prompt: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """Default :data:`PromptDecider` — render the prompt + read y/n from stdin.
+
+    ``input()`` is sync, so we run it via :func:`asyncio.to_thread`
+    to keep the event loop responsive for the other streams.
+    Output goes to stderr so it doesn't pollute the stdout pipe
+    that carries the model's actual answer.
+    """
+
+    tool = prompt.get("tool_name", "<unknown>")
+    summary = prompt.get("summary") or f"Run tool {tool!r}"
+    payload = prompt.get("payload")
+    sys.stderr.write("\n")
+    sys.stderr.write(f"  [permission] {summary}\n")
+    if payload:
+        try:
+            rendered = json.dumps(payload, indent=2, sort_keys=True)
+        except (TypeError, ValueError):
+            rendered = repr(payload)
+        sys.stderr.write(f"  payload: {rendered}\n")
+    sys.stderr.write("  allow? [y/N]: ")
+    sys.stderr.flush()
+    answer = await asyncio.to_thread(input)
+    allow = answer.strip().lower() in {"y", "yes"}
+    reason: str | None = None
+    if not allow:
+        sys.stderr.write("  reason (optional, press enter to skip): ")
+        sys.stderr.flush()
+        reason_input = await asyncio.to_thread(input)
+        reason = reason_input.strip() or None
+    return allow, reason

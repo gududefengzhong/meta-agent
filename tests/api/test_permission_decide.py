@@ -99,6 +99,9 @@ class _RecordingGate(PermissionGate):
             raise self._raise
         self.delivered.append(decision)
 
+    async def subscribe_prompts(self, *, tenant_id: str, task_id: str):  # type: ignore[no-untyped-def]
+        raise AssertionError("decide endpoint does not call subscribe_prompts()")
+
     async def close(self) -> None:
         return None
 
