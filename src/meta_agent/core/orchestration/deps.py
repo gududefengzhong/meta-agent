@@ -20,6 +20,7 @@ from meta_agent.core.orchestration.graph import Graph
 from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
 from meta_agent.core.ports.llm_usage import LLMUsageRepository
+from meta_agent.core.ports.permission_gate import PermissionGate
 from meta_agent.core.ports.prompt_registry import PromptRegistry
 
 if TYPE_CHECKING:
@@ -85,6 +86,18 @@ class GraphDeps:
     here. ``None`` disables budget gates regardless of the task's
     declared policy — tenant-level monthly limits still apply via
     :class:`BudgetEnforcingLLMClient`.
+    """
+    permission_gate: PermissionGate | None = None
+    """Inline permission rendezvous (Phase δ-1).
+
+    Graphs that honour :class:`PermissionMode.APPROVE_EACH_TOOL` (or
+    similar interactive modes) call ``gate.request(prompt, timeout=...)``
+    to block until the connected client (VS Code / CLI) decides.
+    ``None`` disables interactive permission gates — the graph
+    proceeds as if every action were permitted, regardless of the
+    task's declared :class:`PermissionMode`. This is the right
+    default for unit-test wiring; production wiring always passes
+    a real gate.
     """
 
 

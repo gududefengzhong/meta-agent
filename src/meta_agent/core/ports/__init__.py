@@ -60,6 +60,11 @@ from meta_agent.core.ports.llm_usage import (
     UsageGroupBy,
 )
 from meta_agent.core.ports.message import MessageEnvelope, MessageHandler
+from meta_agent.core.ports.permission_gate import (
+    PermissionGate,
+    PermissionGateError,
+    PermissionTimeoutError,
+)
 from meta_agent.core.ports.prompt_registry import PromptNotFoundError, PromptRegistry
 from meta_agent.core.ports.queue import (
     MessageConsumer,
@@ -183,6 +188,9 @@ __all__ = [
     "MessageRole",
     "OutboxRepository",
     "OutlineEntry",
+    "PermissionGate",
+    "PermissionGateError",
+    "PermissionTimeoutError",
     "Principal",
     "PromptNotFoundError",
     "PromptRegistry",

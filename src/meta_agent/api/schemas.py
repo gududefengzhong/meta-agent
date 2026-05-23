@@ -81,6 +81,30 @@ class AbortRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=1_000)
 
 
+class PermissionDecisionRequest(BaseModel):
+    """Body of ``POST /v1/tasks/{task_id}/permissions/{prompt_id}/decide``.
+
+    The client renders a :class:`PermissionPrompt` from the
+    lifecycle / permission stream, asks the user, then POSTs this
+    decision. ``reason`` flows into the agent loop on deny so the
+    model can plan an alternative.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allow: bool
+    reason: str | None = Field(default=None, max_length=1_000)
+
+
+class PermissionDecisionResponse(BaseModel):
+    """Confirms the decision was accepted and routed to the waiting worker."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_id: str
+    allow: bool
+
+
 class TrajectoryResponse(BaseModel):
     """Body of ``GET /v1/tasks/{task_id}/trajectory``.
 

@@ -26,6 +26,7 @@ from meta_agent.api.deps import (
     get_chunk_broadcaster,
     get_db_pool,
     get_outbox_repo,
+    get_permission_gate,
     get_request_ctx,
     get_task_repo,
     get_task_topic,
@@ -34,16 +35,23 @@ from meta_agent.api.deps import (
 from meta_agent.api.schemas import (
     AbortRequest,
     ApprovalRequest,
+    PermissionDecisionRequest,
+    PermissionDecisionResponse,
     SubmitTaskRequest,
     TaskResponse,
     TaskResultResponse,
     TrajectoryResponse,
 )
 from meta_agent.core.domain.outbox import OutboxEvent
+from meta_agent.core.domain.permission import PermissionDecision
 from meta_agent.core.domain.task import Task, TaskState
 from meta_agent.core.ports.chunk_broadcaster import (
     ChunkBroadcaster,
     ChunkBroadcasterError,
+)
+from meta_agent.core.ports.permission_gate import (
+    PermissionGate,
+    PermissionGateError,
 )
 from meta_agent.core.ports.repository import TERMINAL_TASK_STATES
 from meta_agent.infra.persistence import (
@@ -268,6 +276,64 @@ async def abort_task(
         created_at=task.created_at,
         updated_at=task.updated_at,
     )
+
+
+@router.post(
+    "/tasks/{task_id}/permissions/{prompt_id}/decide",
+    response_model=PermissionDecisionResponse,
+    summary="Respond to an inline permission prompt",
+)
+async def decide_permission(
+    task_id: str,
+    prompt_id: str,
+    body: PermissionDecisionRequest,
+    ctx: RequestContext = Depends(get_request_ctx),
+    task_repo: PgTaskRepository = Depends(get_task_repo),
+    gate: PermissionGate = Depends(get_permission_gate),
+) -> PermissionDecisionResponse:
+    """Route a client's permission decision to the waiting worker.
+
+    Validates task ownership (404 on missing / wrong tenant) and
+    that the task is still in a state where a decision could
+    matter — a terminal task has no live worker to receive the
+    decision, so we 409 instead of silently swallowing the call.
+
+    A decision for a ``prompt_id`` nobody is waiting on (the worker
+    already timed out, or the prompt was never issued) is
+    silently accepted at the gate per the
+    :class:`PermissionGate.deliver` contract — we have no way to
+    distinguish stale from spurious here.
+    """
+
+    with bind_context(ctx):
+        task = await task_repo.get(ctx.tenant_id, task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"task {task_id!r} not found",
+        )
+    if task.state not in (TaskState.PENDING, TaskState.RUNNING):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"task {task_id!r} is in terminal state {task.state.value!r}; "
+                "no live worker to receive the decision"
+            ),
+        )
+    decision = PermissionDecision(
+        prompt_id=prompt_id,
+        allow=body.allow,
+        reason=body.reason,
+        decided_at=datetime.now(UTC),
+    )
+    try:
+        await gate.deliver(decision)
+    except PermissionGateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="permission gate unavailable",
+        ) from exc
+    return PermissionDecisionResponse(prompt_id=prompt_id, allow=body.allow)
 
 
 @router.get(
