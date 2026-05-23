@@ -92,6 +92,7 @@ from meta_agent.infra.llm import (
     OpenRouterClient,
     OpenRouterConfig,
     RateLimitedLLMClient,
+    RedactingLLMClient,
     RoutingLLMClient,
     StaticLLMRouter,
 )
@@ -120,6 +121,7 @@ from meta_agent.infra.ratelimit import (
     RateLimitConfig,
     build_rate_limiter_from_config,
 )
+from meta_agent.infra.redaction import Redactor
 from meta_agent.infra.secrets import build_secrets_from_env, resolve_secret_env
 from meta_agent.infra.tools import (
     DockerWorkspaceEditTool,
@@ -826,12 +828,21 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         fail_open=budget_config.fail_open,
         audit_sink=audit_repo,
     )
-    # Routing decorator sits outermost: it rewrites ``request.model``
-    # based on ``request.step_kind`` before any downstream decorator
-    # sees the call, so budgets / rate limits / usage rows / breakers
-    # all attribute spend to the routed model rather than the caller's
-    # pre-route hint.
+    # Routing decorator sits between redaction and budget enforcement:
+    # it rewrites ``request.model`` based on ``request.step_kind``
+    # before any downstream decorator sees the call, so budgets / rate
+    # limits / usage rows / breakers all attribute spend to the routed
+    # model rather than the caller's pre-route hint.
     routed_llm = build_routed_llm(budget_enforcing_llm, settings.llm_router_mapping)
+    # Phase γ-D: redaction sits **outermost**. Every downstream layer
+    # (router, budget, rate-limit, metered, breaker, OpenRouter) sees
+    # the scrubbed bytes, so secrets that drift into a graph's prompt
+    # never reach audit logs / metering rows / the LLM provider's
+    # network. Response content is scrubbed before the result is
+    # returned to the graph, keeping echoed secrets out of the final
+    # task output.
+    redactor = Redactor()
+    redacting_llm = RedactingLLMClient(routed_llm, redactor=redactor, audit_sink=audit_repo)
     raw_git_provider = build_git_provider(settings)
     # Mirror the LLM safety stack: breaker innermost (counts real
     # upstream failures only), limiter outermost (deny does not reach
@@ -886,7 +897,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     await ensure_seeded(prompt_registry)
     registry = build_registry(
         GraphDeps(
-            llm=routed_llm,
+            llm=redacting_llm,
             git_provider=git_provider,
             git_push_token=push_token,
             tool_registry=tool_registry,
@@ -933,7 +944,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
 
     async def _aclose() -> None:
         await git_provider.close()
-        await routed_llm.close()
+        await redacting_llm.close()
         await budget_enforcer.close()
         await rate_limiter.close()
         await breaker.close()
@@ -948,7 +959,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         resources={
             "pool": pool,
             "redis": redis_client,
-            "llm": routed_llm,
+            "llm": redacting_llm,
             "rate_limiter": rate_limiter,
             "circuit_breaker": breaker,
             "budget_enforcer": budget_enforcer,

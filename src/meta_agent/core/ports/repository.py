@@ -268,6 +268,24 @@ class AuditRepository(AuditSink):
     ) -> list[AuditEvent]: ...
 
     @abstractmethod
+    async def list_for_task_since(
+        self,
+        tenant_id: str,
+        task_id: str,
+        *,
+        after: tuple[datetime, str] | None = None,
+        limit: int = 100,
+    ) -> list[AuditEvent]:
+        """Return audit events for a task strictly after a keyset cursor.
+
+        ``after`` is the ``(occurred_at, event_id)`` of the last event
+        the caller saw; passing ``None`` starts from the beginning of
+        the task. Events are returned in ascending order so an SSE
+        client can stream them in causal order. Powers the γ-D
+        ``GET /v1/tasks/{id}/events`` endpoint.
+        """
+
+    @abstractmethod
     async def list_filtered(
         self,
         tenant_id: str,

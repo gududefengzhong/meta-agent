@@ -182,6 +182,21 @@ class FakeAuditRepo(AuditRepository):
         # layer has its own dedicated fakes in tests/api/test_queries.py.
         raise AssertionError("list_filtered not exercised by worker fakes")
 
+    async def list_for_task_since(
+        self,
+        tenant_id: str,
+        task_id: str,
+        *,
+        after: tuple[datetime, str] | None = None,
+        limit: int = 100,
+    ) -> list[AuditEvent]:
+        rows = [e for e in self.rows if e.tenant_id == tenant_id and e.task_id == task_id]
+        rows.sort(key=lambda e: (e.occurred_at, e.event_id))
+        if after is not None:
+            cur_at, cur_id = after
+            rows = [e for e in rows if (e.occurred_at, e.event_id) > (cur_at, cur_id)]
+        return rows[:limit]
+
     def actions(self) -> list[str]:
         return [e.action for e in self.rows]
 

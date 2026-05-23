@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from meta_agent.core.domain.audit import AuditEvent
@@ -66,6 +67,44 @@ class PgAuditRepository(AuditRepository):
         check_tenant(tenant_id)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(self._LIST_RECENT, tenant_id, limit)
+        return [_row_to_event(dict(r)) for r in rows]
+
+    async def list_for_task_since(
+        self,
+        tenant_id: str,
+        task_id: str,
+        *,
+        after: tuple[datetime, str] | None = None,
+        limit: int = 100,
+    ) -> list[AuditEvent]:
+        """ASC stream of audit events for one task, keyset-paginated by
+        ``(occurred_at, event_id)`` so the γ-D SSE endpoint never
+        re-emits an event the client has already seen."""
+
+        check_tenant(tenant_id)
+        params: list[Any] = [tenant_id, task_id]
+        clauses = ["tenant_id = $1", "task_id = $2"]
+        if after is not None:
+            cursor_at, cursor_id = after
+            params.append(cursor_at)
+            cursor_at_n = len(params)
+            params.append(cursor_id)
+            cursor_id_n = len(params)
+            # Strict ASC keyset: the next page starts strictly after
+            # the supplied cursor, breaking ties on event_id so
+            # ordering is stable when two events share a timestamp.
+            clauses.append(
+                f"(occurred_at > ${cursor_at_n} "
+                f"OR (occurred_at = ${cursor_at_n} AND event_id > ${cursor_id_n}))"
+            )
+        params.append(limit)
+        limit_n = len(params)
+        sql = (
+            f"SELECT * FROM audit_events WHERE {' AND '.join(clauses)} "
+            f"ORDER BY occurred_at ASC, event_id ASC LIMIT ${limit_n}"
+        )
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
         return [_row_to_event(dict(r)) for r in rows]
 
     async def list_filtered(

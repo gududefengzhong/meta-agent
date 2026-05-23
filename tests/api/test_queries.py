@@ -64,6 +64,16 @@ class _FakeAuditRepo(AuditRepository):
         # Honour ``limit`` so the cursor-emission branch can be exercised.
         return list(self._events[: filt.limit])
 
+    async def list_for_task_since(
+        self,
+        tenant_id: str,
+        task_id: str,
+        *,
+        after: tuple[datetime, str] | None = None,
+        limit: int = 100,
+    ) -> list[AuditEvent]:  # pragma: no cover - not exercised by query API tests
+        raise AssertionError
+
 
 class _FakeUsageRepo(LLMUsageRepository):
     """In-memory fake covering only the read paths used by the router."""
