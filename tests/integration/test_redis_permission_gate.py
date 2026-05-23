@@ -93,3 +93,66 @@ async def test_deny_decision_is_routed_with_reason(redis_client: Redis) -> None:
 
     assert decision.allow is False
     assert decision.reason == "no thanks"
+
+
+async def test_subscribe_prompts_receives_published_prompt(redis_client: Redis) -> None:
+    """End-to-end: API-side subscriber sees prompts fanned out by ``request``."""
+
+    gate = RedisPermissionGate(redis_client)
+    sub = await gate.subscribe_prompts(tenant_id="t-1", task_id="task-1")
+
+    async def issue_prompt_then_resolve() -> None:
+        # Give the subscriber a moment to register before we publish.
+        await asyncio.sleep(0.1)
+        await gate.deliver(_decision("prm-sub-1", allow=True))
+
+    deliver_task = asyncio.create_task(issue_prompt_then_resolve())
+    requester = asyncio.create_task(gate.request(_prompt("prm-sub-1"), timeout_seconds=3.0))
+    try:
+        received = await asyncio.wait_for(sub.__anext__(), timeout=3.0)
+        await requester
+    finally:
+        await deliver_task
+        await sub.aclose()
+        await gate.close()
+
+    assert received.prompt_id == "prm-sub-1"
+    assert received.tenant_id == "t-1"
+    assert received.task_id == "task-1"
+
+
+async def test_subscribe_prompts_tenant_isolated_through_redis(
+    redis_client: Redis,
+) -> None:
+    gate = RedisPermissionGate(redis_client)
+    sub_a = await gate.subscribe_prompts(tenant_id="t-A", task_id="task-1")
+    sub_b = await gate.subscribe_prompts(tenant_id="t-B", task_id="task-1")
+
+    a_prompt = PermissionPrompt(
+        prompt_id="prm-iso-a",
+        tenant_id="t-A",
+        task_id="task-1",
+        tool_name="shell",
+        summary="A only",
+        payload={},
+        created_at=datetime(2026, 6, 23, tzinfo=UTC),
+    )
+
+    async def deliver_after_delay() -> None:
+        await asyncio.sleep(0.2)
+        await gate.deliver(_decision("prm-iso-a"))
+
+    deliver_task = asyncio.create_task(deliver_after_delay())
+    requester = asyncio.create_task(gate.request(a_prompt, timeout_seconds=3.0))
+    try:
+        a_received = await asyncio.wait_for(sub_a.__anext__(), timeout=3.0)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(sub_b.__anext__(), timeout=0.3)
+        await requester
+    finally:
+        await deliver_task
+        await sub_a.aclose()
+        await sub_b.aclose()
+        await gate.close()
+
+    assert a_received.prompt_id == "prm-iso-a"

@@ -176,6 +176,39 @@ class TaskClient:
                 f"events stream transport error: {exc!s}",
             ) from exc
 
+    async def stream_permission_prompts(self, task_id: str) -> AsyncIterator[dict[str, Any]]:
+        """Yield parsed permission prompts from /v1/tasks/{id}/permissions/stream."""
+        path = f"/v1/tasks/{task_id}/permissions/stream"
+        try:
+            async with self._client.stream("GET", path) as resp:
+                if resp.status_code != 200:
+                    await resp.aread()
+                    raise _http_error(resp, expected="200 SSE")
+                async for prompt in _iter_sse_data(resp):
+                    yield prompt
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise CLIError(
+                EXIT_NETWORK,
+                f"permission stream transport error: {exc!s}",
+            ) from exc
+
+    async def decide_permission(
+        self, task_id: str, prompt_id: str, *, allow: bool, reason: str | None = None
+    ) -> dict[str, Any]:
+        """POST /v1/tasks/{id}/permissions/{prompt_id}/decide."""
+        body: dict[str, Any] = {"allow": allow}
+        if reason is not None:
+            body["reason"] = reason
+        path = f"/v1/tasks/{task_id}/permissions/{prompt_id}/decide"
+        try:
+            resp = await self._client.post(path, json=body)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise CLIError(
+                EXIT_NETWORK,
+                f"network error posting decision: {exc!s}",
+            ) from exc
+        return _decode_or_raise(resp)
+
 
 # --------------------------------------------------------------- helpers
 

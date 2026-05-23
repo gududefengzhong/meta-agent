@@ -59,6 +59,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Suppress lifecycle event lines on stderr (chunks still print)",
     )
+    p_tail.add_argument(
+        "--no-interactive",
+        action="store_true",
+        help=(
+            "Skip the interactive permission prompt handler. Inline "
+            "permission prompts emitted by the worker will be ignored "
+            "(and the agent will wait until its 120s timeout)."
+        ),
+    )
     p_tail.set_defaults(func=cmd_tail)
 
     p_run = sub.add_parser("run", help="Submit a task and stream until terminal")
@@ -67,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--quiet-events",
         action="store_true",
         help="Suppress lifecycle event lines on stderr",
+    )
+    p_run.add_argument(
+        "--no-interactive",
+        action="store_true",
+        help=("Skip the interactive permission prompt handler (same semantics as on ``tail``)."),
     )
     p_run.set_defaults(func=cmd_run)
 

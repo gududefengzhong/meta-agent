@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from pydantic import ValidationError
@@ -102,6 +103,57 @@ class RedisPermissionGate(PermissionGate):
             await self._client.publish(channel, decision.model_dump_json())
         except RedisError as exc:
             raise PermissionGateError(f"redis publish failed for {channel!r}") from exc
+
+    async def subscribe_prompts(
+        self,
+        *,
+        tenant_id: str,
+        task_id: str,
+    ) -> AsyncGenerator[PermissionPrompt, None]:
+        channel = self._prompt_channel(tenant_id, task_id)
+        pubsub: Any = self._client.pubsub()
+        try:
+            await pubsub.subscribe(channel)
+        except RedisError as exc:
+            await _safe_close_pubsub(pubsub)
+            raise PermissionGateError(f"redis subscribe failed for {channel!r}") from exc
+        return self._drain_prompts(pubsub, channel)
+
+    async def _drain_prompts(
+        self, pubsub: Any, channel: str
+    ) -> AsyncGenerator[PermissionPrompt, None]:
+        try:
+            async for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                data = message.get("data")
+                if isinstance(data, bytes):
+                    try:
+                        payload = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        logger.warning(
+                            "permission.gate.prompt_invalid_utf8",
+                            extra={"channel": channel, "bytes": len(data)},
+                        )
+                        continue
+                elif isinstance(data, str):
+                    payload = data
+                else:
+                    logger.warning(
+                        "permission.gate.prompt_unexpected_data_type",
+                        extra={"channel": channel, "type": type(data).__name__},
+                    )
+                    continue
+                try:
+                    yield PermissionPrompt.model_validate_json(payload)
+                except ValidationError as exc:
+                    logger.warning(
+                        "permission.gate.invalid_prompt",
+                        extra={"channel": channel, "error": str(exc)[:200]},
+                    )
+                    continue
+        finally:
+            await _safe_close_pubsub(pubsub)
 
     async def close(self) -> None:
         # The shared client is owned by the lifespan that built it.

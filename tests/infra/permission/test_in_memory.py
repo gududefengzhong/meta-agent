@@ -128,3 +128,117 @@ async def _deliver_after(
 ) -> None:
     await asyncio.sleep(delay)
     await gate.deliver(decision)
+
+
+# ----------------------------------------------------- subscribe_prompts
+
+
+async def test_subscribe_prompts_receives_prompts_published_after_subscribe() -> None:
+    gate = InMemoryPermissionGate()
+    sub = await gate.subscribe_prompts(tenant_id="t-1", task_id="task-1")
+
+    async def request_after_delay() -> None:
+        await asyncio.sleep(0.01)
+        await gate.deliver(_decision())
+
+    deliver = asyncio.create_task(request_after_delay())
+    requester = asyncio.create_task(gate.request(_prompt(), timeout_seconds=1.0))
+    try:
+        received = await asyncio.wait_for(sub.__anext__(), timeout=1.0)
+        await requester
+    finally:
+        await deliver
+        await sub.aclose()
+
+    assert received.prompt_id == "prm-1"
+    assert received.tool_name == "shell"
+
+
+async def test_subscribe_prompts_tenant_isolated() -> None:
+    gate = InMemoryPermissionGate()
+    sub_a = await gate.subscribe_prompts(tenant_id="t-A", task_id="task-1")
+    sub_b = await gate.subscribe_prompts(tenant_id="t-B", task_id="task-1")
+
+    a_prompt = PermissionPrompt(
+        prompt_id="prm-a",
+        tenant_id="t-A",
+        task_id="task-1",
+        tool_name="shell",
+        summary="A only",
+        payload={},
+        created_at=datetime(2026, 6, 23, tzinfo=UTC),
+    )
+
+    async def deliver_after_delay() -> None:
+        await asyncio.sleep(0.02)
+        await gate.deliver(_decision("prm-a"))
+
+    deliver = asyncio.create_task(deliver_after_delay())
+    requester = asyncio.create_task(gate.request(a_prompt, timeout_seconds=1.0))
+    try:
+        a_received = await asyncio.wait_for(sub_a.__anext__(), timeout=1.0)
+        # tenant B's subscriber must NOT receive tenant A's prompt
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(sub_b.__anext__(), timeout=0.05)
+        await requester
+    finally:
+        await deliver
+        await sub_a.aclose()
+        await sub_b.aclose()
+
+    assert a_received.prompt_id == "prm-a"
+
+
+async def test_subscribe_prompts_aclose_before_iteration_unregisters() -> None:
+    gate = InMemoryPermissionGate()
+    sub = await gate.subscribe_prompts(tenant_id="t-1", task_id="task-1")
+    # No iteration — close immediately. Must NOT leak the queue.
+    await sub.aclose()
+    # Internal map is empty: confirm registration was reversed.
+    assert gate._prompt_channels == {}
+
+
+async def test_subscribe_prompts_two_subscribers_each_receive_prompt() -> None:
+    gate = InMemoryPermissionGate()
+    sub_a = await gate.subscribe_prompts(tenant_id="t-1", task_id="task-1")
+    sub_b = await gate.subscribe_prompts(tenant_id="t-1", task_id="task-1")
+
+    async def deliver_after_delay() -> None:
+        await asyncio.sleep(0.02)
+        await gate.deliver(_decision())
+
+    deliver = asyncio.create_task(deliver_after_delay())
+    requester = asyncio.create_task(gate.request(_prompt(), timeout_seconds=1.0))
+    try:
+        a = await asyncio.wait_for(sub_a.__anext__(), timeout=1.0)
+        b = await asyncio.wait_for(sub_b.__anext__(), timeout=1.0)
+        await requester
+    finally:
+        await deliver
+        await sub_a.aclose()
+        await sub_b.aclose()
+
+    assert a.prompt_id == "prm-1"
+    assert b.prompt_id == "prm-1"
+
+
+async def test_subscribe_prompts_subscriber_added_after_request_misses_it() -> None:
+    """Pub/sub: a subscriber that registers AFTER ``request`` started doesn't see the prompt."""
+
+    gate = InMemoryPermissionGate()
+
+    async def deliver_after_delay() -> None:
+        await asyncio.sleep(0.05)
+        await gate.deliver(_decision())
+
+    deliver = asyncio.create_task(deliver_after_delay())
+    requester = asyncio.create_task(gate.request(_prompt(), timeout_seconds=1.0))
+    await asyncio.sleep(0.01)  # request has already fanned out
+    sub = await gate.subscribe_prompts(tenant_id="t-1", task_id="task-1")
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(sub.__anext__(), timeout=0.05)
+        await requester
+    finally:
+        await deliver
+        await sub.aclose()
