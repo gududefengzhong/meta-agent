@@ -11,13 +11,18 @@ in the persistence layer is always satisfied.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 
 from meta_agent.api.deps import (
     get_approval_gateway,
+    get_audit_repo,
     get_db_pool,
     get_outbox_repo,
     get_request_ctx,
@@ -35,8 +40,10 @@ from meta_agent.api.schemas import (
 )
 from meta_agent.core.domain.outbox import OutboxEvent
 from meta_agent.core.domain.task import Task, TaskState
+from meta_agent.core.ports.repository import TERMINAL_TASK_STATES
 from meta_agent.infra.persistence import (
     DatabasePool,
+    PgAuditRepository,
     PgOutboxRepository,
     PgTaskRepository,
     PgTrajectoryRepository,
@@ -298,4 +305,122 @@ async def get_task_trajectory(
     return TrajectoryResponse(
         items=[item.model_dump(mode="json") for item in page.items],
         truncated=page.truncated,
+    )
+
+
+_SSE_POLL_INTERVAL_S = 1.5
+"""Default delay between polls for new audit rows in the SSE loop.
+
+Trade-off: lower means snappier client updates and higher DB load;
+higher means the opposite. 1.5s is the sweet spot for the bug_fix
+class of tasks (a few events per second peak) without turning the
+audit table into a hot read partition. Operators that need real-time
+should switch to the Redis pub/sub variant — out of γ-D scope.
+"""
+
+_SSE_HEARTBEAT_INTERVAL_S = 15.0
+"""How often to send an SSE keepalive comment.
+
+Anything past ~30s and intermediaries (proxies, load balancers) start
+silently closing the connection. 15s is conservative and keeps the
+heartbeat traffic negligible (one byte per interval per stream).
+"""
+
+_SSE_MAX_DURATION_S = 30 * 60.0
+"""Hard cap on a single SSE connection lifetime.
+
+The client is expected to reconnect with the last seen cursor; this
+ceiling stops runaway connections from accumulating in the API tier
+when a client forgets to close. The task state machine itself does
+not need a long-lived stream — terminal states close the loop early.
+"""
+
+
+@router.get(
+    "/tasks/{task_id}/events",
+    summary="Stream task lifecycle events (SSE)",
+    responses={200: {"content": {"text/event-stream": {}}}},
+)
+async def stream_task_events(
+    request: Request,
+    task_id: str,
+    last_event_id: str | None = Query(default=None, max_length=128),
+    last_event_at: datetime | None = Query(default=None),
+    ctx: RequestContext = Depends(get_request_ctx),
+    task_repo: PgTaskRepository = Depends(get_task_repo),
+    audit_repo: PgAuditRepository = Depends(get_audit_repo),
+) -> StreamingResponse:
+    """Server-Sent Events stream of audit rows for one task.
+
+    Resumes from ``(last_event_at, last_event_id)`` if both are
+    supplied — the client should pass back the ``id:`` of the most
+    recent event it saw to avoid re-receiving rows on reconnect. The
+    stream closes when the task enters a terminal state or after
+    :data:`_SSE_MAX_DURATION_S` (whichever comes first); the client
+    must reconnect to keep watching.
+
+    Polling-based v0: a future PR can swap the inner loop for a
+    Redis pub/sub listener without changing the wire shape.
+    """
+
+    with bind_context(ctx):
+        task = await task_repo.get(ctx.tenant_id, task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"task {task_id!r} not found",
+        )
+
+    cursor: tuple[datetime, str] | None = None
+    if last_event_at is not None and last_event_id is not None:
+        cursor = (last_event_at, last_event_id)
+
+    async def event_iterator() -> AsyncIterator[bytes]:
+        nonlocal cursor
+        start = datetime.now(UTC)
+        last_heartbeat = start
+        with bind_context(ctx):
+            while True:
+                if await request.is_disconnected():
+                    return
+                if (datetime.now(UTC) - start).total_seconds() >= _SSE_MAX_DURATION_S:
+                    return
+                events = await audit_repo.list_for_task_since(
+                    ctx.tenant_id, task_id, after=cursor, limit=100
+                )
+                for ev in events:
+                    cursor = (ev.occurred_at, ev.event_id)
+                    body = json.dumps(
+                        {
+                            "event_id": ev.event_id,
+                            "task_id": ev.task_id,
+                            "trace_id": ev.trace_id,
+                            "action": ev.action,
+                            "payload": ev.payload,
+                            "occurred_at": ev.occurred_at.isoformat(),
+                        }
+                    )
+                    yield f"id: {ev.event_id}\nevent: {ev.action}\ndata: {body}\n\n".encode()
+                # Refresh the task each poll so a terminal transition
+                # observed by the database closes the stream cleanly.
+                current = await task_repo.get(ctx.tenant_id, task_id)
+                if current is not None and current.state in TERMINAL_TASK_STATES:
+                    yield (
+                        f'event: task.terminal\ndata: {{"state": "{current.state.value}"}}\n\n'
+                    ).encode()
+                    return
+                now = datetime.now(UTC)
+                if (now - last_heartbeat).total_seconds() >= _SSE_HEARTBEAT_INTERVAL_S:
+                    yield b": heartbeat\n\n"
+                    last_heartbeat = now
+                await asyncio.sleep(_SSE_POLL_INTERVAL_S)
+
+    return StreamingResponse(
+        event_iterator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable nginx response buffering
+        },
     )

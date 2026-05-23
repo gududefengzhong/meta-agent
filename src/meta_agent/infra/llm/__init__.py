@@ -11,6 +11,7 @@ from meta_agent.infra.llm.config import OpenRouterConfig
 from meta_agent.infra.llm.metered import MeteredLLMClient
 from meta_agent.infra.llm.openrouter import OpenRouterClient
 from meta_agent.infra.llm.rate_limited import RateLimitedLLMClient
+from meta_agent.infra.llm.redacting import RedactingLLMClient
 from meta_agent.infra.llm.routing import RoutingLLMClient, StaticLLMRouter
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "OpenRouterClient",
     "OpenRouterConfig",
     "RateLimitedLLMClient",
+    "RedactingLLMClient",
     "RoutingLLMClient",
     "StaticLLMRouter",
 ]
