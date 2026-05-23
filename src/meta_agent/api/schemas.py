@@ -81,6 +81,20 @@ class AbortRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=1_000)
 
 
+class TrajectoryResponse(BaseModel):
+    """Body of ``GET /v1/tasks/{task_id}/trajectory``.
+
+    The wire shape forwards the domain :class:`TrajectoryPage` 1:1 so
+    clients can rely on the discriminated-union ``kind`` field
+    (``"audit"`` / ``"checkpoint"`` / ``"usage"``) to render each row.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[dict[str, Any]]
+    truncated: bool = False
+
+
 class TaskResultResponse(BaseModel):
     """Shape returned by ``GET /v1/tasks/{task_id}/result``."""
 

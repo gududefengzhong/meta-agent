@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from meta_agent.api.deps import (
     get_approval_gateway,
@@ -23,6 +23,7 @@ from meta_agent.api.deps import (
     get_request_ctx,
     get_task_repo,
     get_task_topic,
+    get_trajectory_repo,
 )
 from meta_agent.api.schemas import (
     AbortRequest,
@@ -30,10 +31,16 @@ from meta_agent.api.schemas import (
     SubmitTaskRequest,
     TaskResponse,
     TaskResultResponse,
+    TrajectoryResponse,
 )
 from meta_agent.core.domain.outbox import OutboxEvent
 from meta_agent.core.domain.task import Task, TaskState
-from meta_agent.infra.persistence import DatabasePool, PgOutboxRepository, PgTaskRepository
+from meta_agent.infra.persistence import (
+    DatabasePool,
+    PgOutboxRepository,
+    PgTaskRepository,
+    PgTrajectoryRepository,
+)
 from meta_agent.infra.persistence.approval_gateway import (
     TaskApprovalGateway,
     TaskNotAwaitingApprovalError,
@@ -248,4 +255,47 @@ async def abort_task(
         budget_policy=task.budget_policy,
         created_at=task.created_at,
         updated_at=task.updated_at,
+    )
+
+
+@router.get(
+    "/tasks/{task_id}/trajectory",
+    response_model=TrajectoryResponse,
+    summary="Get the merged audit + checkpoint + LLM-usage timeline for one task",
+)
+async def get_task_trajectory(
+    task_id: str,
+    limit_per_source: int = Query(default=1000, ge=1, le=1000),
+    ctx: RequestContext = Depends(get_request_ctx),
+    task_repo: PgTaskRepository = Depends(get_task_repo),
+    trajectory_repo: PgTrajectoryRepository = Depends(get_trajectory_repo),
+) -> TrajectoryResponse:
+    """Return a time-ordered timeline of everything that happened to a task.
+
+    Merges rows from ``audit_events``, ``task_checkpoints`` and
+    ``llm_usage_logs`` into a single list, ordered by occurrence
+    timestamp. Each item carries a ``kind`` discriminator
+    (``"audit"`` / ``"checkpoint"`` / ``"usage"``) so the API consumer
+    or a future Web UI can render them appropriately.
+
+    ``truncated`` is ``True`` when any of the three source queries hit
+    its row cap; the operator should narrow the time window via the
+    paginated drill-down endpoints that land in γ-B-2 / γ-C.
+    """
+
+    with bind_context(ctx):
+        task = await task_repo.get(ctx.tenant_id, task_id)
+        if task is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"task {task_id!r} not found",
+            )
+        page = await trajectory_repo.list_for_task(
+            ctx.tenant_id,
+            task_id,
+            limit_per_source=limit_per_source,
+        )
+    return TrajectoryResponse(
+        items=[item.model_dump(mode="json") for item in page.items],
+        truncated=page.truncated,
     )

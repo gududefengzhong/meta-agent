@@ -20,6 +20,13 @@ from meta_agent.core.domain.task import (
     TaskType,
 )
 from meta_agent.core.domain.tenant import Tenant
+from meta_agent.core.domain.trajectory import (
+    TrajectoryAuditItem,
+    TrajectoryCheckpointItem,
+    TrajectoryItem,
+    TrajectoryPage,
+    TrajectoryUsageItem,
+)
 from meta_agent.core.domain.workspace import Workspace
 
 __all__ = [
@@ -40,6 +47,11 @@ __all__ = [
     "TaskState",
     "TaskType",
     "Tenant",
+    "TrajectoryAuditItem",
+    "TrajectoryCheckpointItem",
+    "TrajectoryItem",
+    "TrajectoryPage",
+    "TrajectoryUsageItem",
     "Workspace",
     "compute_content_hash",
 ]
