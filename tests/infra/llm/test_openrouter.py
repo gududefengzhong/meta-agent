@@ -20,6 +20,7 @@ from meta_agent.core.ports.llm import (
     LLMInvalidRequestError,
     LLMRateLimitedError,
     LLMRequest,
+    LLMStreamChunk,
     LLMTransientError,
     MessageRole,
 )
@@ -448,5 +449,190 @@ async def test_response_with_null_content_and_no_tool_calls_raises_transient() -
     try:
         with pytest.raises(LLMTransientError):
             await client.complete(_request())
+    finally:
+        await client.close()
+
+
+# --------------------------------------------------------------------- streaming
+
+
+def _sse_bytes(*events: str) -> bytes:
+    """Render an OpenAI-compatible SSE response body from raw event payloads."""
+    return ("".join(f"data: {ev}\n\n" for ev in events)).encode("utf-8")
+
+
+async def _drain_stream(client: OpenRouterClient) -> list[LLMStreamChunk]:
+    chunks: list[LLMStreamChunk] = []
+    async for chunk in client.stream(_request()):
+        chunks.append(chunk)
+    return chunks
+
+
+async def test_stream_emits_content_deltas_then_terminal_chunk() -> None:
+    received: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        received.append(req)
+        return httpx.Response(
+            200,
+            content=_sse_bytes(
+                '{"id":"resp-1","model":"deepseek/deepseek-chat",'
+                '"choices":[{"index":0,"delta":{"content":"hel"}}]}',
+                '{"choices":[{"index":0,"delta":{"content":"lo"}}]}',
+                '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+                '"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}',
+                "[DONE]",
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = _client(handler)
+    try:
+        chunks = await _drain_stream(client)
+    finally:
+        await client.close()
+
+    body = received[0].content.decode()
+    assert '"stream":true' in body
+    contents = [c.content_delta for c in chunks if c.content_delta]
+    assert "".join(contents) == "hello"
+    terminal = chunks[-1]
+    assert terminal.finish_reason == "stop"
+    assert terminal.usage is not None
+    assert terminal.usage.total_tokens == 7
+
+
+async def test_stream_assembles_tool_call_deltas_with_partial_arguments() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_sse_bytes(
+                '{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,'
+                '"id":"call_1","function":{"name":"fs_read","arguments":"{\\"pa"}}]}}]}',
+                '{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,'
+                '"function":{"arguments":"th\\":\\"a.py\\"}"}}]}}]}',
+                '{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+                "[DONE]",
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = _client(handler)
+    try:
+        chunks = await _drain_stream(client)
+    finally:
+        await client.close()
+
+    deltas = [d for c in chunks for d in c.tool_call_deltas]
+    assert [d.index for d in deltas] == [0, 0]
+    assert deltas[0].id == "call_1"
+    assert deltas[0].name == "fs_read"
+    assert deltas[0].arguments_delta == '{"pa'
+    assert deltas[1].id is None
+    assert deltas[1].arguments_delta == 'th":"a.py"}'
+    assert chunks[-1].finish_reason == "tool_call"
+
+
+async def test_stream_skips_non_data_lines_and_heartbeats() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        body = (
+            b": openrouter keepalive\n\n"
+            b"event: ping\ndata: {}\n\n"
+            b'data: {"choices":[{"index":0,"delta":{"content":"a"}}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    client = _client(handler)
+    try:
+        chunks = await _drain_stream(client)
+    finally:
+        await client.close()
+
+    contents = [c.content_delta for c in chunks if c.content_delta]
+    assert contents == ["a"]
+
+
+async def test_stream_raises_invalid_request_before_any_chunk_on_4xx() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "bad request"})
+
+    client = _client(handler, config=_config(max_retries=0))
+    try:
+        with pytest.raises(LLMInvalidRequestError):
+            await _drain_stream(client)
+    finally:
+        await client.close()
+
+
+async def test_stream_raises_auth_error_without_retry() -> None:
+    calls = {"n": 0}
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(401, json={"error": "auth"})
+
+    client = _client(handler, config=_config(max_retries=2))
+    try:
+        with pytest.raises(LLMAuthError):
+            await _drain_stream(client)
+    finally:
+        await client.close()
+    assert calls["n"] == 1
+
+
+async def test_stream_retries_on_5xx_then_streams_successfully() -> None:
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": "upstream"})
+        return httpx.Response(
+            200,
+            content=_sse_bytes(
+                '{"choices":[{"index":0,"delta":{"content":"ok"}}]}',
+                '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+                "[DONE]",
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = _client(handler, sleeps=sleeps)
+    try:
+        chunks = await _drain_stream(client)
+    finally:
+        await client.close()
+    assert calls["n"] == 2
+    assert sleeps == [0.01]
+    assert "".join(c.content_delta for c in chunks) == "ok"
+
+
+async def test_stream_raises_rate_limited_with_retry_after() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": "rate"}, headers={"retry-after": "0.05"})
+
+    client = _client(handler, config=_config(max_retries=0))
+    try:
+        with pytest.raises(LLMRateLimitedError) as excinfo:
+            await _drain_stream(client)
+    finally:
+        await client.close()
+    assert excinfo.value.retry_after == 0.05
+
+
+async def test_stream_malformed_json_in_event_raises_transient() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"data: {not valid json\n\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = _client(handler, config=_config(max_retries=0))
+    try:
+        with pytest.raises(LLMTransientError):
+            await _drain_stream(client)
     finally:
         await client.close()

@@ -20,6 +20,22 @@ The decorator never raises into the caller. Redaction failures
 against) fall back to forwarding the original request unchanged so
 the LLM stack does not become a single point of failure.
 
+Streaming caveat
+================
+:meth:`stream` redacts the request once up front, then scrubs each
+emitted chunk's ``content_delta`` and tool-call ``arguments_delta``
+in isolation. A secret whose textual form is split across chunk
+boundaries (e.g. half an API key in chunk N and the other half in
+chunk N+1) will not match either chunk's regex and slip through. The
+regex pipeline is line-aware and works on complete substrings.
+
+Deployments needing strict guaranteed redaction MUST call
+:meth:`complete` (which buffers the full response before scrubbing).
+For interactive code-agent UX, ``stream`` is a best-effort scrub
+acceptable because the model is unlikely to emit secrets it has not
+already been prompted with — and the prompt side was scrubbed
+synchronously.
+
 Audit hook:
 * Each request that contained a redacted token emits an audit row
   ``llm.redaction.applied`` so operators can watch the redaction
@@ -30,7 +46,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 
 from meta_agent.core.domain.audit import AuditEvent
@@ -40,6 +56,8 @@ from meta_agent.core.ports.llm import (
     LLMClient,
     LLMRequest,
     LLMResponse,
+    LLMStreamChunk,
+    ToolCallDelta,
 )
 from meta_agent.core.ports.tools import ToolCall
 from meta_agent.infra.redaction.redactor import RedactionReport, Redactor
@@ -75,6 +93,25 @@ class RedactingLLMClient(LLMClient):
         if response_report.any_redacted:
             await self._audit("llm.redaction.applied_to_response", response_report)
         return scrubbed_response
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
+        """Scrub the request once, then scrub each emitted chunk.
+
+        See the module docstring for the chunk-boundary caveat: this
+        is best-effort redaction on the streaming surface.
+        """
+
+        scrubbed_request, request_report = self._scrub_request(request)
+        if request_report.any_redacted:
+            await self._audit("llm.redaction.applied_to_request", request_report)
+        cumulative: dict[str, int] = {}
+        async for chunk in self._inner.stream(scrubbed_request):
+            scrubbed_chunk, chunk_report = self._scrub_chunk(chunk)
+            for label, count in chunk_report.hits.items():
+                cumulative[label] = cumulative.get(label, 0) + count
+            yield scrubbed_chunk
+        if cumulative:
+            await self._audit("llm.redaction.applied_to_response", RedactionReport(hits=cumulative))
 
     async def close(self) -> None:
         await self._inner.close()
@@ -132,6 +169,31 @@ class RedactingLLMClient(LLMClient):
 
         new_args = {key: self._scrub_value(val, cumulative) for key, val in tc.arguments.items()}
         return tc.model_copy(update={"arguments": new_args})
+
+    def _scrub_chunk(self, chunk: LLMStreamChunk) -> tuple[LLMStreamChunk, RedactionReport]:
+        """Best-effort per-chunk scrub (see streaming caveat in module doc)."""
+
+        cumulative: dict[str, int] = {}
+        scrubbed_content, content_report = self._redactor.scrub(chunk.content_delta)
+        for label, count in content_report.hits.items():
+            cumulative[label] = cumulative.get(label, 0) + count
+        new_deltas: tuple[ToolCallDelta, ...] = chunk.tool_call_deltas
+        if chunk.tool_call_deltas:
+            new_deltas = tuple(
+                self._scrub_tool_delta(d, cumulative) for d in chunk.tool_call_deltas
+            )
+        new_chunk = chunk.model_copy(
+            update={"content_delta": scrubbed_content, "tool_call_deltas": new_deltas}
+        )
+        return new_chunk, RedactionReport(hits=cumulative)
+
+    def _scrub_tool_delta(self, delta: ToolCallDelta, cumulative: dict[str, int]) -> ToolCallDelta:
+        if not delta.arguments_delta:
+            return delta
+        scrubbed_args, args_report = self._redactor.scrub(delta.arguments_delta)
+        for label, count in args_report.hits.items():
+            cumulative[label] = cumulative.get(label, 0) + count
+        return delta.model_copy(update={"arguments_delta": scrubbed_args})
 
     def _scrub_value(self, value: object, cumulative: dict[str, int]) -> object:
         if isinstance(value, str):
