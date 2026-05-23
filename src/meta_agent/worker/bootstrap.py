@@ -105,6 +105,10 @@ from meta_agent.infra.persistence import (
     build_pool,
 )
 from meta_agent.infra.persistence.pool import PoolConfig
+from meta_agent.infra.persistence.webhook_repo import (
+    PgWebhookDeliveryRepository,
+    PgWebhookSubscriptionRepository,
+)
 from meta_agent.infra.prompt_registry import (
     CachingPromptRegistry,
     PgPromptRegistry,
@@ -130,6 +134,7 @@ from meta_agent.infra.tools import (
     TreeSitterCodeRetrievalTool,
     register_local_workspace_tools,
 )
+from meta_agent.infra.webhook import WebhookFanout
 from meta_agent.infra.workspace import (
     DockerWorkspaceConfig,
     DockerWorkspaceManager,
@@ -892,6 +897,19 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     workspaces = build_workspace_manager(settings)
     submitter = PgTaskSubmitter(pool, task_repo, outbox_repo)
     chain_registry = build_chain_registry()
+    # Phase γ-B-2: webhook fanout sits on every audit emission. The
+    # subscription + delivery rows live in Postgres, so the fanout is
+    # always wired in production; unit tests construct WorkerLoop
+    # without it. The watched actions list is intentionally narrow at
+    # v1 — only ``task.awaiting_approval`` needs the operator push, the
+    # rest of the audit trail is already queryable via Trajectory API.
+    webhook_subscription_repo = PgWebhookSubscriptionRepository(pool)
+    webhook_delivery_repo = PgWebhookDeliveryRepository(pool)
+    webhook_fanout = WebhookFanout(
+        subscriptions=webhook_subscription_repo,
+        deliveries=webhook_delivery_repo,
+        watched_actions=frozenset({"task.awaiting_approval"}),
+    )
     worker = WorkerLoop(
         stream=consumer,
         tasks=task_repo,
@@ -903,6 +921,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         chain_registry=chain_registry,
         outbox=outbox_repo,
         task_topic=settings.task_topic,
+        webhook_fanout=webhook_fanout,
         config=WorkerConfig(max_attempts=settings.max_attempts, block_ms=settings.block_ms),
     )
     # Phase γ-A startup recovery: re-enqueue any task left in RUNNING

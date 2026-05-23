@@ -114,6 +114,10 @@ from meta_agent.core.ports.tools import (
     WebFetchTool,
 )
 from meta_agent.core.ports.trajectory import TrajectoryRepository
+from meta_agent.core.ports.webhook import (
+    WebhookDeliveryRepository,
+    WebhookSubscriptionRepository,
+)
 from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 
 __all__ = [
@@ -208,6 +212,8 @@ __all__ = [
     "UsageGroupBy",
     "WebFetchOutcome",
     "WebFetchTool",
+    "WebhookDeliveryRepository",
+    "WebhookSubscriptionRepository",
     "WorkspaceError",
     "WorkspaceManager",
 ]
