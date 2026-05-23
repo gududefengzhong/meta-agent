@@ -284,3 +284,130 @@ def test_diff_requires_one_of_instance_id_or_base_commit(tmp_path: Path) -> None
     workspace.mkdir()
     with pytest.raises(SystemExit):
         main(["diff", str(workspace)])
+
+
+# ---------------------------------------------------- evaluate command
+
+
+def _script_docker(monkeypatch: pytest.MonkeyPatch, responses: list[tuple[int, str, str]]) -> None:
+    """Inject a scripted ``_docker_run`` that emits ``responses`` in order."""
+
+    from eval.swebench.containers import DockerError
+
+    from eval.swebench import containers
+
+    script = iter(responses)
+
+    def fake(
+        cmd: list[str],
+        *,
+        what: str,
+        input_text: str | None = None,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            rc, out, err = next(script)
+        except StopIteration as exc:
+            raise AssertionError(f"docker script exhausted at {what!r}") from exc
+        if check and rc != 0:
+            raise DockerError(f"{what} failed: {err or out}")
+        return subprocess.CompletedProcess(cmd, rc, out, err)
+
+    monkeypatch.setattr(containers, "_docker_run", fake)
+
+
+def test_evaluate_resolved_exits_0(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A resolved evaluation prints the InstanceResult JSON + summary, exits 0."""
+
+    from eval.swebench.__main__ import EXIT_OK
+
+    _script_docker(
+        monkeypatch,
+        [
+            (0, "", ""),  # docker image inspect → cached
+            (0, "", ""),  # docker run
+            (0, "", ""),  # exec: git apply test_patch
+            (0, "", ""),  # exec: git apply agent patch
+            (0, "PASSED tests/test_calc.py::test_marker\n", ""),  # exec: pytest
+            (0, "", ""),  # docker rm
+        ],
+    )
+    dataset = _write_local_dataset(tmp_path, base_commit="abc123", instance_id="test__repo-1")
+    patch_file = tmp_path / "agent.patch"
+    patch_file.write_text("diff --git a/x b/x\n")
+
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "evaluate",
+            "test__repo-1",
+            "--patch",
+            str(patch_file),
+        ]
+    )
+    assert code == EXIT_OK
+    out = capsys.readouterr()
+    payload = json.loads(out.out)
+    assert payload["instance_id"] == "test__repo-1"
+    assert "RESOLVED" in out.err
+
+
+def test_evaluate_not_resolved_exits_5(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from eval.swebench.__main__ import EXIT_NOT_RESOLVED
+
+    _script_docker(
+        monkeypatch,
+        [
+            (0, "", ""),
+            (0, "", ""),
+            (0, "", ""),
+            (0, "", ""),
+            (1, "FAILED tests/test_calc.py::test_marker - AssertionError\n", ""),
+            (0, "", ""),
+        ],
+    )
+    dataset = _write_local_dataset(tmp_path, base_commit="abc123", instance_id="test__repo-1")
+    patch_file = tmp_path / "agent.patch"
+    patch_file.write_text("diff --git a/x b/x\n")
+
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "evaluate",
+            "test__repo-1",
+            "--patch",
+            str(patch_file),
+        ]
+    )
+    assert code == EXIT_NOT_RESOLVED
+    assert "FAILED" in capsys.readouterr().err
+
+
+def test_evaluate_unknown_instance_id_exits_3(
+    tmp_path: Path,
+) -> None:
+    dataset = _write_local_dataset(tmp_path, base_commit="abc123", instance_id="test__repo-1")
+    patch_file = tmp_path / "agent.patch"
+    patch_file.write_text("diff\n")
+
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "evaluate",
+            "nonexistent",
+            "--patch",
+            str(patch_file),
+        ]
+    )
+    assert code == EXIT_NOT_FOUND
