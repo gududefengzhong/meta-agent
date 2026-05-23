@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
+from meta_agent.core.orchestration.llm_streaming import aggregate_stream_to_response
 from meta_agent.core.orchestration.state import END, TaskRunState
 from meta_agent.core.orchestration.step_kinds import STEP_CHAT
 from meta_agent.core.ports.llm import (
@@ -112,7 +113,7 @@ def build_simple_chat_graph(deps: GraphDeps) -> Graph:
         if not isinstance(raw, dict):
             raise GraphError("simple_chat: prepare node did not persist _llm_request")
         request = LLMRequest.model_validate(raw)
-        response = await llm.complete(request)
+        response = await aggregate_stream_to_response(llm, request)
         return NodeResult(data_update={"_llm_response": response.model_dump(mode="json")})
 
     async def finalize(state: TaskRunState) -> NodeResult:

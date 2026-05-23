@@ -45,6 +45,7 @@ from meta_agent.core.orchestration.budget_gate import check_budget_policy
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
 from meta_agent.core.orchestration.human_gate import HUMAN_FEEDBACK_KEY, build_human_gate
+from meta_agent.core.orchestration.llm_streaming import aggregate_stream_to_response
 from meta_agent.core.orchestration.state import END, TaskRunState
 from meta_agent.core.orchestration.step_kinds import STEP_EDIT, STEP_PLAN
 from meta_agent.core.ports.llm import (
@@ -428,7 +429,8 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
         plan_prompt = await _require_prompt_registry().fetch(
             BUG_FIX_PLAN_PROMPT_ID, tenant_id=state.tenant_id
         )
-        response = await llm.complete(
+        response = await aggregate_stream_to_response(
+            llm,
             LLMRequest(
                 messages=_plan_messages(
                     plan_prompt.content,
@@ -440,7 +442,7 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
                 prompt_id=plan_prompt.prompt_id,
                 prompt_version=plan_prompt.version,
                 step_kind=STEP_PLAN,
-            )
+            ),
         )
         # Clear the consumed feedback so subsequent iterations do not
         # double-render it; the next reject cycle writes a fresh value.
@@ -468,13 +470,14 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
             max_files=_MAX_FILES,
             max_file_bytes=_MAX_FILE_BYTES,
         )
-        response = await llm.complete(
+        response = await aggregate_stream_to_response(
+            llm,
             LLMRequest(
                 messages=_patch_messages(rendered_system, issue, plan_text, snapshot),
                 prompt_id=patch_prompt.prompt_id,
                 prompt_version=patch_prompt.version,
                 step_kind=STEP_EDIT,
-            )
+            ),
         )
         patches = _parse_patch(response.content, allow_list=set(targets))
         sha, diff_stat, files_changed = await _commit_patch(workspace, patches, issue, branch)
