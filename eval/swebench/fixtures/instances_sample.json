@@ -1,0 +1,46 @@
+[
+  {
+    "instance_id": "django__django-13768",
+    "repo": "django/django",
+    "base_commit": "0c42cdf0d2422f4c080e93594d5d15381d6e955e",
+    "problem_statement": "Log exceptions handled in Signal.send_robust()\n\nWhen a receiver raises during signal dispatch via send_robust(), the exception is captured into the return list but never logged. Operators have no signal in their logs that something silently broke. Add a logger.exception() call so failures are visible.",
+    "patch": "diff --git a/django/dispatch/dispatcher.py b/django/dispatch/dispatcher.py\n--- a/django/dispatch/dispatcher.py\n+++ b/django/dispatch/dispatcher.py\n@@ -1,5 +1,7 @@\n+import logging\n import threading\n \n+logger = logging.getLogger('django.dispatch')\n",
+    "test_patch": "diff --git a/tests/dispatch/tests.py b/tests/dispatch/tests.py\n--- a/tests/dispatch/tests.py\n+++ b/tests/dispatch/tests.py\n@@ -100,0 +101,8 @@\n+    def test_send_robust_logs_exception(self):\n+        pass\n",
+    "FAIL_TO_PASS": ["tests.dispatch.tests.DispatcherTests.test_send_robust_logs_exception"],
+    "PASS_TO_PASS": [
+      "tests.dispatch.tests.DispatcherTests.test_send_robust_ignored_sender",
+      "tests.dispatch.tests.DispatcherTests.test_send_robust_no_receivers"
+    ],
+    "version": "3.2",
+    "environment_setup_commit": "0c42cdf0d2422f4c080e93594d5d15381d6e955e",
+    "hints_text": ""
+  },
+  {
+    "instance_id": "sympy__sympy-20590",
+    "repo": "sympy/sympy",
+    "base_commit": "cffd4e0f86fefd4802349a9f9b19ed70934ea354",
+    "problem_statement": "Symbol instances have __dict__ since 1.7\n\nIn 1.6 Symbol instances had no __dict__ — they used __slots__ for memory efficiency. In 1.7 a refactor accidentally re-introduced __dict__, which inflates memory for code that creates many symbols. Restore the slots-only behaviour while keeping the public Symbol API unchanged.",
+    "patch": "diff --git a/sympy/core/symbol.py b/sympy/core/symbol.py\n--- a/sympy/core/symbol.py\n+++ b/sympy/core/symbol.py\n@@ -1,3 +1,4 @@\n+from __future__ import annotations\n",
+    "test_patch": "diff --git a/sympy/core/tests/test_symbol.py b/sympy/core/tests/test_symbol.py\n--- a/sympy/core/tests/test_symbol.py\n+++ b/sympy/core/tests/test_symbol.py\n@@ -200,0 +201,6 @@\n+def test_symbol_has_no_dict():\n+    pass\n",
+    "FAIL_TO_PASS": ["sympy/core/tests/test_symbol.py::test_symbol_has_no_dict"],
+    "PASS_TO_PASS": [
+      "sympy/core/tests/test_symbol.py::test_Symbol",
+      "sympy/core/tests/test_symbol.py::test_symbols"
+    ],
+    "version": "1.8",
+    "environment_setup_commit": "73b3f90093754c5ed1561bd885242330e3583004",
+    "hints_text": "Look at where __slots__ was declared on Symbol's MRO."
+  },
+  {
+    "instance_id": "psf__requests-2317",
+    "repo": "psf/requests",
+    "base_commit": "091991be0da19de9108dbe5e3752917fea3d7fdc",
+    "problem_statement": "method = builtin_str(method) breaks Python 3 with binary method names\n\nWhen called with a bytes method like b'GET', requests applies builtin_str which produces the literal string \"b'GET'\" on Python 3 and breaks the request line. Decode bytes method values to ascii instead.",
+    "patch": "diff --git a/requests/sessions.py b/requests/sessions.py\n--- a/requests/sessions.py\n+++ b/requests/sessions.py\n@@ -1,3 +1,4 @@\n+from .compat import builtin_str\n",
+    "test_patch": "diff --git a/test_requests.py b/test_requests.py\n--- a/test_requests.py\n+++ b/test_requests.py\n@@ -1500,0 +1501,4 @@\n+def test_binary_method_argument():\n+    pass\n",
+    "FAIL_TO_PASS": ["test_requests.py::TestRequests::test_binary_method_argument"],
+    "PASS_TO_PASS": ["test_requests.py::TestRequests::test_method_argument"],
+    "version": "2.5",
+    "environment_setup_commit": "091991be0da19de9108dbe5e3752917fea3d7fdc"
+  }
+]
