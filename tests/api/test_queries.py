@@ -107,6 +107,14 @@ class _FakeUsageRepo(LLMUsageRepository):
         self.last_window = (since, until)
         return list(self._buckets)
 
+    async def aggregate_for_task(
+        self,
+        tenant_id: str,
+        task_id: str,
+        group_by: UsageGroupBy,
+    ) -> list[UsageAggregate]:  # pragma: no cover - not exercised by query API
+        raise AssertionError
+
 
 def _make_app(
     audit_repo: _FakeAuditRepo | None = None,

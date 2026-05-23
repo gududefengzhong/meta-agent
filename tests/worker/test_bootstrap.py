@@ -590,6 +590,14 @@ def test_build_budget_enforcer_from_env_selects_llm_usage_backend() -> None:
         ) -> list[UsageAggregate]:
             raise AssertionError
 
+        async def aggregate_for_task(
+            self,
+            tenant_id: str,
+            task_id: str,
+            group_by: UsageGroupBy,
+        ) -> list[UsageAggregate]:
+            raise AssertionError
+
     enforcer, config = build_budget_enforcer_from_env(
         {
             "META_AGENT_BUDGET_BACKEND": "llm_usage",

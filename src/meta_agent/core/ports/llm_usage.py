@@ -27,12 +27,17 @@ class UsageGroupBy(StrEnum):
     * ``DAY``   — group by ``date_trunc('day', created_at)`` UTC.
     * ``TASK``  — group by ``task_id`` (NULL → ``"unattributed"``).
     * ``PRINCIPAL`` — group by ``principal_id`` (NULL → ``"unattributed"``).
+    * ``STEP_KIND`` — group by ``step_kind`` string (NULL →
+      ``"unspecified"``). Per-task cost views surface a breakdown by
+      this dimension so operators see how plan / edit / review tokens
+      split.
     """
 
     MODEL = "model"
     DAY = "day"
     TASK = "task"
     PRINCIPAL = "principal"
+    STEP_KIND = "step_kind"
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +121,22 @@ class LLMUsageRepository(ABC):
         last row's ``(created_at, record_id)`` tuple via
         :attr:`LLMUsageFilter.before`. The window is the half-open
         interval ``[filt.since, filt.until)``.
+        """
+
+    @abstractmethod
+    async def aggregate_for_task(
+        self,
+        tenant_id: str,
+        task_id: str,
+        group_by: UsageGroupBy,
+    ) -> list[UsageAggregate]:
+        """Per-task aggregate over the task's full lifetime.
+
+        Unlike :meth:`aggregate_grouped`, the window is bounded by the
+        task id rather than a time range — callers (worker result
+        builder, budget gate) want "how much has this task spent" with
+        no time horizon. NULL group keys collapse to the same sentinel
+        :class:`UsageGroupBy` uses for the tenant-wide call.
         """
 
     @abstractmethod

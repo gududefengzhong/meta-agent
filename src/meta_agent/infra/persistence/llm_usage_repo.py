@@ -33,6 +33,7 @@ _AGG_KEY_EXPRS: dict[UsageGroupBy, str] = {
     UsageGroupBy.DAY: "to_char(date_trunc('day', created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD')",
     UsageGroupBy.TASK: "COALESCE(task_id, 'unattributed')",
     UsageGroupBy.PRINCIPAL: "COALESCE(principal_id, 'unattributed')",
+    UsageGroupBy.STEP_KIND: "COALESCE(step_kind, 'unspecified')",
 }
 
 
@@ -209,6 +210,37 @@ class PgLLMUsageRepository(LLMUsageRepository):
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(sql, *params)
         return [_row_to_record(dict(r)) for r in rows]
+
+    async def aggregate_for_task(
+        self,
+        tenant_id: str,
+        task_id: str,
+        group_by: UsageGroupBy,
+    ) -> list[UsageAggregate]:
+        check_tenant(tenant_id)
+        key_expr = _AGG_KEY_EXPRS[group_by]
+        sql = f"""
+            SELECT
+                {key_expr} AS key,
+                COALESCE(SUM(total_tokens), 0)::bigint AS tokens,
+                COALESCE(SUM(cost_usd_micros), 0)::bigint AS cost_micros,
+                COUNT(*)::bigint AS calls
+            FROM llm_usage_logs
+            WHERE tenant_id = $1 AND task_id = $2
+            GROUP BY {key_expr}
+            ORDER BY tokens DESC, key ASC
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, tenant_id, task_id)
+        return [
+            UsageAggregate(
+                key=str(r["key"]),
+                tokens=int(r["tokens"]),
+                cost_usd_micros=int(r["cost_micros"]),
+                calls=int(r["calls"]),
+            )
+            for r in rows
+        ]
 
     async def aggregate_grouped(
         self,

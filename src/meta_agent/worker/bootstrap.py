@@ -892,6 +892,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
             tool_registry=tool_registry,
             tool_executor=tool_executor,
             prompt_registry=prompt_registry,
+            llm_usage=usage_repo,
         )
     )
     workspaces = build_workspace_manager(settings)
@@ -922,6 +923,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         outbox=outbox_repo,
         task_topic=settings.task_topic,
         webhook_fanout=webhook_fanout,
+        llm_usage=usage_repo,
         config=WorkerConfig(max_attempts=settings.max_attempts, block_ms=settings.block_ms),
     )
     # Phase γ-A startup recovery: re-enqueue any task left in RUNNING

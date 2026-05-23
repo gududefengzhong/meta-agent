@@ -113,6 +113,11 @@ class Task(BaseModel):
     state: TaskState = TaskState.PENDING
     permission_mode: PermissionMode = PermissionMode.AUTO
     budget_policy: BudgetPolicy = BudgetPolicy.NONE
+    # Phase γ-C per-task cost ceiling in micro-USD. The
+    # :class:`BudgetPolicy` only fires when this is non-null; ``None``
+    # means "no per-task ceiling, only tenant-level monthly limits
+    # apply".
+    budget_threshold_micros: int | None = Field(default=None, ge=0)
     input_payload: dict[str, object] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime

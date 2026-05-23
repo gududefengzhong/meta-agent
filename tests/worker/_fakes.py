@@ -58,6 +58,20 @@ class FakeTaskRepo(TaskRepository):
         # "dispatcher-mode" semantics used by ``WorkerLoop.recover_in_flight``.
         return [t for t in self.rows.values() if t.state == TaskState.RUNNING][:limit]
 
+    async def list_awaiting_approval_older_than(
+        self,
+        threshold_at: datetime,
+        *,
+        limit: int = 100,
+    ) -> list[Task]:
+        rows = [
+            t
+            for t in self.rows.values()
+            if t.state == TaskState.AWAITING_APPROVAL and t.updated_at < threshold_at
+        ]
+        rows.sort(key=lambda t: t.updated_at)
+        return rows[:limit]
+
     async def set_awaiting_approval(
         self,
         tenant_id: str,

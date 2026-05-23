@@ -63,6 +63,7 @@ def build_human_gate(
     *,
     gate_id: str,
     next_node_when_approved: str,
+    next_node_when_rejected: str | None = None,
 ) -> NodeFn:
     """Return a graph-node function that pauses until an operator approves.
 
@@ -72,14 +73,27 @@ def build_human_gate(
     same graph MUST use distinct ids.
 
     ``next_node_when_approved`` is the destination after an
-    ``"approve"`` decision. Reject routes to :data:`END` with a
-    ``_rejected_by_human=True`` marker on the state.
+    ``"approve"`` decision.
+
+    ``next_node_when_rejected`` is the destination after a ``"reject"``
+    decision. The default :data:`None` keeps the legacy γ-A behaviour
+    — reject routes to :data:`END` with a ``_rejected_by_human=True``
+    marker on the state. Setting it to a node name turns the gate
+    into a γ-C "approve with edits" surface: the operator's feedback
+    travels through :data:`HUMAN_FEEDBACK_KEY` and the graph re-enters
+    a planning node to incorporate it. Graphs wiring this MUST also
+    bump ``_replan_attempts`` (or an equivalent guard) so an
+    indefinite reject → replan → reject loop is bounded.
     """
 
     if not gate_id:
         raise GraphError("human_gate: gate_id must be a non-empty string")
     if not next_node_when_approved:
         raise GraphError("human_gate: next_node_when_approved must be a non-empty string")
+    if next_node_when_rejected is not None and not next_node_when_rejected:
+        raise GraphError(
+            "human_gate: next_node_when_rejected must be a non-empty string when supplied"
+        )
 
     async def gate(state: TaskRunState) -> NodeResult:
         decision = state.data.get(HUMAN_DECISION_KEY)
@@ -95,13 +109,25 @@ def build_human_gate(
                 next_node=next_node_when_approved,
             )
         if decision == "reject":
+            if next_node_when_rejected is None:
+                return NodeResult(
+                    data_update={
+                        HUMAN_DECISION_KEY: None,
+                        HUMAN_GATE_AT_KEY: None,
+                        "_rejected_by_human": True,
+                    },
+                    next_node=END,
+                )
+            # γ-C "approve with edits" mode: route back to the
+            # caller-supplied replan node and preserve the feedback
+            # so the next plan iteration can render it.
             return NodeResult(
                 data_update={
                     HUMAN_DECISION_KEY: None,
                     HUMAN_GATE_AT_KEY: None,
-                    "_rejected_by_human": True,
+                    "_rejected_with_feedback": True,
                 },
-                next_node=END,
+                next_node=next_node_when_rejected,
             )
         # No decision yet — pause. ``HUMAN_GATE_AT_KEY`` records which
         # gate we are at so the API can validate "approve only the gate

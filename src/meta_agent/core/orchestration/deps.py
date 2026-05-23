@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from meta_agent.core.orchestration.graph import Graph
 from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
+from meta_agent.core.ports.llm_usage import LLMUsageRepository
 from meta_agent.core.ports.prompt_registry import PromptRegistry
 
 if TYPE_CHECKING:
@@ -75,6 +76,15 @@ class GraphDeps:
     SWE-bench regression) need to make sense of cost / quality deltas.
     ``None`` means "no registry available" — graphs that require one
     must guard explicitly and raise :class:`GraphError`.
+    """
+    llm_usage: LLMUsageRepository | None = None
+    """Per-task cost / token read surface (Phase γ-C).
+
+    Graphs that need the running task-level spend (e.g. to honour
+    :class:`BudgetPolicy` via :func:`check_budget_policy`) read it
+    here. ``None`` disables budget gates regardless of the task's
+    declared policy — tenant-level monthly limits still apply via
+    :class:`BudgetEnforcingLLMClient`.
     """
 
 

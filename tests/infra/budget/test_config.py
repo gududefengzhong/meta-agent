@@ -50,6 +50,14 @@ class _StubUsageRepo(LLMUsageRepository):
     ) -> list[UsageAggregate]:
         raise AssertionError
 
+    async def aggregate_for_task(
+        self,
+        tenant_id: str,
+        task_id: str,
+        group_by: UsageGroupBy,
+    ) -> list[UsageAggregate]:
+        raise AssertionError
+
 
 def test_defaults_are_noop_with_no_cap() -> None:
     cfg = BudgetConfig.from_env({})
