@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
+from meta_agent.core.orchestration.llm_streaming import aggregate_stream_to_response
 from meta_agent.core.orchestration.state import END, TaskRunState
 from meta_agent.core.orchestration.step_kinds import STEP_REVIEW
 from meta_agent.core.ports.llm import (
@@ -217,7 +218,7 @@ def build_code_review_graph(deps: GraphDeps) -> Graph:
         if not isinstance(raw, dict):
             raise GraphError("code_review: prepare node did not persist _llm_request")
         request = LLMRequest.model_validate(raw)
-        response = await llm.complete(request)
+        response = await aggregate_stream_to_response(llm, request)
         parsed = _parse_review(response.content)
         return NodeResult(
             data_update={
