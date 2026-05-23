@@ -105,6 +105,43 @@ class PermissionDecisionResponse(BaseModel):
     allow: bool
 
 
+class SessionResponse(BaseModel):
+    """Shape returned by ``GET /v1/sessions/{session_id}``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    tenant_id: str
+    principal_id: str
+    created_at: datetime
+    last_active_at: datetime
+    is_closed: bool
+
+
+class SessionMessage(BaseModel):
+    """One reconstructed conversation message from the session's task history.
+
+    The thread is derived from the tasks in the session — see
+    :func:`build_prior_messages` for the field-extraction contract.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: str
+    content: str
+    task_id: str
+    created_at: datetime
+
+
+class SessionMessagesResponse(BaseModel):
+    """Shape returned by ``GET /v1/sessions/{session_id}/messages``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    messages: list[SessionMessage]
+
+
 class TrajectoryResponse(BaseModel):
     """Body of ``GET /v1/tasks/{task_id}/trajectory``.
 

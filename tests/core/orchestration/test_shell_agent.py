@@ -404,3 +404,72 @@ async def test_auto_mode_bypasses_gate_entirely(tmp_path: Path) -> None:
     assert final.finished is True
     assert len(recorded) == 1
     assert gate._pending == {}  # gate was never consulted
+
+
+# --------------------------------------------------- multi-turn context
+
+
+async def test_prior_messages_are_prepended_before_user_prompt() -> None:
+    """``_prior_messages`` from a session land in the first LLM call's messages."""
+
+    client = FakeLLMClient(response=make_response(content="final", model="fake/m"))
+    registry, _ = _registry_with("noop")
+    deps = fake_deps(client, tool_registry=registry)
+    graph = build_shell_agent_graph(deps)
+
+    await graph.run(
+        _state(
+            user_prompt="continue please",
+            _prior_messages=[
+                {"role": "user", "content": "do the thing"},
+                {"role": "assistant", "content": "I did it"},
+            ],
+        )
+    )
+    first_call = client.calls[0]
+    # System prompt may or may not be present depending on defaults;
+    # filter to user/assistant + ordered.
+    roles_contents = [(m.role.value, m.content) for m in first_call.messages]
+    # Expected slice: prior user + prior assistant + current user.
+    assert ("user", "do the thing") in roles_contents
+    assert ("assistant", "I did it") in roles_contents
+    # Current prompt is the last message.
+    assert roles_contents[-1] == ("user", "continue please")
+    # Prior pair must come before the current user prompt.
+    prior_user_idx = roles_contents.index(("user", "do the thing"))
+    prior_asst_idx = roles_contents.index(("assistant", "I did it"))
+    current_user_idx = len(roles_contents) - 1
+    assert prior_user_idx < prior_asst_idx < current_user_idx
+
+
+async def test_missing_prior_messages_key_behaves_as_single_shot() -> None:
+    """A task without ``_prior_messages`` builds the initial conversation as before."""
+
+    client = FakeLLMClient(response=make_response(content="final"))
+    registry, _ = _registry_with("noop")
+    deps = fake_deps(client, tool_registry=registry)
+    graph = build_shell_agent_graph(deps)
+    await graph.run(_state(user_prompt="hi"))
+    contents = [m.content for m in client.calls[0].messages]
+    assert contents[-1] == "hi"
+    # No prior user/assistant pair landed.
+    assert "do the thing" not in contents
+
+
+async def test_malformed_prior_messages_raises_graph_error() -> None:
+    """A non-list / bad-role entry surfaces a clear GraphError."""
+
+    from meta_agent.core.orchestration.graph import GraphError
+
+    client = FakeLLMClient(response=make_response(content="final"))
+    registry, _ = _registry_with("noop")
+    deps = fake_deps(client, tool_registry=registry)
+    graph = build_shell_agent_graph(deps)
+
+    with pytest.raises(GraphError, match="_prior_messages"):
+        await graph.run(
+            _state(
+                user_prompt="hi",
+                _prior_messages="not a list",
+            )
+        )

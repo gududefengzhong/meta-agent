@@ -28,6 +28,7 @@ from meta_agent.api.deps import (
     get_outbox_repo,
     get_permission_gate,
     get_request_ctx,
+    get_session_repo,
     get_task_repo,
     get_task_topic,
     get_trajectory_repo,
@@ -44,6 +45,7 @@ from meta_agent.api.schemas import (
 )
 from meta_agent.core.domain.outbox import OutboxEvent
 from meta_agent.core.domain.permission import PermissionDecision
+from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import Task, TaskState
 from meta_agent.core.ports.chunk_broadcaster import (
     ChunkBroadcaster,
@@ -58,6 +60,7 @@ from meta_agent.infra.persistence import (
     DatabasePool,
     PgAuditRepository,
     PgOutboxRepository,
+    PgSessionRepository,
     PgTaskRepository,
     PgTrajectoryRepository,
 )
@@ -82,6 +85,7 @@ async def submit_task(
     pool: DatabasePool = Depends(get_db_pool),
     task_repo: PgTaskRepository = Depends(get_task_repo),
     outbox_repo: PgOutboxRepository = Depends(get_outbox_repo),
+    session_repo: PgSessionRepository = Depends(get_session_repo),
     topic: str = Depends(get_task_topic),
 ) -> TaskResponse:
     task_id = str(uuid.uuid4())
@@ -117,8 +121,23 @@ async def submit_task(
         idempotency_key=body.idempotency_key or task_id,
         created_at=now,
     )
+    # δ-1 multi-turn: when a session_id is set, ensure the Session row
+    # exists (upsert is idempotent so resubmits and rapid follow-ups
+    # don't race). Keeping the upsert inside the same transaction as
+    # the task / outbox writes makes "first task in a session" atomic.
+    session_row: Session | None = None
+    if body.session_id:
+        session_row = Session(
+            session_id=body.session_id,
+            tenant_id=ctx.tenant_id,
+            principal_id=ctx.principal_id,
+            created_at=now,
+            last_active_at=now,
+        )
     with bind_context(ctx):
         async with pool.transaction() as conn:
+            if session_row is not None:
+                await session_repo.upsert_in_conn(session_row, conn)
             await task_repo.upsert_in_conn(task, conn)
             await outbox_repo.enqueue_in_conn(event, conn)
 

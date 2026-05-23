@@ -188,6 +188,24 @@ class TaskRepository(ABC):
     async def get_result(self, tenant_id: str, task_id: str) -> TaskResult | None:
         """Return the persisted :class:`TaskResult`, or ``None`` if absent."""
 
+    @abstractmethod
+    async def list_by_session(
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[Task]:
+        """Return tasks in the session ordered oldest → newest by ``created_at``.
+
+        Used by the worker to load prior conversation context when a
+        new task is submitted into an existing session. Tenant scoping
+        is enforced by the implementation; cross-tenant leakage
+        through a forged ``session_id`` would be a confidentiality
+        bug. ``limit`` caps how far back the worker looks — the most
+        recent ``limit`` tasks are retained when more exist.
+        """
+
 
 class SessionRepository(ABC):
     """Persistence for :class:`Session` aggregates."""

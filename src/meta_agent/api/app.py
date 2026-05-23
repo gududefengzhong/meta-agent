@@ -24,6 +24,7 @@ from fastapi import FastAPI
 from redis.asyncio import Redis
 
 from meta_agent.api.routers import queries as queries_router
+from meta_agent.api.routers import sessions as sessions_router
 from meta_agent.api.routers import tasks as tasks_router
 from meta_agent.infra.auth import build_token_validator_from_config
 from meta_agent.infra.auth.config import AuthConfig
@@ -135,6 +136,7 @@ def create_app(*, lifespan: Any = _default_lifespan) -> FastAPI:
     )
     app.include_router(tasks_router.router, prefix="/v1")
     app.include_router(queries_router.router, prefix="/v1")
+    app.include_router(sessions_router.router, prefix="/v1")
 
     @app.get("/health", tags=["ops"], summary="Health check")
     async def health() -> dict[str, str]:

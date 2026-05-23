@@ -72,6 +72,10 @@ def _build_request(state: TaskRunState) -> LLMRequest:
     messages: list[ChatMessage] = []
     if system_prompt:
         messages.append(ChatMessage(role=MessageRole.SYSTEM, content=system_prompt))
+    # δ-1 multi-turn: prior conversation from the same session,
+    # loaded by the worker into ``_prior_messages``. See
+    # :mod:`meta_agent.core.orchestration.session_history`.
+    messages.extend(_load_prior_messages(state))
     messages.append(ChatMessage(role=MessageRole.USER, content=user_prompt))
     return LLMRequest(
         messages=tuple(messages),
@@ -80,6 +84,30 @@ def _build_request(state: TaskRunState) -> LLMRequest:
         max_tokens=_int_or_none(state, "max_tokens"),
         step_kind=STEP_CHAT,
     )
+
+
+def _load_prior_messages(state: TaskRunState) -> list[ChatMessage]:
+    raw = state.data.get("_prior_messages")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise GraphError("simple_chat: state.data['_prior_messages'] must be a list")
+    prior: list[ChatMessage] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise GraphError("simple_chat: _prior_messages entries must be objects")
+        role_raw = entry.get("role")
+        content_raw = entry.get("content")
+        if not isinstance(role_raw, str) or not isinstance(content_raw, str):
+            raise GraphError("simple_chat: _prior_messages entries need str role + content")
+        try:
+            role = MessageRole(role_raw)
+        except ValueError as exc:
+            raise GraphError(
+                f"simple_chat: _prior_messages role {role_raw!r} is not a MessageRole"
+            ) from exc
+        prior.append(ChatMessage(role=role, content=content_raw))
+    return prior
 
 
 def _response_summary(response: LLMResponse) -> dict[str, object]:

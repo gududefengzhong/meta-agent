@@ -28,6 +28,7 @@ from meta_agent.core.orchestration.result import (
     TaskResult,
     TaskResultStatus,
 )
+from meta_agent.core.orchestration.session_history import build_prior_messages
 from meta_agent.core.ports.llm_usage import LLMUsageRepository, UsageGroupBy
 from meta_agent.core.ports.message import MessageEnvelope
 from meta_agent.core.ports.repository import (
@@ -576,6 +577,34 @@ class WorkerLoop:
             data["_budget_policy"] = task.budget_policy.value
             if task.budget_threshold_micros is not None:
                 data["_budget_threshold_micros"] = task.budget_threshold_micros
+            # δ-1 multi-turn: when the task belongs to a session,
+            # inject the prior conversation so the graph's first LLM
+            # call sees context from earlier turns. The build call
+            # silently skips non-succeeded prior tasks and rows
+            # missing user_prompt / assistant_message; if everything
+            # is unusable the list is empty and graphs behave like
+            # a fresh single-shot.
+            if task.session_id:
+                try:
+                    prior = await build_prior_messages(
+                        self._tasks,
+                        tenant_id=task.tenant_id,
+                        session_id=task.session_id,
+                        exclude_task_id=task.task_id,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "session.history_load_failed",
+                        extra={
+                            "tenant_id": task.tenant_id,
+                            "session_id": task.session_id,
+                            "task_id": task.task_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    prior = []
+                if prior:
+                    data["_prior_messages"] = prior
             return TaskRunState(
                 task_id=task.task_id,
                 tenant_id=task.tenant_id,
