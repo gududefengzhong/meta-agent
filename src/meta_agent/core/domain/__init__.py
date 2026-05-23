@@ -10,6 +10,11 @@ from meta_agent.core.domain.checkpoint import TaskCheckpoint
 from meta_agent.core.domain.errors import AgentError, ErrorCategory
 from meta_agent.core.domain.llm_usage import LLMUsageRecord, LLMUsageStatus
 from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
+from meta_agent.core.domain.permission import (
+    PermissionAction,
+    PermissionDecision,
+    PermissionPrompt,
+)
 from meta_agent.core.domain.prompt_asset import PromptAsset, compute_content_hash
 from meta_agent.core.domain.session import Session
 from meta_agent.core.domain.task import (
@@ -44,7 +49,10 @@ __all__ = [
     "LLMUsageStatus",
     "OutboxEvent",
     "OutboxStatus",
+    "PermissionAction",
+    "PermissionDecision",
     "PermissionMode",
+    "PermissionPrompt",
     "PromptAsset",
     "Session",
     "Task",

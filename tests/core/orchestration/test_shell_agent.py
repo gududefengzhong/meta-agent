@@ -243,3 +243,164 @@ async def test_max_total_tokens_cap_short_circuits_next_plan() -> None:
     assert output["tool_invocations"] == 1  # type: ignore[index]
     assert output["truncated_by_token_budget"] is True  # type: ignore[index]
     assert len(client.calls) == 1
+
+
+# --------------------------------------------------------- permission gating
+
+
+async def test_approve_each_tool_allow_decision_executes_tool_unchanged(
+    tmp_path: Path,
+) -> None:
+    """When permission_mode=approve_each_tool, the gate is consulted; allow → execute."""
+
+    import asyncio
+
+    from meta_agent.core.domain.permission import PermissionDecision
+    from meta_agent.infra.permission.in_memory import InMemoryPermissionGate
+
+    registry, recorded = _registry_with("fs_read", content="payload")
+    gate = InMemoryPermissionGate()
+
+    async def auto_allow() -> None:
+        # Watch for the prompt to register, then deliver an allow.
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if gate._pending:
+                pending_id = next(iter(gate._pending))
+                from datetime import UTC, datetime
+
+                await gate.deliver(
+                    PermissionDecision(
+                        prompt_id=pending_id,
+                        allow=True,
+                        reason=None,
+                        decided_at=datetime(2026, 6, 23, tzinfo=UTC),
+                    )
+                )
+                return
+
+    client = FakeLLMClient(
+        responses=[
+            make_response(
+                content="",
+                tool_calls=(ToolCall(id="c1", name="fs_read", arguments={"path": "a"}),),
+                finish_reason="tool_call",
+            ),
+            make_response(content="all done", finish_reason="stop"),
+        ]
+    )
+    deps = fake_deps(client, tool_registry=registry, permission_gate=gate)
+    graph = build_shell_agent_graph(deps)
+
+    decider = asyncio.create_task(auto_allow())
+    try:
+        final = await graph.run(
+            _state(
+                user_prompt="hi",
+                _workspace_path=str(tmp_path),
+                _permission_mode="approve_each_tool",
+            )
+        )
+    finally:
+        await decider
+
+    assert final.finished is True
+    assert len(recorded) == 1
+    assert recorded[0].name == "fs_read"
+    # Second LLM call sees the actual tool result, not a denial.
+    assert "payload" in client.calls[1].messages[-1].content
+
+
+async def test_approve_each_tool_deny_decision_skips_executor(tmp_path: Path) -> None:
+    """A deny decision short-circuits the tool — executor never invoked."""
+
+    import asyncio
+
+    from meta_agent.core.domain.permission import PermissionDecision
+    from meta_agent.infra.permission.in_memory import InMemoryPermissionGate
+
+    registry, recorded = _registry_with("fs_read", content="payload")
+    gate = InMemoryPermissionGate()
+
+    async def auto_deny() -> None:
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if gate._pending:
+                pending_id = next(iter(gate._pending))
+                from datetime import UTC, datetime
+
+                await gate.deliver(
+                    PermissionDecision(
+                        prompt_id=pending_id,
+                        allow=False,
+                        reason="too risky",
+                        decided_at=datetime(2026, 6, 23, tzinfo=UTC),
+                    )
+                )
+                return
+
+    client = FakeLLMClient(
+        responses=[
+            make_response(
+                content="",
+                tool_calls=(ToolCall(id="c1", name="fs_read", arguments={"path": "a"}),),
+                finish_reason="tool_call",
+            ),
+            make_response(content="okay I won't", finish_reason="stop"),
+        ]
+    )
+    deps = fake_deps(client, tool_registry=registry, permission_gate=gate)
+    graph = build_shell_agent_graph(deps)
+
+    decider = asyncio.create_task(auto_deny())
+    try:
+        final = await graph.run(
+            _state(
+                user_prompt="hi",
+                _workspace_path=str(tmp_path),
+                _permission_mode="approve_each_tool",
+            )
+        )
+    finally:
+        await decider
+
+    assert final.finished is True
+    assert recorded == []  # tool handler never ran
+    # The LLM saw a synthetic tool result carrying the denial.
+    second_call = client.calls[1]
+    tool_msg = second_call.messages[-1]
+    assert "permission_denied" in tool_msg.content
+    assert "too risky" in tool_msg.content
+
+
+async def test_auto_mode_bypasses_gate_entirely(tmp_path: Path) -> None:
+    """PermissionMode.AUTO short-circuits the gate even when one is configured."""
+
+    from meta_agent.infra.permission.in_memory import InMemoryPermissionGate
+
+    registry, recorded = _registry_with("fs_read", content="payload")
+    gate = InMemoryPermissionGate()  # never called
+
+    client = FakeLLMClient(
+        responses=[
+            make_response(
+                content="",
+                tool_calls=(ToolCall(id="c1", name="fs_read", arguments={"path": "a"}),),
+                finish_reason="tool_call",
+            ),
+            make_response(content="all done", finish_reason="stop"),
+        ]
+    )
+    deps = fake_deps(client, tool_registry=registry, permission_gate=gate)
+    graph = build_shell_agent_graph(deps)
+
+    final = await graph.run(
+        _state(
+            user_prompt="hi",
+            _workspace_path=str(tmp_path),
+            _permission_mode="auto",
+        )
+    )
+    assert final.finished is True
+    assert len(recorded) == 1
+    assert gate._pending == {}  # gate was never consulted

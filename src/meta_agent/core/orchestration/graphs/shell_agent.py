@@ -28,11 +28,14 @@ Scope (v0):
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from meta_agent.core.capabilities.executor import ToolExecutor
 from meta_agent.core.capabilities.registry import ToolRegistry
+from meta_agent.core.domain.permission import PermissionPrompt
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
 from meta_agent.core.orchestration.llm_streaming import aggregate_stream_to_response
@@ -46,12 +49,25 @@ from meta_agent.core.ports.llm import (
     LLMUsage,
     MessageRole,
 )
+from meta_agent.core.ports.permission_gate import (
+    PermissionGate,
+    PermissionTimeoutError,
+)
 from meta_agent.core.ports.tools import ToolCall, ToolContext, ToolResult, ToolSpec
 
 SHELL_AGENT_GRAPH_ID = "builtin.shell_agent"
 
 _DEFAULT_MAX_STEPS = 8
 _DEFAULT_OUTPUT_BYTE_CAP = 65536
+_PERMISSION_DECISION_TIMEOUT_S = 120.0
+"""How long the agent waits for a user to decide on an inline permission prompt.
+
+Two minutes is the rough upper bound where a connected user is
+plausibly still attending; past that we assume they walked away.
+The graph treats a timeout as a deny (same shape as an explicit
+``allow=False``) so a silent client cannot accidentally green-light
+a sensitive action.
+"""
 
 
 def _str_or_none(state: TaskRunState, key: str) -> str | None:
@@ -205,6 +221,60 @@ def _tool_message_content(result: ToolResult) -> str:
         lines.append(f"tool_metadata={json.dumps(result.metadata, sort_keys=True)}")
     lines.append(result.content)
     return "\n".join(lines)
+
+
+async def _gated_execute(
+    call: ToolCall,
+    tool_ctx: ToolContext,
+    executor: ToolExecutor,
+    *,
+    gate: PermissionGate,
+    state: TaskRunState,
+) -> ToolResult:
+    """Ask the connected client before executing ``call``.
+
+    Returns a synthetic :class:`ToolResult` carrying ``is_error=True``
+    when the user denies the action or doesn't respond inside the
+    timeout. The agent sees the denial in the conversation and can
+    replan; we deliberately do not raise here so a single denied
+    action doesn't abort the whole task.
+    """
+
+    prompt = PermissionPrompt(
+        prompt_id=f"prm-{uuid.uuid4()}",
+        tenant_id=state.tenant_id,
+        task_id=state.task_id,
+        tool_name=call.name,
+        summary=f"Run tool {call.name!r}",
+        payload=dict(call.arguments),
+        created_at=datetime.now(UTC),
+    )
+    try:
+        decision = await gate.request(prompt, timeout_seconds=_PERMISSION_DECISION_TIMEOUT_S)
+    except PermissionTimeoutError:
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content="[permission_timeout] user did not respond in time; tool was skipped",
+            is_error=True,
+            metadata={
+                "permission_outcome": "timeout",
+                "prompt_id": prompt.prompt_id,
+            },
+        )
+    if not decision.allow:
+        reason_suffix = f": {decision.reason}" if decision.reason else ""
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content=f"[permission_denied] user denied this tool call{reason_suffix}",
+            is_error=True,
+            metadata={
+                "permission_outcome": "denied",
+                "prompt_id": prompt.prompt_id,
+            },
+        )
+    return await executor.execute(call, tool_ctx)
 
 
 def _require_tool_caps(deps: GraphDeps) -> tuple[ToolRegistry, ToolExecutor]:
@@ -377,9 +447,22 @@ def build_shell_agent_graph(
         ctx = _build_tool_context(state)
         messages = _load_messages(state, default_system_prompt)
         invocations = _int_or_default(state, "_tool_invocations", 0)
+        requires_approval = (
+            _str_or_none(state, "_permission_mode") == "approve_each_tool"
+            and deps.permission_gate is not None
+        )
         for entry in raw:
             call = ToolCall.model_validate(entry)
-            result: ToolResult = await executor.execute(call, ctx)
+            result: ToolResult
+            if requires_approval:
+                # ``permission_gate`` is non-None here per the guard
+                # above; mypy needs the explicit assignment.
+                assert deps.permission_gate is not None
+                result = await _gated_execute(
+                    call, ctx, executor, gate=deps.permission_gate, state=state
+                )
+            else:
+                result = await executor.execute(call, ctx)
             invocations += 1
             messages.append(
                 ChatMessage(

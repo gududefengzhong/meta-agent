@@ -15,6 +15,7 @@ from fastapi import Depends, Header, HTTPException, Request, status
 
 from meta_agent.core.ports.auth import AuthBackendError, TokenValidator
 from meta_agent.core.ports.chunk_broadcaster import ChunkBroadcaster
+from meta_agent.core.ports.permission_gate import PermissionGate
 from meta_agent.infra.persistence import (
     DatabasePool,
     PgAuditRepository,
@@ -61,6 +62,15 @@ def get_chunk_broadcaster(request: Request) -> ChunkBroadcaster:
     job via :class:`BroadcastingLLMClient`.
     """
     return request.app.state.chunk_broadcaster  # type: ignore[no-any-return]
+
+
+def get_permission_gate(request: Request) -> PermissionGate:
+    """Return the shared :class:`PermissionGate` attached to ``app.state``.
+
+    The API uses the gate's ``deliver`` side — POST handler routes
+    a client's decision back to a worker blocked on ``request``.
+    """
+    return request.app.state.permission_gate  # type: ignore[no-any-return]
 
 
 # ── Domain-level collaborators ────────────────────────────────────────────────

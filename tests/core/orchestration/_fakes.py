@@ -16,6 +16,7 @@ from meta_agent.core.ports.llm import (
     LLMResponse,
     LLMUsage,
 )
+from meta_agent.core.ports.permission_gate import PermissionGate
 from meta_agent.core.ports.prompt_registry import PromptRegistry
 from meta_agent.core.ports.tools import ToolCall
 from meta_agent.infra.prompt_registry.in_memory import InMemoryPromptRegistry
@@ -120,6 +121,7 @@ def fake_deps(
     tool_registry: ToolRegistry | None = None,
     tool_executor: ToolExecutor | None = None,
     prompt_registry: PromptRegistry | None = None,
+    permission_gate: PermissionGate | None = None,
 ) -> GraphDeps:
     """Build a :class:`GraphDeps` with an opinionated :class:`FakeLLMClient`.
 
@@ -133,6 +135,9 @@ def fake_deps(
     :func:`meta_agent.worker.bootstrap.build_registry` does at boot).
     Tests that want to exercise the "missing registry" path can pass
     a sentinel via :class:`dataclasses.replace` after construction.
+
+    ``permission_gate`` defaults to ``None`` (no interactive gate);
+    tests that exercise APPROVE_EACH_TOOL pass an explicit gate.
     """
 
     if tool_registry is not None and tool_executor is None:
@@ -145,4 +150,5 @@ def fake_deps(
         tool_registry=tool_registry,
         tool_executor=tool_executor,
         prompt_registry=prompt_registry,
+        permission_gate=permission_gate,
     )

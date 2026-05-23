@@ -97,6 +97,7 @@ from meta_agent.infra.llm import (
     RoutingLLMClient,
     StaticLLMRouter,
 )
+from meta_agent.infra.permission import RedisPermissionGate
 from meta_agent.infra.persistence import (
     PgAuditRepository,
     PgCheckpointRepository,
@@ -852,6 +853,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     # the agent loop.
     chunk_broadcaster = RedisChunkBroadcaster(redis_client)
     broadcasting_llm = BroadcastingLLMClient(redacting_llm, chunk_broadcaster)
+    permission_gate = RedisPermissionGate(redis_client)
     raw_git_provider = build_git_provider(settings)
     # Mirror the LLM safety stack: breaker innermost (counts real
     # upstream failures only), limiter outermost (deny does not reach
@@ -913,6 +915,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
             tool_executor=tool_executor,
             prompt_registry=prompt_registry,
             llm_usage=usage_repo,
+            permission_gate=permission_gate,
         )
     )
     workspaces = build_workspace_manager(settings)
@@ -955,6 +958,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         await git_provider.close()
         await broadcasting_llm.close()
         await chunk_broadcaster.close()
+        await permission_gate.close()
         await budget_enforcer.close()
         await rate_limiter.close()
         await breaker.close()
@@ -975,5 +979,6 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
             "budget_enforcer": budget_enforcer,
             "git_provider": git_provider,
             "chunk_broadcaster": chunk_broadcaster,
+            "permission_gate": permission_gate,
         },
     )
