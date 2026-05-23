@@ -473,3 +473,170 @@ async def test_malformed_prior_messages_raises_graph_error() -> None:
                 _prior_messages="not a list",
             )
         )
+
+
+# ----------------------------------------------------- plan mode
+
+
+async def test_plan_mode_allow_executes_all_pending_tool_calls(tmp_path: Path) -> None:
+    """One plan-level approval green-lights every tool call in the batch."""
+
+    import asyncio
+    from datetime import UTC, datetime
+
+    from meta_agent.core.domain.permission import PermissionDecision
+    from meta_agent.infra.permission.in_memory import InMemoryPermissionGate
+
+    registry, recorded = _registry_with("fs_read", content="payload")
+    gate = InMemoryPermissionGate()
+
+    async def auto_allow() -> None:
+        for _ in range(80):
+            await asyncio.sleep(0.01)
+            if gate._pending:
+                pending_id = next(iter(gate._pending))
+                await gate.deliver(
+                    PermissionDecision(
+                        prompt_id=pending_id,
+                        allow=True,
+                        reason=None,
+                        decided_at=datetime(2026, 6, 23, tzinfo=UTC),
+                    )
+                )
+                return
+
+    client = FakeLLMClient(
+        responses=[
+            # First planning step proposes two tool calls.
+            make_response(
+                content="I will read both files then summarize.",
+                tool_calls=(
+                    ToolCall(id="c1", name="fs_read", arguments={"path": "a"}),
+                    ToolCall(id="c2", name="fs_read", arguments={"path": "b"}),
+                ),
+                finish_reason="tool_call",
+            ),
+            make_response(content="done", finish_reason="stop"),
+        ]
+    )
+    deps = fake_deps(client, tool_registry=registry, permission_gate=gate)
+    graph = build_shell_agent_graph(deps)
+
+    decider = asyncio.create_task(auto_allow())
+    try:
+        final = await graph.run(
+            _state(
+                user_prompt="please",
+                _workspace_path=str(tmp_path),
+                _permission_mode="plan",
+            )
+        )
+    finally:
+        await decider
+
+    assert final.finished is True
+    # Both tools ran on a single allow.
+    assert [c.name for c in recorded] == ["fs_read", "fs_read"]
+    assert [c.arguments["path"] for c in recorded] == ["a", "b"]
+    # Only ONE prompt was issued for the batch (the gate's _pending
+    # dict was empty once delivered + drained).
+    assert gate._pending == {}
+
+
+async def test_plan_mode_deny_skips_all_tool_calls_and_feeds_reason(
+    tmp_path: Path,
+) -> None:
+    """A deny short-circuits the whole batch; reason flows into the model's view."""
+
+    import asyncio
+    from datetime import UTC, datetime
+
+    from meta_agent.core.domain.permission import PermissionDecision
+    from meta_agent.infra.permission.in_memory import InMemoryPermissionGate
+
+    registry, recorded = _registry_with("fs_read", content="payload")
+    gate = InMemoryPermissionGate()
+
+    async def auto_deny() -> None:
+        for _ in range(80):
+            await asyncio.sleep(0.01)
+            if gate._pending:
+                pending_id = next(iter(gate._pending))
+                await gate.deliver(
+                    PermissionDecision(
+                        prompt_id=pending_id,
+                        allow=False,
+                        reason="that plan is too risky",
+                        decided_at=datetime(2026, 6, 23, tzinfo=UTC),
+                    )
+                )
+                return
+
+    client = FakeLLMClient(
+        responses=[
+            make_response(
+                content="My plan: do A then B.",
+                tool_calls=(
+                    ToolCall(id="c1", name="fs_read", arguments={"path": "a"}),
+                    ToolCall(id="c2", name="fs_read", arguments={"path": "b"}),
+                ),
+                finish_reason="tool_call",
+            ),
+            make_response(content="OK I won't", finish_reason="stop"),
+        ]
+    )
+    deps = fake_deps(client, tool_registry=registry, permission_gate=gate)
+    graph = build_shell_agent_graph(deps)
+
+    decider = asyncio.create_task(auto_deny())
+    try:
+        final = await graph.run(
+            _state(
+                user_prompt="please",
+                _workspace_path=str(tmp_path),
+                _permission_mode="plan",
+            )
+        )
+    finally:
+        await decider
+
+    assert final.finished is True
+    # No tool actually ran.
+    assert recorded == []
+    # Both tool slots received a synthetic deny message that the
+    # model saw on the second LLM call.
+    second_call = client.calls[1]
+    tool_messages = [m for m in second_call.messages if m.role.value == "tool"]
+    assert len(tool_messages) == 2
+    for msg in tool_messages:
+        assert "plan_denied" in msg.content
+        assert "too risky" in msg.content
+
+
+async def test_plan_mode_with_no_gate_falls_back_to_auto_execution(
+    tmp_path: Path,
+) -> None:
+    """When ``deps.permission_gate is None``, plan mode behaves like auto."""
+
+    registry, recorded = _registry_with("fs_read", content="payload")
+    client = FakeLLMClient(
+        responses=[
+            make_response(
+                content="",
+                tool_calls=(ToolCall(id="c1", name="fs_read", arguments={"path": "a"}),),
+                finish_reason="tool_call",
+            ),
+            make_response(content="done", finish_reason="stop"),
+        ]
+    )
+    deps = fake_deps(client, tool_registry=registry, permission_gate=None)
+    graph = build_shell_agent_graph(deps)
+    final = await graph.run(
+        _state(
+            user_prompt="hi",
+            _workspace_path=str(tmp_path),
+            _permission_mode="plan",
+        )
+    )
+    assert final.finished is True
+    assert len(recorded) == 1

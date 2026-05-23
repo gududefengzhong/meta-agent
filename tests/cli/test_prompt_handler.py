@@ -276,5 +276,54 @@ async def test_default_decider_denies_and_captures_reason(
     assert decision == (False, "looks scary")
 
 
+async def test_default_decider_renders_plan_prompt_with_multi_tool_list(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Plan prompts (tool_name='<plan>') render assistant text + numbered actions."""
+
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "y")
+    decision = await _prompt_user_for_decision(
+        {
+            "prompt_id": "prm-plan",
+            "tool_name": "<plan>",
+            "summary": "I will read a.py then b.py and summarize the diff.",
+            "payload": {
+                "tool_calls": [
+                    {"id": "c1", "name": "fs_read", "arguments": {"path": "a.py"}},
+                    {"id": "c2", "name": "fs_read", "arguments": {"path": "b.py"}},
+                ]
+            },
+        }
+    )
+    assert decision == (True, None)
+    err = capsys.readouterr().err
+    assert "[plan]" in err
+    assert "I will read a.py" in err
+    assert "proposed actions (2):" in err
+    assert "1. fs_read" in err
+    assert "2. fs_read" in err
+
+
+async def test_default_decider_plan_prompt_with_no_tool_calls_renders_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A plan prompt missing/empty tool_calls still renders without crashing."""
+
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: "y")
+    decision = await _prompt_user_for_decision(
+        {
+            "prompt_id": "prm-plan-empty",
+            "tool_name": "<plan>",
+            "summary": "I won't actually do anything",
+            "payload": {},
+        }
+    )
+    assert decision == (True, None)
+    err = capsys.readouterr().err
+    assert "(no tool calls in this plan)" in err
+
+
 # Reference imports kept lean — the test module only needs these.
 _ = (EXIT_TASK_FAILED, CLIError, _build_payload)

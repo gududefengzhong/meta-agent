@@ -194,6 +194,9 @@ async def _tail_until_terminal(
     return EXIT_TASK_FAILED
 
 
+_PLAN_PROMPT_TOOL_NAME = "<plan>"
+
+
 async def _prompt_user_for_decision(
     prompt: dict[str, Any],
 ) -> tuple[bool, str | None]:
@@ -203,19 +206,18 @@ async def _prompt_user_for_decision(
     to keep the event loop responsive for the other streams.
     Output goes to stderr so it doesn't pollute the stdout pipe
     that carries the model's actual answer.
+
+    Plan-mode prompts (``tool_name == "<plan>"``) are rendered as a
+    list of proposed tool calls under the assistant's plan text;
+    per-tool prompts use the single-tool layout.
     """
 
     tool = prompt.get("tool_name", "<unknown>")
-    summary = prompt.get("summary") or f"Run tool {tool!r}"
-    payload = prompt.get("payload")
     sys.stderr.write("\n")
-    sys.stderr.write(f"  [permission] {summary}\n")
-    if payload:
-        try:
-            rendered = json.dumps(payload, indent=2, sort_keys=True)
-        except (TypeError, ValueError):
-            rendered = repr(payload)
-        sys.stderr.write(f"  payload: {rendered}\n")
+    if tool == _PLAN_PROMPT_TOOL_NAME:
+        _render_plan_prompt(prompt)
+    else:
+        _render_tool_prompt(prompt, tool=tool)
     sys.stderr.write("  allow? [y/N]: ")
     sys.stderr.flush()
     answer = await asyncio.to_thread(input)
@@ -227,3 +229,36 @@ async def _prompt_user_for_decision(
         reason_input = await asyncio.to_thread(input)
         reason = reason_input.strip() or None
     return allow, reason
+
+
+def _render_tool_prompt(prompt: dict[str, Any], *, tool: Any) -> None:
+    summary = prompt.get("summary") or f"Run tool {tool!r}"
+    sys.stderr.write(f"  [permission] {summary}\n")
+    payload = prompt.get("payload")
+    if payload:
+        sys.stderr.write(f"  payload: {_render_json(payload)}\n")
+
+
+def _render_plan_prompt(prompt: dict[str, Any]) -> None:
+    plan_text = prompt.get("summary") or "(no plan text)"
+    sys.stderr.write("  [plan] Approve the following plan?\n")
+    sys.stderr.write(f"  {plan_text}\n")
+    payload = prompt.get("payload")
+    tool_calls: Any = payload.get("tool_calls") if isinstance(payload, dict) else None
+    if isinstance(tool_calls, list) and tool_calls:
+        sys.stderr.write(f"  proposed actions ({len(tool_calls)}):\n")
+        for idx, call in enumerate(tool_calls, start=1):
+            if not isinstance(call, dict):
+                continue
+            name = call.get("name", "<unknown>")
+            arguments = call.get("arguments", {})
+            sys.stderr.write(f"    {idx}. {name}({_render_json(arguments)})\n")
+    else:
+        sys.stderr.write("  (no tool calls in this plan)\n")
+
+
+def _render_json(value: Any) -> str:
+    try:
+        return json.dumps(value, indent=2, sort_keys=True)
+    except (TypeError, ValueError):
+        return repr(value)
