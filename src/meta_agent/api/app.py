@@ -30,6 +30,7 @@ from meta_agent.infra.auth.config import AuthConfig
 from meta_agent.infra.persistence import OutboxDispatcher, PgOutboxRepository, build_pool
 from meta_agent.infra.persistence.pool import PoolConfig
 from meta_agent.infra.queue import RedisStreamPublisher
+from meta_agent.infra.streaming import RedisChunkBroadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ async def _default_lifespan(app: FastAPI) -> AsyncIterator[None]:
     pool = await build_pool(PoolConfig(dsn=db_url, min_size=1, max_size=10))
     redis_client: Redis = Redis.from_url(redis_url, decode_responses=False)
     publisher = RedisStreamPublisher(redis_client)
+    chunk_broadcaster = RedisChunkBroadcaster(redis_client)
     outbox_repo = PgOutboxRepository(pool)
     dispatcher = OutboxDispatcher(outbox_repo, publisher)
     dispatcher_task = asyncio.create_task(
@@ -94,6 +96,7 @@ async def _default_lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.dispatcher = dispatcher
     app.state.dispatcher_task = dispatcher_task
     app.state.token_validator = token_validator
+    app.state.chunk_broadcaster = chunk_broadcaster
 
     try:
         yield
