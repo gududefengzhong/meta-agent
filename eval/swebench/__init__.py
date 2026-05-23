@@ -25,17 +25,27 @@ Those land in PR 2 (agent + patch extraction) and PR 3 (test
 execution + result aggregation + CI gates).
 """
 
+from eval.swebench.containers import Container, DockerError, ensure_image_pulled
 from eval.swebench.dataset import load_instance, load_instances
+from eval.swebench.evaluate import evaluate_patch
 from eval.swebench.images import (
     DEFAULT_IMAGE_REGISTRY,
     image_name_for_instance,
     normalize_instance_id,
 )
 from eval.swebench.instances import SWEBenchInstance
+from eval.swebench.results import InstanceResult, TestSelectorResult, TestStatus
 
 __all__ = [
     "DEFAULT_IMAGE_REGISTRY",
+    "Container",
+    "DockerError",
+    "InstanceResult",
     "SWEBenchInstance",
+    "TestSelectorResult",
+    "TestStatus",
+    "ensure_image_pulled",
+    "evaluate_patch",
     "image_name_for_instance",
     "load_instance",
     "load_instances",

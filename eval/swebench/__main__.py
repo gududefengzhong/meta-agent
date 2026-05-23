@@ -1,28 +1,33 @@
-"""Inventory + workspace CLI: ``python -m eval.swebench``.
+"""Inventory + workspace + eval CLI: ``python -m eval.swebench``.
 
-Commands (PR 1 + PR 2):
+Commands:
 
-* ``list`` — print every instance in the dataset.
-* ``show <instance_id>`` — print one instance as JSON.
+* ``list`` (PR 1) — print every instance in the dataset.
+* ``show <instance_id>`` (PR 1) — print one instance as JSON.
 * ``prepare <instance_id> --out <dir>`` (PR 2) — clone the repo +
   checkout ``base_commit``. Optional ``--apply-test-patch`` lands
-  the instance's test_patch so the FAIL_TO_PASS selectors are
-  expressible against the workspace.
+  the instance's test_patch.
 * ``diff <workspace> --base-commit <sha>`` (PR 2) — print the
-  current workspace diff vs ``base_commit``. Used to extract the
-  agent's contribution before sandbox test execution (PR 3).
-
-Execution-flavour commands (``run``) come in PR 3.
+  workspace diff vs ``base_commit``.
+* ``evaluate <instance_id> --patch <file|->`` (PR 3) — pull the
+  eval image, apply the candidate patch in a container, run the
+  FAIL_TO_PASS + PASS_TO_PASS selectors, print the
+  :class:`InstanceResult` as JSON. Exit code 0 = resolved, 5 =
+  not resolved, other codes for usage / not-found / docker
+  errors.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from pathlib import Path
 
+from eval.swebench.containers import DockerError
 from eval.swebench.dataset import SWEBenchDatasetError, load_instance, load_instances
+from eval.swebench.evaluate import evaluate_patch
 from eval.swebench.images import image_name_for_instance
 from eval.swebench.patches import apply_test_patch, extract_patch
 from eval.swebench.workspace import WorkspaceError, prepare_workspace
@@ -31,6 +36,8 @@ EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_NOT_FOUND = 3
 EXIT_WORKSPACE = 4
+EXIT_NOT_RESOLVED = 5
+EXIT_DOCKER = 6
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -108,6 +115,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Diff against this explicit commit SHA",
     )
 
+    p_eval = sub.add_parser(
+        "evaluate",
+        help="Score a candidate patch against one instance inside the eval Docker image",
+    )
+    p_eval.add_argument("instance_id")
+    p_eval.add_argument(
+        "--patch",
+        type=Path,
+        required=True,
+        help="Patch file to apply (use '-' to read from stdin)",
+    )
+    p_eval.add_argument(
+        "--arch",
+        default=None,
+        help="Image arch override (x86_64 / arm64). Default: current process arch.",
+    )
+
     return parser
 
 
@@ -123,12 +147,17 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_prepare(args)
         if args.command == "diff":
             return _cmd_diff(args)
+        if args.command == "evaluate":
+            return _cmd_evaluate(args)
     except SWEBenchDatasetError as exc:
         print(f"eval.swebench: {exc}", file=sys.stderr)
         return EXIT_USAGE
     except WorkspaceError as exc:
         print(f"eval.swebench: {exc}", file=sys.stderr)
         return EXIT_WORKSPACE
+    except DockerError as exc:
+        print(f"eval.swebench: {exc}", file=sys.stderr)
+        return EXIT_DOCKER
     parser.error(f"unknown command: {args.command}")
     return EXIT_USAGE  # pragma: no cover - parser.error exits
 
@@ -199,6 +228,25 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     diff = extract_patch(args.workspace, base)
     sys.stdout.write(diff)
     return EXIT_OK
+
+
+def _cmd_evaluate(args: argparse.Namespace) -> int:
+    try:
+        inst = load_instance(args.instance_id, args.dataset)
+    except SWEBenchDatasetError as exc:
+        print(f"eval.swebench: {exc}", file=sys.stderr)
+        return EXIT_NOT_FOUND
+    patch_text = _read_patch(args.patch)
+    result = asyncio.run(evaluate_patch(inst, patch_text, arch=args.arch))
+    print(result.model_dump_json(indent=2))
+    print(result.summary, file=sys.stderr)
+    return EXIT_OK if result.resolved else EXIT_NOT_RESOLVED
+
+
+def _read_patch(path: Path) -> str:
+    if str(path) == "-":
+        return sys.stdin.read()
+    return path.read_text(encoding="utf-8")
 
 
 if __name__ == "__main__":  # pragma: no cover - executed via python -m
