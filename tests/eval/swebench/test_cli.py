@@ -3,9 +3,67 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
-from eval.swebench.__main__ import EXIT_NOT_FOUND, EXIT_OK, main
+from eval.swebench.__main__ import EXIT_NOT_FOUND, EXIT_OK, EXIT_WORKSPACE, main
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _make_local_repo(tmp_path: Path) -> tuple[str, str, str]:
+    """Build a bare repo and capture the head SHA. Returns (url, sha, repo).
+
+    URL is returned as a string ``file://...`` because ``Path`` would
+    normalise the double slash and break ``git clone``.
+    """
+    bare = tmp_path / "remote.git"
+    work = tmp_path / "seed"
+    bare.mkdir()
+    work.mkdir()
+    _git(bare, "init", "--bare", "--quiet")
+    _git(work, "init", "--quiet", "--initial-branch=main")
+    _git(work, "config", "user.email", "a@b")
+    _git(work, "config", "user.name", "a")
+    (work / "calc.py").write_text("def add(x, y):\n    return x + y\n")
+    _git(work, "add", "calc.py")
+    _git(work, "commit", "-q", "-m", "initial")
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip()
+    url = f"file://{bare}"
+    _git(work, "remote", "add", "origin", url)
+    _git(work, "push", "-q", "origin", "main")
+    return url, sha, "test/repo"
+
+
+def _write_local_dataset(tmp_path: Path, *, base_commit: str, instance_id: str) -> Path:
+    rows = [
+        {
+            "instance_id": instance_id,
+            "repo": "test/repo",
+            "base_commit": base_commit,
+            "problem_statement": "fix the bug",
+            "patch": "",
+            "test_patch": (
+                "diff --git a/calc.py b/calc.py\n"
+                "--- a/calc.py\n"
+                "+++ b/calc.py\n"
+                "@@ -1,2 +1,2 @@\n"
+                " def add(x, y):\n"
+                "-    return x + y\n"
+                "+    return x + y  # test marker\n"
+            ),
+            "FAIL_TO_PASS": ["tests/test_calc.py::test_marker"],
+            "PASS_TO_PASS": [],
+            "version": "1.0",
+            "environment_setup_commit": base_commit,
+        }
+    ]
+    path = tmp_path / "instances.json"
+    path.write_text(json.dumps(rows), encoding="utf-8")
+    return path
 
 
 def test_list_prints_built_in_fixture(
@@ -64,3 +122,165 @@ def test_show_missing_instance_exits_3(
 def test_missing_command_rejected_by_parser() -> None:
     with pytest.raises(SystemExit):
         main([])
+
+
+# ---------------------------------------------------- prepare command
+
+
+def test_prepare_clones_workspace_and_prints_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    url, sha, _repo = _make_local_repo(tmp_path)
+    dataset = _write_local_dataset(tmp_path, base_commit=sha, instance_id="test__repo-1")
+    workspace = tmp_path / "ws"
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "prepare",
+            "test__repo-1",
+            "--out",
+            str(workspace),
+            "--remote-url",
+            url,
+        ]
+    )
+    assert code == EXIT_OK
+    out = capsys.readouterr()
+    assert str(workspace.resolve()) in out.out
+    assert "prepared test__repo-1" in out.err
+    assert (workspace / "calc.py").exists()
+
+
+def test_prepare_apply_test_patch_lands_marker(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    url, sha, _repo = _make_local_repo(tmp_path)
+    dataset = _write_local_dataset(tmp_path, base_commit=sha, instance_id="test__repo-1")
+    workspace = tmp_path / "ws"
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "prepare",
+            "test__repo-1",
+            "--out",
+            str(workspace),
+            "--remote-url",
+            url,
+            "--apply-test-patch",
+        ]
+    )
+    assert code == EXIT_OK
+    assert "# test marker" in (workspace / "calc.py").read_text()
+
+
+def test_prepare_unknown_instance_id_exits_3(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    url, sha, _repo = _make_local_repo(tmp_path)
+    dataset = _write_local_dataset(tmp_path, base_commit=sha, instance_id="test__repo-1")
+    workspace = tmp_path / "ws"
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "prepare",
+            "nonexistent",
+            "--out",
+            str(workspace),
+            "--remote-url",
+            url,
+        ]
+    )
+    assert code == EXIT_NOT_FOUND
+
+
+def test_prepare_existing_dest_exits_4(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    url, sha, _repo = _make_local_repo(tmp_path)
+    dataset = _write_local_dataset(tmp_path, base_commit=sha, instance_id="test__repo-1")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "junk").write_text("x")
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "prepare",
+            "test__repo-1",
+            "--out",
+            str(workspace),
+            "--remote-url",
+            url,
+        ]
+    )
+    assert code == EXIT_WORKSPACE
+
+
+# ---------------------------------------------------- diff command
+
+
+def test_diff_with_instance_id_uses_dataset_base_commit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    url, sha, _repo = _make_local_repo(tmp_path)
+    dataset = _write_local_dataset(tmp_path, base_commit=sha, instance_id="test__repo-1")
+    workspace = tmp_path / "ws"
+    main(
+        [
+            "--dataset",
+            str(dataset),
+            "prepare",
+            "test__repo-1",
+            "--out",
+            str(workspace),
+            "--remote-url",
+            url,
+        ]
+    )
+    # Mutate the workspace
+    (workspace / "calc.py").write_text("def add(x, y):\n    return x + y + 42\n")
+    capsys.readouterr()  # drop prior output
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "diff",
+            str(workspace),
+            "--instance-id",
+            "test__repo-1",
+        ]
+    )
+    assert code == EXIT_OK
+    out = capsys.readouterr().out
+    assert "+    return x + y + 42" in out
+
+
+def test_diff_with_explicit_base_commit(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    url, sha, _repo = _make_local_repo(tmp_path)
+    dataset = _write_local_dataset(tmp_path, base_commit=sha, instance_id="test__repo-1")
+    workspace = tmp_path / "ws"
+    main(
+        [
+            "--dataset",
+            str(dataset),
+            "prepare",
+            "test__repo-1",
+            "--out",
+            str(workspace),
+            "--remote-url",
+            url,
+        ]
+    )
+    capsys.readouterr()  # drop prior output
+    code = main(["diff", str(workspace), "--base-commit", sha])
+    assert code == EXIT_OK
+    # No mutation: diff is empty.
+    assert capsys.readouterr().out == ""
+
+
+def test_diff_requires_one_of_instance_id_or_base_commit(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    with pytest.raises(SystemExit):
+        main(["diff", str(workspace)])
