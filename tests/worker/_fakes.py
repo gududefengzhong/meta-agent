@@ -53,6 +53,19 @@ class FakeTaskRepo(TaskRepository):
             :limit
         ]
 
+    async def list_by_session(
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[Task]:
+        rows = [
+            t for t in self.rows.values() if t.tenant_id == tenant_id and t.session_id == session_id
+        ]
+        rows.sort(key=lambda t: t.created_at)
+        return rows[:limit]
+
     async def list_running_for_resume(self, limit: int = 100) -> list[Task]:
         # Cross-tenant scan, no guard — mirrors the SQL adapter's
         # "dispatcher-mode" semantics used by ``WorkerLoop.recover_in_flight``.

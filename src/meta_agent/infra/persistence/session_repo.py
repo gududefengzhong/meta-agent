@@ -46,15 +46,29 @@ class PgSessionRepository(SessionRepository):
     async def upsert(self, session: Session) -> None:
         check_tenant(session.tenant_id)
         async with self._pool.acquire() as conn:
-            await conn.execute(
-                self._UPSERT,
-                session.session_id,
-                session.tenant_id,
-                session.principal_id,
-                session.created_at,
-                session.last_active_at,
-                session.is_closed,
-            )
+            await self._exec_upsert(session, conn)
+
+    async def upsert_in_conn(self, session: Session, conn: Any) -> None:
+        """Same as :meth:`upsert` but on a caller-owned connection.
+
+        Used by ``POST /v1/tasks`` to upsert the Session row in the
+        same DB transaction as the task + outbox writes, so a task
+        submission for a fresh session is atomic with the session
+        record's existence.
+        """
+        check_tenant(session.tenant_id)
+        await self._exec_upsert(session, conn)
+
+    async def _exec_upsert(self, session: Session, conn: Any) -> None:
+        await conn.execute(
+            self._UPSERT,
+            session.session_id,
+            session.tenant_id,
+            session.principal_id,
+            session.created_at,
+            session.last_active_at,
+            session.is_closed,
+        )
 
     async def get(self, tenant_id: str, session_id: str) -> Session | None:
         check_tenant(tenant_id)

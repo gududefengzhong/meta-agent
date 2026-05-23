@@ -21,6 +21,7 @@ from meta_agent.infra.persistence import (
     PgAuditRepository,
     PgLLMUsageRepository,
     PgOutboxRepository,
+    PgSessionRepository,
     PgTaskRepository,
     PgTrajectoryRepository,
 )
@@ -79,6 +80,11 @@ def get_permission_gate(request: Request) -> PermissionGate:
 def get_task_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgTaskRepository:
     """Construct a :class:`PgTaskRepository` from the shared pool."""
     return PgTaskRepository(pool)
+
+
+def get_session_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgSessionRepository:
+    """Construct a :class:`PgSessionRepository` from the shared pool."""
+    return PgSessionRepository(pool)
 
 
 def get_outbox_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgOutboxRepository:

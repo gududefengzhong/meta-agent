@@ -77,6 +77,17 @@ class PgTaskRepository(TaskRepository):
         "SELECT * FROM tasks WHERE tenant_id = $1 AND state = $2 ORDER BY created_at LIMIT $3"
     )
 
+    # δ-1 multi-turn: load prior tasks in a session, oldest first. The
+    # worker uses this to assemble the message thread fed to the next
+    # task's LLM call. Ordered ascending so the LIMIT keeps the
+    # *earliest* tasks when the count exceeds the cap; the worker may
+    # in future swap the order to keep the most recent N if cost
+    # becomes a concern.
+    _LIST_BY_SESSION = (
+        "SELECT * FROM tasks WHERE tenant_id = $1 AND session_id = $2 "
+        "ORDER BY created_at ASC LIMIT $3"
+    )
+
     # Cross-tenant scan used by worker startup to find tasks that were
     # mid-run when the worker died. No tenant_id filter on purpose: the
     # call site is the dispatcher, not a tenant-bound request handler.
@@ -184,6 +195,18 @@ class PgTaskRepository(TaskRepository):
         check_tenant(tenant_id)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(self._LIST_BY_STATE, tenant_id, state.value, limit)
+        return [_row_to_task(dict(r)) for r in rows]
+
+    async def list_by_session(
+        self,
+        tenant_id: str,
+        session_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[Task]:
+        check_tenant(tenant_id)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(self._LIST_BY_SESSION, tenant_id, session_id, limit)
         return [_row_to_task(dict(r)) for r in rows]
 
     async def update_state(

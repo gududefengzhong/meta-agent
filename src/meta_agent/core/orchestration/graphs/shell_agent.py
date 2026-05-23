@@ -135,8 +135,38 @@ def _build_initial_messages(
     messages: list[ChatMessage] = []
     if system_prompt:
         messages.append(ChatMessage(role=MessageRole.SYSTEM, content=system_prompt))
+    # δ-1 multi-turn: prepend the prior conversation thread from the
+    # session (loaded by the worker into ``_prior_messages``) so the
+    # model sees follow-up questions in context. The worker omits
+    # this key entirely when there is no prior thread, so single-shot
+    # tasks pay no cost.
+    messages.extend(_load_prior_messages(state))
     messages.append(ChatMessage(role=MessageRole.USER, content=user_prompt))
     return messages
+
+
+def _load_prior_messages(state: TaskRunState) -> list[ChatMessage]:
+    raw = state.data.get("_prior_messages")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise GraphError("shell_agent: state.data['_prior_messages'] must be a list")
+    prior: list[ChatMessage] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise GraphError("shell_agent: _prior_messages entries must be objects")
+        role_raw = entry.get("role")
+        content_raw = entry.get("content")
+        if not isinstance(role_raw, str) or not isinstance(content_raw, str):
+            raise GraphError("shell_agent: _prior_messages entries need str role + content")
+        try:
+            role = MessageRole(role_raw)
+        except ValueError as exc:
+            raise GraphError(
+                f"shell_agent: _prior_messages role {role_raw!r} is not a MessageRole"
+            ) from exc
+        prior.append(ChatMessage(role=role, content=content_raw))
+    return prior
 
 
 def _load_messages(
