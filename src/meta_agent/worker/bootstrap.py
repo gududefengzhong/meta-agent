@@ -86,6 +86,7 @@ from meta_agent.infra.git_provider import (
     RateLimitedGitProvider,
 )
 from meta_agent.infra.llm import (
+    BroadcastingLLMClient,
     BudgetEnforcingLLMClient,
     CircuitBreakingLLMClient,
     MeteredLLMClient,
@@ -123,6 +124,7 @@ from meta_agent.infra.ratelimit import (
 )
 from meta_agent.infra.redaction import Redactor
 from meta_agent.infra.secrets import build_secrets_from_env, resolve_secret_env
+from meta_agent.infra.streaming import RedisChunkBroadcaster
 from meta_agent.infra.tools import (
     DockerWorkspaceEditTool,
     DockerWorkspaceFileSystemTool,
@@ -843,6 +845,13 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     # task output.
     redactor = Redactor()
     redacting_llm = RedactingLLMClient(routed_llm, redactor=redactor, audit_sink=audit_repo)
+    # Phase δ-1: broadcaster sits **outside** redaction so subscribers
+    # see redacted bytes only — the SSE wire to the client must never
+    # leak secrets the redactor would otherwise scrub. Publish failures
+    # are best-effort (logged, swallowed) so a Redis blip cannot stall
+    # the agent loop.
+    chunk_broadcaster = RedisChunkBroadcaster(redis_client)
+    broadcasting_llm = BroadcastingLLMClient(redacting_llm, chunk_broadcaster)
     raw_git_provider = build_git_provider(settings)
     # Mirror the LLM safety stack: breaker innermost (counts real
     # upstream failures only), limiter outermost (deny does not reach
@@ -897,7 +906,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     await ensure_seeded(prompt_registry)
     registry = build_registry(
         GraphDeps(
-            llm=redacting_llm,
+            llm=broadcasting_llm,
             git_provider=git_provider,
             git_push_token=push_token,
             tool_registry=tool_registry,
@@ -944,7 +953,8 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
 
     async def _aclose() -> None:
         await git_provider.close()
-        await redacting_llm.close()
+        await broadcasting_llm.close()
+        await chunk_broadcaster.close()
         await budget_enforcer.close()
         await rate_limiter.close()
         await breaker.close()
@@ -959,10 +969,11 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         resources={
             "pool": pool,
             "redis": redis_client,
-            "llm": redacting_llm,
+            "llm": broadcasting_llm,
             "rate_limiter": rate_limiter,
             "circuit_breaker": breaker,
             "budget_enforcer": budget_enforcer,
             "git_provider": git_provider,
+            "chunk_broadcaster": chunk_broadcaster,
         },
     )

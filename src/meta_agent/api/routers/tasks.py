@@ -23,6 +23,7 @@ from fastapi.responses import StreamingResponse
 from meta_agent.api.deps import (
     get_approval_gateway,
     get_audit_repo,
+    get_chunk_broadcaster,
     get_db_pool,
     get_outbox_repo,
     get_request_ctx,
@@ -40,6 +41,10 @@ from meta_agent.api.schemas import (
 )
 from meta_agent.core.domain.outbox import OutboxEvent
 from meta_agent.core.domain.task import Task, TaskState
+from meta_agent.core.ports.chunk_broadcaster import (
+    ChunkBroadcaster,
+    ChunkBroadcasterError,
+)
 from meta_agent.core.ports.repository import TERMINAL_TASK_STATES
 from meta_agent.infra.persistence import (
     DatabasePool,
@@ -422,5 +427,132 @@ async def stream_task_events(
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # disable nginx response buffering
+        },
+    )
+
+
+_LLM_STREAM_CHUNK_WAIT_S = 1.0
+"""How long to wait for the next chunk before checking task state.
+
+Keeps the loop responsive to terminal-state transitions and client
+disconnects even when the LLM stream is silent (e.g. the worker is
+between LLM calls, executing tools). Short enough that a finished
+task closes the stream within ~1s; long enough that an active LLM
+stream is dominated by chunk delivery rather than tick overhead.
+"""
+
+_LLM_STREAM_TERMINAL_GRACE_S = 2.0
+"""How long to keep the subscription open after the task goes terminal.
+
+A chunk may already be in flight (worker published, broadcaster
+delivering) when the task transitions; close immediately and the
+client misses the tail. Two seconds is enough for Redis pub/sub
+delivery to settle without holding the connection meaningfully
+longer than the task.
+"""
+
+
+@router.get(
+    "/tasks/{task_id}/llm-stream",
+    summary="Stream LLM token chunks for one task (SSE)",
+    responses={200: {"content": {"text/event-stream": {}}}},
+)
+async def stream_task_llm_chunks(
+    request: Request,
+    task_id: str,
+    ctx: RequestContext = Depends(get_request_ctx),
+    task_repo: PgTaskRepository = Depends(get_task_repo),
+    broadcaster: ChunkBroadcaster = Depends(get_chunk_broadcaster),
+) -> StreamingResponse:
+    """SSE stream of :class:`LLMStreamChunk` events for a task.
+
+    The worker's outermost LLM decorator
+    (:class:`BroadcastingLLMClient`) publishes each chunk to a
+    per-task channel; this endpoint subscribes and relays them as
+    SSE ``event: llm.chunk`` frames carrying the chunk's JSON
+    serialisation. The stream closes when the task enters a
+    terminal state (after a short grace window so any in-flight
+    chunk has time to land), the client disconnects, or after
+    :data:`_SSE_MAX_DURATION_S`.
+
+    No replay: pub/sub semantics mean chunks published before the
+    subscription is established are lost. Clients that need
+    durable history should consume ``/tasks/{id}/events`` (audit
+    stream) and / or fetch the post-hoc trajectory.
+    """
+
+    with bind_context(ctx):
+        task = await task_repo.get(ctx.tenant_id, task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"task {task_id!r} not found",
+        )
+
+    try:
+        iterator = await broadcaster.subscribe(tenant_id=ctx.tenant_id, task_id=task_id)
+    except ChunkBroadcasterError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="chunk broadcaster unavailable",
+        ) from exc
+
+    async def event_iterator() -> AsyncIterator[bytes]:
+        start = datetime.now(UTC)
+        last_heartbeat = start
+        terminal_observed_at: datetime | None = None
+        try:
+            with bind_context(ctx):
+                while True:
+                    if await request.is_disconnected():
+                        return
+                    now = datetime.now(UTC)
+                    if (now - start).total_seconds() >= _SSE_MAX_DURATION_S:
+                        return
+                    if (
+                        terminal_observed_at is not None
+                        and (now - terminal_observed_at).total_seconds()
+                        >= _LLM_STREAM_TERMINAL_GRACE_S
+                    ):
+                        return
+                    try:
+                        chunk = await asyncio.wait_for(
+                            iterator.__anext__(),
+                            timeout=_LLM_STREAM_CHUNK_WAIT_S,
+                        )
+                    except TimeoutError:
+                        chunk = None
+                    except StopAsyncIteration:
+                        return
+                    if chunk is not None:
+                        yield (
+                            "event: llm.chunk\ndata: " + chunk.model_dump_json() + "\n\n"
+                        ).encode()
+                        continue
+                    # No chunk in this tick — check terminal state.
+                    current = await task_repo.get(ctx.tenant_id, task_id)
+                    if (
+                        terminal_observed_at is None
+                        and current is not None
+                        and current.state in TERMINAL_TASK_STATES
+                    ):
+                        terminal_observed_at = now
+                        yield (
+                            f'event: task.terminal\ndata: {{"state": "{current.state.value}"}}\n\n'
+                        ).encode()
+                    tick = datetime.now(UTC)
+                    if (tick - last_heartbeat).total_seconds() >= _SSE_HEARTBEAT_INTERVAL_S:
+                        yield b": heartbeat\n\n"
+                        last_heartbeat = tick
+        finally:
+            await iterator.aclose()
+
+    return StreamingResponse(
+        event_iterator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         },
     )

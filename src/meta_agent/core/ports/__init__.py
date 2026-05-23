@@ -16,6 +16,10 @@ from meta_agent.core.ports.budget import (
     BudgetEnforcer,
     BudgetUsage,
 )
+from meta_agent.core.ports.chunk_broadcaster import (
+    ChunkBroadcaster,
+    ChunkBroadcasterError,
+)
 from meta_agent.core.ports.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerBackendError,
@@ -136,6 +140,8 @@ __all__ = [
     "BudgetUsage",
     "ChatMessage",
     "CheckpointRepository",
+    "ChunkBroadcaster",
+    "ChunkBroadcasterError",
     "CircuitBreaker",
     "CircuitBreakerBackendError",
     "CircuitBreakerOpenError",

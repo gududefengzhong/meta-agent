@@ -14,6 +14,7 @@ import uuid
 from fastapi import Depends, Header, HTTPException, Request, status
 
 from meta_agent.core.ports.auth import AuthBackendError, TokenValidator
+from meta_agent.core.ports.chunk_broadcaster import ChunkBroadcaster
 from meta_agent.infra.persistence import (
     DatabasePool,
     PgAuditRepository,
@@ -50,6 +51,16 @@ def get_task_topic(request: Request) -> str:
 def get_token_validator(request: Request) -> TokenValidator:
     """Return the shared :class:`TokenValidator` attached to ``app.state``."""
     return request.app.state.token_validator  # type: ignore[no-any-return]
+
+
+def get_chunk_broadcaster(request: Request) -> ChunkBroadcaster:
+    """Return the shared :class:`ChunkBroadcaster` attached to ``app.state``.
+
+    Wired by the lifespan in :mod:`meta_agent.api.app`. The API uses
+    the broadcaster's ``subscribe`` side; producing is the worker's
+    job via :class:`BroadcastingLLMClient`.
+    """
+    return request.app.state.chunk_broadcaster  # type: ignore[no-any-return]
 
 
 # ── Domain-level collaborators ────────────────────────────────────────────────
