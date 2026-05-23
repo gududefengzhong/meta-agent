@@ -42,9 +42,11 @@ from meta_agent.core.ports.llm import (
     LLMRateLimitedError,
     LLMRequest,
     LLMResponse,
+    LLMStreamChunk,
     LLMTransientError,
     LLMUsage,
     MessageRole,
+    ToolCallDelta,
 )
 from meta_agent.core.ports.llm_router import LLMRouter
 from meta_agent.core.ports.llm_usage import (
@@ -163,6 +165,7 @@ __all__ = [
     "LLMRequest",
     "LLMResponse",
     "LLMRouter",
+    "LLMStreamChunk",
     "LLMTransientError",
     "LLMUsage",
     "LLMUsageFilter",
@@ -198,6 +201,7 @@ __all__ = [
     "TestTool",
     "TokenValidator",
     "ToolCall",
+    "ToolCallDelta",
     "ToolCategory",
     "ToolContext",
     "ToolError",

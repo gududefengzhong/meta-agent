@@ -22,16 +22,27 @@ Resilience contract:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from meta_agent.core.domain.errors import ErrorCategory
 from meta_agent.core.domain.llm_usage import LLMUsageRecord, LLMUsageStatus
-from meta_agent.core.ports.llm import LLMClient, LLMError, LLMRequest, LLMResponse
+from meta_agent.core.ports.llm import (
+    FinishReason,
+    LLMClient,
+    LLMError,
+    LLMRequest,
+    LLMResponse,
+    LLMStreamChunk,
+    LLMUsage,
+)
 from meta_agent.core.ports.llm_usage import LLMUsageRepository
+from meta_agent.core.ports.tools import ToolCall
 from meta_agent.infra.security.context import RequestContext, get_current
 
 logger = logging.getLogger(__name__)
@@ -87,6 +98,49 @@ class MeteredLLMClient(LLMClient):
             elapsed_ms=elapsed_ms,
         )
         return response
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
+        """Stream the inner client while aggregating chunks into one usage row.
+
+        The decorator yields chunks unchanged. A single
+        :class:`LLMUsageRecord` is written once the stream terminates
+        (or errors): the streaming surface MUST NOT spam the usage
+        table with one row per chunk, otherwise cost roll-ups become
+        unmanageable. Aggregation reassembles ``content_delta`` parts,
+        merges per-index tool-call deltas, and uses the last-observed
+        ``usage`` / ``finish_reason`` / ``model`` / ``provider_response_id``.
+
+        Errors raised mid-stream are recorded with ``status=ERROR``
+        (carrying whatever was aggregated up to the failure) and the
+        exception is re-raised.
+        """
+
+        ctx = get_current()
+        started = self._monotonic()
+        aggregator = _StreamAggregator()
+        try:
+            async for chunk in self._inner.stream(request):
+                aggregator.observe(chunk)
+                yield chunk
+        except LLMError as exc:
+            elapsed_ms = _elapsed_ms(started, self._monotonic())
+            await self._safe_record(
+                ctx=ctx,
+                request=request,
+                response=None,
+                error=exc,
+                elapsed_ms=elapsed_ms,
+            )
+            raise
+        elapsed_ms = _elapsed_ms(started, self._monotonic())
+        synthetic = aggregator.to_response(request)
+        await self._safe_record(
+            ctx=ctx,
+            request=request,
+            response=synthetic,
+            error=None,
+            elapsed_ms=elapsed_ms,
+        )
 
     async def close(self) -> None:
         await self._inner.close()
@@ -211,3 +265,80 @@ def _utcnow() -> datetime:
 
 def _default_record_id() -> str:
     return f"llmu-{uuid.uuid4()}"
+
+
+class _StreamAggregator:
+    """Accumulate :class:`LLMStreamChunk` instances into one terminal response.
+
+    ``content_delta`` parts concatenate left-to-right; ``tool_call_deltas``
+    merge per ``index`` (id / name kept from whichever chunk supplies
+    them first, ``arguments_delta`` parts concatenate). The synthetic
+    :class:`LLMResponse` produced by :meth:`to_response` mirrors the
+    one a non-streaming call would return for the same upstream
+    interaction — accurate enough for usage rows and cost roll-ups.
+
+    Tool-call argument JSON is parsed best-effort; an arguments string
+    that fails to decode is recorded as an empty dict rather than
+    raising, since the usage row is informational only and we'd
+    rather store *something* than poison the heat path.
+    """
+
+    def __init__(self) -> None:
+        self._content_parts: list[str] = []
+        self._tool_calls: dict[int, dict[str, Any]] = {}
+        self._finish_reason: FinishReason | None = None
+        self._usage: LLMUsage | None = None
+        self._model: str | None = None
+        self._provider_response_id: str | None = None
+
+    def observe(self, chunk: LLMStreamChunk) -> None:
+        if chunk.content_delta:
+            self._content_parts.append(chunk.content_delta)
+        for delta in chunk.tool_call_deltas:
+            entry = self._tool_calls.setdefault(
+                delta.index,
+                {"id": None, "name": None, "arguments_parts": []},
+            )
+            if delta.id is not None:
+                entry["id"] = delta.id
+            if delta.name is not None:
+                entry["name"] = delta.name
+            if delta.arguments_delta:
+                entry["arguments_parts"].append(delta.arguments_delta)
+        if chunk.finish_reason is not None:
+            self._finish_reason = chunk.finish_reason
+        if chunk.usage is not None:
+            self._usage = chunk.usage
+        if chunk.model is not None:
+            self._model = chunk.model
+        if chunk.provider_response_id is not None:
+            self._provider_response_id = chunk.provider_response_id
+
+    def to_response(self, request: LLMRequest) -> LLMResponse:
+        tool_calls: list[ToolCall] = []
+        for index in sorted(self._tool_calls):
+            entry = self._tool_calls[index]
+            call_id = entry["id"]
+            name = entry["name"]
+            if not isinstance(call_id, str) or not isinstance(name, str):
+                continue
+            args_str = "".join(entry["arguments_parts"])
+            arguments: dict[str, Any]
+            if not args_str:
+                arguments = {}
+            else:
+                try:
+                    decoded = json.loads(args_str)
+                except ValueError:
+                    arguments = {}
+                else:
+                    arguments = decoded if isinstance(decoded, dict) else {}
+            tool_calls.append(ToolCall(id=call_id, name=name, arguments=arguments))
+        return LLMResponse(
+            content="".join(self._content_parts),
+            model=self._model if self._model is not None else (request.model or ""),
+            finish_reason=self._finish_reason if self._finish_reason is not None else "other",
+            usage=self._usage if self._usage is not None else LLMUsage(),
+            tool_calls=tuple(tool_calls),
+            provider_response_id=self._provider_response_id,
+        )

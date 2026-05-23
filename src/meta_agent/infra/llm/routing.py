@@ -26,7 +26,14 @@ flows through unchanged.
 
 from __future__ import annotations
 
-from meta_agent.core.ports.llm import LLMClient, LLMRequest, LLMResponse
+from collections.abc import AsyncIterator
+
+from meta_agent.core.ports.llm import (
+    LLMClient,
+    LLMRequest,
+    LLMResponse,
+    LLMStreamChunk,
+)
 from meta_agent.core.ports.llm_router import LLMRouter
 
 
@@ -83,6 +90,11 @@ class RoutingLLMClient(LLMClient):
     async def complete(self, request: LLMRequest) -> LLMResponse:
         routed = await self._maybe_route(request)
         return await self._inner.complete(routed)
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
+        routed = await self._maybe_route(request)
+        async for chunk in self._inner.stream(routed):
+            yield chunk
 
     async def close(self) -> None:
         await self._inner.close()

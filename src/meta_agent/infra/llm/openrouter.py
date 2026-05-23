@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -30,9 +31,11 @@ from meta_agent.core.ports.llm import (
     LLMRateLimitedError,
     LLMRequest,
     LLMResponse,
+    LLMStreamChunk,
     LLMTransientError,
     LLMUsage,
     MessageRole,
+    ToolCallDelta,
 )
 from meta_agent.core.ports.tools import ToolCall, ToolSpec
 from meta_agent.infra.llm.config import OpenRouterConfig
@@ -164,6 +167,122 @@ def _decode_tool_calls(raw: object) -> tuple[ToolCall, ...]:
     return tuple(decoded)
 
 
+def _decode_stream_event(event: dict[str, Any]) -> LLMStreamChunk | None:
+    """Translate one OpenRouter SSE event into a typed stream chunk.
+
+    Returns ``None`` for events that carry no observable state — some
+    providers emit keep-alive heartbeats with an empty ``choices``
+    list and no usage. Malformed events raise :class:`LLMTransientError`
+    so the caller surfaces a structured error rather than truncating
+    the stream silently.
+    """
+    choices = event.get("choices")
+    content_delta = ""
+    tool_call_deltas: tuple[ToolCallDelta, ...] = ()
+    finish_reason: FinishReason | None = None
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if not isinstance(first, dict):
+            raise LLMTransientError("openrouter stream choice not an object")
+        delta = first.get("delta")
+        if delta is not None:
+            if not isinstance(delta, dict):
+                raise LLMTransientError("openrouter stream delta not an object")
+            raw_content = delta.get("content")
+            if isinstance(raw_content, str):
+                content_delta = raw_content
+            elif raw_content is not None:
+                raise LLMTransientError("openrouter stream content not string|null")
+            tool_call_deltas = _decode_tool_call_deltas(delta.get("tool_calls"))
+        finish_raw = first.get("finish_reason")
+        if isinstance(finish_raw, str):
+            finish_reason = _coerce_finish_reason(finish_raw)
+
+    usage_value = event.get("usage")
+    usage: LLMUsage | None = None
+    if isinstance(usage_value, dict):
+        usage = LLMUsage(
+            prompt_tokens=_maybe_int(usage_value.get("prompt_tokens")),
+            completion_tokens=_maybe_int(usage_value.get("completion_tokens")),
+            total_tokens=_maybe_int(usage_value.get("total_tokens")),
+        )
+
+    model_value = event.get("model")
+    model_id = model_value if isinstance(model_value, str) else None
+
+    response_id_value = event.get("id")
+    response_id = response_id_value if isinstance(response_id_value, str) else None
+
+    if (
+        not content_delta
+        and not tool_call_deltas
+        and finish_reason is None
+        and usage is None
+        and model_id is None
+        and response_id is None
+    ):
+        return None
+
+    return LLMStreamChunk(
+        content_delta=content_delta,
+        tool_call_deltas=tool_call_deltas,
+        finish_reason=finish_reason,
+        usage=usage,
+        model=model_id,
+        provider_response_id=response_id,
+    )
+
+
+def _decode_tool_call_deltas(raw: object) -> tuple[ToolCallDelta, ...]:
+    """Parse OpenAI-style streaming ``tool_calls`` delta array.
+
+    Unlike the non-streaming counterpart in :func:`_decode_tool_calls`,
+    ``id`` / ``name`` are optional in streaming chunks (they typically
+    appear only on the first delta of each tool call), and
+    ``arguments`` is a partial JSON string fragment — callers
+    reassemble per-index before parsing.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise LLMTransientError("openrouter stream tool_calls not an array")
+    decoded: list[ToolCallDelta] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise LLMTransientError("openrouter stream tool_call entry not an object")
+        idx_raw = entry.get("index")
+        if isinstance(idx_raw, bool) or not isinstance(idx_raw, int) or idx_raw < 0:
+            raise LLMTransientError("openrouter stream tool_call missing valid index")
+        call_id_raw = entry.get("id")
+        if call_id_raw is not None and not isinstance(call_id_raw, str):
+            raise LLMTransientError("openrouter stream tool_call id not string|null")
+        function = entry.get("function")
+        name: str | None = None
+        arguments_delta = ""
+        if function is not None:
+            if not isinstance(function, dict):
+                raise LLMTransientError("openrouter stream tool_call function not an object")
+            name_raw = function.get("name")
+            if name_raw is not None:
+                if not isinstance(name_raw, str):
+                    raise LLMTransientError("openrouter stream tool_call name not string|null")
+                name = name_raw
+            args_raw = function.get("arguments")
+            if args_raw is not None:
+                if not isinstance(args_raw, str):
+                    raise LLMTransientError("openrouter stream tool_call arguments not a string")
+                arguments_delta = args_raw
+        decoded.append(
+            ToolCallDelta(
+                index=idx_raw,
+                id=call_id_raw,
+                name=name,
+                arguments_delta=arguments_delta,
+            )
+        )
+    return tuple(decoded)
+
+
 def _maybe_int(value: object) -> int | None:
     """Return ``value`` as ``int`` when possible, else ``None``."""
     if isinstance(value, bool):  # bool is subclass of int; reject explicitly
@@ -266,6 +385,90 @@ class OpenRouterClient(LLMClient):
             return parsed
         assert last_error is not None  # exhausted attempts
         raise last_error
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
+        """Open a streaming chat completion against OpenRouter.
+
+        Retries the *initial* connection on transient transport / 5xx
+        failures (using the same backoff policy as :meth:`complete`).
+        Once the first chunk has been yielded to the caller, retry is
+        no longer safe — mid-stream failures surface as
+        :class:`LLMTransientError` to the consumer.
+
+        The async generator owns the underlying ``httpx`` streaming
+        response via ``async with``; closing the generator early
+        (caller ``break``s out of ``async for``) releases the HTTP
+        resources via the standard async-generator finalisation
+        protocol.
+        """
+        body = self._build_body(request)
+        body["stream"] = True
+        attempts = self._config.max_retries + 1
+        last_error: LLMError | None = None
+
+        for attempt in range(attempts):
+            retry = False
+            chunks_yielded = False
+            try:
+                async with self._client.stream("POST", "/chat/completions", json=body) as response:
+                    if response.status_code != 200:
+                        await response.aread()
+                        try:
+                            self._parse(response)
+                        except LLMTransientError as exc:
+                            last_error = exc
+                            retry = True
+                    else:
+                        async for chunk in self._iter_sse_chunks(response):
+                            chunks_yielded = True
+                            yield chunk
+                        return
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if chunks_yielded:
+                    raise LLMTransientError(f"openrouter stream interrupted: {exc!s}") from exc
+                last_error = LLMTransientError(f"openrouter transport: {exc!s}")
+                retry = True
+                logger.warning(
+                    "llm.openrouter.stream_transport_error",
+                    extra={"attempt": attempt + 1, "error_type": type(exc).__name__},
+                )
+
+            if not retry:
+                break
+            assert last_error is not None  # retry=True always sets last_error
+            await self._maybe_backoff(attempt, attempts, last_error)
+
+        assert last_error is not None
+        raise last_error
+
+    async def _iter_sse_chunks(self, response: httpx.Response) -> AsyncIterator[LLMStreamChunk]:
+        """Parse OpenAI-compatible SSE events from a streaming response body.
+
+        Each event is a ``data: {json}`` line terminated by an empty
+        line; the sentinel ``data: [DONE]`` closes the stream. Lines
+        that are blank, prefixed with comments (``:``), or carry
+        non-data SSE fields are skipped per the SSE spec. JSON decode
+        failures surface as :class:`LLMTransientError`.
+        """
+        async for line in response.aiter_lines():
+            if not line:
+                continue
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:") :].strip()
+            if not payload:
+                continue
+            if payload == "[DONE]":
+                return
+            try:
+                event = json.loads(payload)
+            except ValueError as exc:
+                raise LLMTransientError(f"openrouter stream invalid JSON: {exc!s}") from exc
+            if not isinstance(event, dict):
+                raise LLMTransientError("openrouter stream event not an object")
+            chunk = _decode_stream_event(event)
+            if chunk is not None:
+                yield chunk
 
     async def close(self) -> None:
         await self._client.aclose()
