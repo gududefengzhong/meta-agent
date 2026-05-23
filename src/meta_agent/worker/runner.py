@@ -28,6 +28,7 @@ from meta_agent.core.orchestration.result import (
     TaskResult,
     TaskResultStatus,
 )
+from meta_agent.core.ports.llm_usage import LLMUsageRepository, UsageGroupBy
 from meta_agent.core.ports.message import MessageEnvelope
 from meta_agent.core.ports.repository import (
     TERMINAL_TASK_STATES,
@@ -92,6 +93,7 @@ class WorkerLoop:
         outbox: OutboxRepository | None = None,
         task_topic: str = "task.commands",
         webhook_fanout: WebhookFanout | None = None,
+        llm_usage: LLMUsageRepository | None = None,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], str] | None = None,
         config: WorkerConfig | None = None,
@@ -117,6 +119,10 @@ class WorkerLoop:
         # ``None`` disables the bridge entirely (unit tests, dev runs
         # without outbound webhooks configured).
         self._webhook_fanout = webhook_fanout
+        # ``llm_usage`` powers the γ-C per-task cost view on
+        # :class:`TaskResult`. ``None`` skips augmentation (unit tests
+        # that don't wire the metered LLM stack).
+        self._llm_usage = llm_usage
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._config = config or WorkerConfig()
@@ -345,6 +351,10 @@ class WorkerLoop:
             return
         finished_at = self._clock()
         result, terminal_state = self._build_result(task, graph, state, started_at, finished_at)
+        # Phase γ-C: surface the per-task cost breakdown on the
+        # terminal result so operators can see how plan / edit / review
+        # tokens split before the task row is written.
+        result = await self._augment_with_cost(task, result)
         try:
             await self._tasks.complete(
                 task.tenant_id,
@@ -480,6 +490,41 @@ class WorkerLoop:
             payload={"workspace_id": workspace.workspace_id},
         )
 
+    async def _augment_with_cost(self, task: Task, result: TaskResult) -> TaskResult:
+        """Add a ``cost_by_step_kind`` projection to ``result.output``.
+
+        γ-C surface: callers reading ``GET /v1/tasks/{id}/result`` want
+        a quick "where did the tokens go" view without re-querying
+        ``llm_usage_logs``. We aggregate once at terminal-write time
+        and bake the answer into the JSON output. ``None`` repo means
+        unit-test mode — leave the result alone.
+        """
+
+        if self._llm_usage is None:
+            return result
+        try:
+            buckets = await self._llm_usage.aggregate_for_task(
+                task.tenant_id, task.task_id, UsageGroupBy.STEP_KIND
+            )
+        except Exception:
+            logger.exception(
+                "worker.cost_aggregation_failed",
+                extra={"task_id": task.task_id, "tenant_id": task.tenant_id},
+            )
+            return result
+        cost_view = [
+            {
+                "step_kind": b.key,
+                "tokens": b.tokens,
+                "cost_usd_micros": b.cost_usd_micros,
+                "calls": b.calls,
+            }
+            for b in buckets
+        ]
+        new_output = dict(result.output) if result.output is not None else {}
+        new_output["cost_by_step_kind"] = cost_view
+        return result.model_copy(update={"output": new_output})
+
     @staticmethod
     def _build_result(
         task: Task,
@@ -529,6 +574,8 @@ class WorkerLoop:
             data: dict[str, object] = dict(task.input_payload)
             data["_permission_mode"] = task.permission_mode.value
             data["_budget_policy"] = task.budget_policy.value
+            if task.budget_threshold_micros is not None:
+                data["_budget_threshold_micros"] = task.budget_threshold_micros
             return TaskRunState(
                 task_id=task.task_id,
                 tenant_id=task.tenant_id,

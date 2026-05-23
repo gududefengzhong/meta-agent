@@ -38,6 +38,7 @@ from meta_agent.core.orchestration.graphs.shell_agent import (
     SHELL_AGENT_GRAPH_ID,
     build_shell_agent_graph,
 )
+from meta_agent.core.orchestration.human_gate import HUMAN_FEEDBACK_KEY
 from meta_agent.core.orchestration.state import END, TaskRunState
 from meta_agent.core.ports.prompt_registry import PromptRegistry
 from meta_agent.core.ports.tools import ToolCall, ToolContext
@@ -147,6 +148,7 @@ def _user_prompt(
     snapshot: dict[str, str],
     prior_verifier_output: str | None,
     prior_diff_stat: str | None,
+    human_feedback: str | None = None,
 ) -> str:
     parts: list[str] = [f"Issue:\n{issue}", "\nAllowed files:"]
     for rel in targets:
@@ -160,6 +162,17 @@ def _user_prompt(
         parts.append(f"\nVerifier output:\n{prior_verifier_output}")
         if prior_diff_stat:
             parts.append(f"\nPrevious diff stat:\n{prior_diff_stat}")
+    if human_feedback:
+        # Phase γ-C "approve with edits": forward operator-supplied
+        # free-text guidance into the next iteration. Distinct from
+        # the verifier section so the model can tell apart machine
+        # failure feedback from human authorial intent.
+        parts.append(
+            "\nA human reviewer left the following guidance. Treat it "
+            "as authoritative; if it conflicts with the verifier "
+            "feedback above, prefer the human guidance."
+        )
+        parts.append(f"\nHuman feedback:\n{human_feedback}")
     return "\n".join(parts)
 
 
@@ -371,6 +384,17 @@ def build_bug_fix_v2_graph(deps: GraphDeps) -> Graph:
             prior_verifier_output = raw_output if isinstance(raw_output, str) else None
             raw_diff = state.data.get("_diff_stat")
             prior_diff_stat = raw_diff if isinstance(raw_diff, str) else None
+        # Phase γ-C: consume operator feedback from a prior reject if
+        # this graph ever grows a human_gate (v1 already does; v2's
+        # gate lands in a follow-up). Reading the slot here means the
+        # prompt builder is ready the moment the gate is wired.
+        human_feedback: str | None = None
+        if bool(state.data.get("_rejected_with_feedback")):
+            raw_feedback = state.data.get(HUMAN_FEEDBACK_KEY)
+            human_feedback = (
+                raw_feedback if isinstance(raw_feedback, str) and raw_feedback else None
+            )
+            attempts += 1
         tool_names_raw = state.data.get("tool_names")
         tool_names = (
             tool_names_raw
@@ -396,6 +420,7 @@ def build_bug_fix_v2_graph(deps: GraphDeps) -> Graph:
                     snapshot=snapshot,
                     prior_verifier_output=prior_verifier_output,
                     prior_diff_stat=prior_diff_stat,
+                    human_feedback=human_feedback,
                 ),
                 "tool_names": list(tool_names),
                 "max_steps": state.data.get("max_steps", _DEFAULT_MAX_STEPS),
@@ -412,6 +437,10 @@ def build_bug_fix_v2_graph(deps: GraphDeps) -> Graph:
                 "_baseline_snapshot": baseline,
                 "_replan_attempts": attempts,
                 "_inner_state": inner_state.model_dump(mode="json"),
+                # Clear feedback once consumed so a subsequent reject
+                # cycle starts from a clean slot.
+                "_rejected_with_feedback": False,
+                HUMAN_FEEDBACK_KEY: None,
             }
         )
 

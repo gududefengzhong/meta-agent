@@ -41,9 +41,10 @@ import re
 from pathlib import Path
 from string import Template
 
+from meta_agent.core.orchestration.budget_gate import check_budget_policy
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
-from meta_agent.core.orchestration.human_gate import build_human_gate
+from meta_agent.core.orchestration.human_gate import HUMAN_FEEDBACK_KEY, build_human_gate
 from meta_agent.core.orchestration.state import END, TaskRunState
 from meta_agent.core.orchestration.step_kinds import STEP_EDIT, STEP_PLAN
 from meta_agent.core.ports.llm import (
@@ -154,6 +155,7 @@ def _plan_messages(
     issue: str,
     files: dict[str, str],
     prior_attempt: dict[str, str] | None = None,
+    human_feedback: str | None = None,
 ) -> tuple[ChatMessage, ...]:
     parts: list[str] = [f"Issue:\n{issue}", "Current files:"]
     for path, content in files.items():
@@ -166,6 +168,18 @@ def _plan_messages(
         parts.append(f"\nPrevious plan:\n{prior_attempt['plan']}")
         parts.append(f"\nPrevious diff summary:\n{prior_attempt['diff_stat']}")
         parts.append(f"\nVerifier output:\n{prior_attempt['verifier_output']}")
+    if human_feedback:
+        # Phase γ-C "approve with edits": an operator rejected a prior
+        # patch and supplied free-text guidance for the next iteration.
+        # Render the feedback distinctly from verifier output so the
+        # model can tell apart "the tests failed" from "the human
+        # wants this done differently".
+        parts.append(
+            "\nA human reviewer left the following guidance for the "
+            "next iteration. Treat it as authoritative; if it conflicts "
+            "with the verifier feedback above, prefer the human guidance."
+        )
+        parts.append(f"\nHuman feedback:\n{human_feedback}")
     return (
         ChatMessage(role=MessageRole.SYSTEM, content=system),
         ChatMessage(role=MessageRole.USER, content="\n".join(parts)),
@@ -365,6 +379,14 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
         return deps.prompt_registry
 
     async def plan(state: TaskRunState) -> NodeResult:
+        # Phase γ-C: per-task budget enforcement runs *first*. The
+        # check is no-op when the task has no policy, no threshold, or
+        # is still under budget. ``gate_on_threshold`` returns an
+        # ``awaiting_approval`` signal (worker pauses the task);
+        # ``abort_on_threshold`` routes to END.
+        gate_result = await check_budget_policy(state, llm_usage=deps.llm_usage, this_node="plan")
+        if gate_result is not None:
+            return gate_result
         issue = _required_str(state, "issue_description")
         targets = _target_files(state)
         workspace = Path(_required_str(state, "_workspace_path"))
@@ -390,21 +412,44 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
                 "verifier_output": str(prior_report.get("output", "")),
             }
             attempts_so_far += 1
+        # Phase γ-C: if we landed here because an operator rejected
+        # the prior patch with feedback (the gate routes ``reject``
+        # back to plan when configured for "approve with edits"), bump
+        # the replan counter so the gate's loop is bounded by the
+        # same ``_MAX_REPLAN_ATTEMPTS`` ceiling as verifier-driven
+        # replans, and surface the feedback to ``_plan_messages``.
+        human_feedback: str | None = None
+        if bool(state.data.get("_rejected_with_feedback")):
+            raw_feedback = state.data.get(HUMAN_FEEDBACK_KEY)
+            human_feedback = (
+                raw_feedback if isinstance(raw_feedback, str) and raw_feedback else None
+            )
+            attempts_so_far += 1
         plan_prompt = await _require_prompt_registry().fetch(
             BUG_FIX_PLAN_PROMPT_ID, tenant_id=state.tenant_id
         )
         response = await llm.complete(
             LLMRequest(
-                messages=_plan_messages(plan_prompt.content, issue, snapshot, prior_attempt),
+                messages=_plan_messages(
+                    plan_prompt.content,
+                    issue,
+                    snapshot,
+                    prior_attempt,
+                    human_feedback=human_feedback,
+                ),
                 prompt_id=plan_prompt.prompt_id,
                 prompt_version=plan_prompt.version,
                 step_kind=STEP_PLAN,
             )
         )
+        # Clear the consumed feedback so subsequent iterations do not
+        # double-render it; the next reject cycle writes a fresh value.
         return NodeResult(
             data_update={
                 "_plan": response.content,
                 "_replan_attempts": attempts_so_far,
+                "_rejected_with_feedback": False,
+                HUMAN_FEEDBACK_KEY: None,
             }
         )
 
@@ -556,10 +601,19 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
     g.add_node("verify", verify)
     # Phase γ-A: a single ``human_gate`` between verify and push. The
     # router only sends the state here when ``permission_mode``
-    # requires it; ``auto`` tasks bypass the gate entirely.
+    # requires it; ``auto`` tasks bypass the gate entirely. γ-C makes
+    # the gate "approve with edits"-capable: a reject routes back to
+    # ``plan`` with the operator's feedback merged into the next
+    # iteration's prompt (the plan node bumps ``_replan_attempts`` so
+    # the existing ``_MAX_REPLAN_ATTEMPTS`` ceiling still bounds the
+    # loop).
     g.add_node(
         "human_gate",
-        build_human_gate(gate_id=_PRE_PUSH_GATE_ID, next_node_when_approved="push"),
+        build_human_gate(
+            gate_id=_PRE_PUSH_GATE_ID,
+            next_node_when_approved="push",
+            next_node_when_rejected="plan",
+        ),
     )
     g.add_node("push", push)
     g.add_node("finalize", finalize)

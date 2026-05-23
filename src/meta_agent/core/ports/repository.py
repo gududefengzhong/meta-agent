@@ -124,6 +124,20 @@ class TaskRepository(ABC):
         """
 
     @abstractmethod
+    async def list_awaiting_approval_older_than(
+        self,
+        threshold_at: datetime,
+        *,
+        limit: int = 100,
+    ) -> list[Task]:
+        """Cross-tenant list of stale ``AWAITING_APPROVAL`` tasks.
+
+        Returns tasks whose ``updated_at`` is strictly less than
+        ``threshold_at``. Powers the γ-C expiry sweeper. The cross-
+        tenant convention mirrors :meth:`list_running_for_resume`.
+        """
+
+    @abstractmethod
     async def set_awaiting_approval(
         self,
         tenant_id: str,

@@ -38,6 +38,7 @@ def _row_to_task(row: dict[str, Any]) -> Task:
         state=TaskState(row["state"]),
         permission_mode=PermissionMode(row.get("permission_mode") or "auto"),
         budget_policy=BudgetPolicy(row.get("budget_policy") or "none"),
+        budget_threshold_micros=row.get("budget_threshold_micros"),
         input_payload=row["input_payload"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -51,13 +52,13 @@ class PgTaskRepository(TaskRepository):
         INSERT INTO tasks (
             task_id, tenant_id, session_id, principal_id, trace_id,
             idempotency_key, task_type, graph_id, state,
-            permission_mode, budget_policy,
+            permission_mode, budget_policy, budget_threshold_micros,
             input_payload, created_at, updated_at
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9,
-            $10, $11,
-            $12::jsonb, $13, $14
+            $10, $11, $12,
+            $13::jsonb, $14, $15
         )
         ON CONFLICT (task_id) DO UPDATE SET
             session_id = EXCLUDED.session_id,
@@ -65,6 +66,7 @@ class PgTaskRepository(TaskRepository):
             state = EXCLUDED.state,
             permission_mode = EXCLUDED.permission_mode,
             budget_policy = EXCLUDED.budget_policy,
+            budget_threshold_micros = EXCLUDED.budget_threshold_micros,
             input_payload = EXCLUDED.input_payload,
             updated_at = EXCLUDED.updated_at
     """
@@ -80,6 +82,16 @@ class PgTaskRepository(TaskRepository):
     # call site is the dispatcher, not a tenant-bound request handler.
     _LIST_BY_STATE_CROSS_TENANT = (
         "SELECT * FROM tasks WHERE state = $1 ORDER BY created_at LIMIT $2"
+    )
+
+    # γ-C sweeper: pick stale AWAITING_APPROVAL rows by updated_at.
+    # The partial index ``ix_tasks_awaiting_approval`` (added in
+    # migration 0008) covers this exactly: WHERE state='awaiting_approval'
+    # with (tenant_id, updated_at) sort order. The cross-tenant scan
+    # doesn't filter on tenant so it reads the index sequentially.
+    _LIST_AWAITING_OLDER_THAN = (
+        "SELECT * FROM tasks WHERE state = 'awaiting_approval' "
+        "AND updated_at < $1 ORDER BY updated_at LIMIT $2"
     )
 
     _UPDATE_STATE = (
@@ -151,6 +163,7 @@ class PgTaskRepository(TaskRepository):
             task.state.value,
             task.permission_mode.value,
             task.budget_policy.value,
+            task.budget_threshold_micros,
             task.input_payload,
             task.created_at,
             task.updated_at,
@@ -183,6 +196,18 @@ class PgTaskRepository(TaskRepository):
         check_tenant(tenant_id)
         async with self._pool.acquire() as conn:
             await conn.execute(self._UPDATE_STATE, tenant_id, task_id, new_state.value, updated_at)
+
+    async def list_awaiting_approval_older_than(
+        self,
+        threshold_at: datetime,
+        *,
+        limit: int = 100,
+    ) -> list[Task]:
+        """Cross-tenant stale-pause scan (γ-C sweeper)."""
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(self._LIST_AWAITING_OLDER_THAN, threshold_at, limit)
+        return [_row_to_task(dict(r)) for r in rows]
 
     async def list_running_for_resume(self, limit: int = 100) -> list[Task]:
         """Cross-tenant scan of tasks left in ``RUNNING`` by a crashed worker.

@@ -64,6 +64,14 @@ class _RecorderSpy(LLMUsageRepository):
     ) -> list[UsageAggregate]:
         raise AssertionError("aggregate_grouped not exercised by metered tests")
 
+    async def aggregate_for_task(
+        self,
+        tenant_id: str,
+        task_id: str,
+        group_by: UsageGroupBy,
+    ) -> list[UsageAggregate]:
+        raise AssertionError("aggregate_for_task not exercised by metered tests")
+
 
 def _ctx(**overrides: str | None) -> RequestContext:
     base: dict[str, str | None] = {

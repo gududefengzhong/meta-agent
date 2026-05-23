@@ -34,11 +34,19 @@ class NodeResult:
     ``TaskState.AWAITING_APPROVAL`` and ack the message. The same
     node is re-executed on resume, and is expected to advance once it
     sees the approval payload merged into ``state.data``.
+
+    ``error`` is the Phase γ-C explicit-failure signal: when set, the
+    runtime writes it into ``state.error`` so the worker's result
+    builder maps the terminal state to ``FAILED`` with a structured
+    :class:`TaskError`. Use it for deterministic policy aborts (e.g.
+    budget exceeded) where raising :class:`GraphError` would be
+    indistinguishable from a transient bug and trigger redelivery.
     """
 
     data_update: dict[str, object] = field(default_factory=dict)
     next_node: str | None = None
     awaiting_approval: bool = False
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -156,7 +164,11 @@ class Graph:
                 finished=False,
                 awaiting_approval=True,
             )
-        advanced = state.advance(next_node=current, data_update=result.data_update)
+        advanced = state.advance(
+            next_node=current,
+            data_update=result.data_update,
+            error=result.error,
+        )
         next_node = self._resolve_next(current, advanced, result.next_node)
         return advanced.model_copy(
             update={
