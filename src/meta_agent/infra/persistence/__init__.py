@@ -17,6 +17,7 @@ from meta_agent.infra.persistence.pool import DatabasePool, build_pool
 from meta_agent.infra.persistence.session_repo import PgSessionRepository
 from meta_agent.infra.persistence.task_repo import PgTaskRepository
 from meta_agent.infra.persistence.task_submitter import PgTaskSubmitter
+from meta_agent.infra.persistence.trajectory_repo import PgTrajectoryRepository
 
 __all__ = [
     "DatabasePool",
@@ -29,5 +30,6 @@ __all__ = [
     "PgSessionRepository",
     "PgTaskRepository",
     "PgTaskSubmitter",
+    "PgTrajectoryRepository",
     "build_pool",
 ]

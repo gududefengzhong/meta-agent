@@ -113,6 +113,7 @@ from meta_agent.core.ports.tools import (
     WebFetchOutcome,
     WebFetchTool,
 )
+from meta_agent.core.ports.trajectory import TrajectoryRepository
 from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 
 __all__ = [
@@ -202,6 +203,7 @@ __all__ = [
     "ToolResult",
     "ToolSpec",
     "ToolValidationError",
+    "TrajectoryRepository",
     "UsageAggregate",
     "UsageGroupBy",
     "WebFetchOutcome",

@@ -20,6 +20,7 @@ from meta_agent.infra.persistence import (
     PgLLMUsageRepository,
     PgOutboxRepository,
     PgTaskRepository,
+    PgTrajectoryRepository,
 )
 from meta_agent.infra.persistence.approval_gateway import TaskApprovalGateway
 from meta_agent.infra.persistence.checkpoint_repo import PgCheckpointRepository
@@ -77,6 +78,11 @@ def get_llm_usage_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgLLMUsageR
 def get_checkpoint_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgCheckpointRepository:
     """Construct a :class:`PgCheckpointRepository` from the shared pool."""
     return PgCheckpointRepository(pool)
+
+
+def get_trajectory_repo(pool: DatabasePool = Depends(get_db_pool)) -> PgTrajectoryRepository:
+    """Construct a :class:`PgTrajectoryRepository` from the shared pool."""
+    return PgTrajectoryRepository(pool)
 
 
 def get_approval_gateway(
