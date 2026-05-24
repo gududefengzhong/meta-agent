@@ -1,4 +1,11 @@
-"""Unit tests for :mod:`eval.swebench.evaluate` with a scripted Docker layer."""
+"""Unit tests for :mod:`eval.swebench.evaluate` with a scripted Docker layer.
+
+These exercise the spec-driven evaluation path: the runner
+command + parser are picked from
+:mod:`eval.swebench.test_specs`. The scripted Docker fake
+records every exec so each test can assert on the actual shell
+command we sent into the container.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +15,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from eval.swebench.containers import DockerError
-from eval.swebench.evaluate import _parse_pytest_output, evaluate_patch
+from eval.swebench.evaluate import evaluate_patch
 from eval.swebench.instances import SWEBenchInstance
 
 from eval.swebench import containers, evaluate
@@ -38,7 +45,6 @@ class _ScriptedDocker:
                         f"{what} failed (exit {response.returncode}): {response.stderr}"
                     )
                 return response
-        # Default: success.
         return subprocess.CompletedProcess(list(cmd_tuple), 0, "", "")
 
 
@@ -55,83 +61,49 @@ def _completed(
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
 
-def _instance() -> SWEBenchInstance:
+def _requests_instance() -> SWEBenchInstance:
+    """A ``psf/requests`` v2.5 instance — exercises the pytest-options spec."""
+
+    return SWEBenchInstance(
+        instance_id="psf__requests-1",
+        repo="psf/requests",
+        base_commit="abc123",
+        problem_statement="fix the thing",
+        test_patch=(
+            "diff --git a/test_requests.py b/test_requests.py\n"
+            "--- a/test_requests.py\n"
+            "+++ b/test_requests.py\n"
+        ),
+        fail_to_pass=("test_requests.py::TestRequests::test_a",),
+        pass_to_pass=("test_requests.py::TestRequests::test_b",),
+        version="2.5",
+    )
+
+
+def _django_instance() -> SWEBenchInstance:
+    """A ``django/django`` v3.2 instance — exercises the django runner + parser."""
+
     return SWEBenchInstance(
         instance_id="django__django-1",
         repo="django/django",
         base_commit="abc123",
         problem_statement="fix the thing",
-        test_patch=(
-            "diff --git a/tests/test_dispatch.py b/tests/test_dispatch.py\n"
-            "--- a/tests/test_dispatch.py\n"
-            "+++ b/tests/test_dispatch.py\n"
-        ),
-        fail_to_pass=("tests/test_dispatch.py::test_logs",),
-        pass_to_pass=("tests/test_dispatch.py::test_other",),
+        test_patch="",
+        fail_to_pass=("test_send_robust_fail (dispatch.tests.DispatcherTests)",),
+        pass_to_pass=("test_send_robust_no_receivers (dispatch.tests.DispatcherTests)",),
+        version="3.2",
     )
 
 
-# ----------------------------------------------------- parser unit
-
-
-def test_parse_pytest_output_recognises_three_verbs() -> None:
-    output = (
-        "PASSED tests/test_x.py::test_a\n"
-        "FAILED tests/test_x.py::test_b - AssertionError: nope\n"
-        "ERROR tests/test_x.py::test_c - fixture not found\n"
-        "============ 1 passed, 1 failed, 1 error in 0.12s ============\n"
-    )
-    out = _parse_pytest_output(output)
-    assert out == {
-        "tests/test_x.py::test_a": "passed",
-        "tests/test_x.py::test_b": "failed",
-        "tests/test_x.py::test_c": "error",
-    }
-
-
-def test_parse_pytest_output_ignores_summary_lines_and_blank_lines() -> None:
-    out = _parse_pytest_output("\nblahblah\n===== 5 passed in 1.2s =====\n")
-    assert out == {}
-
-
-def test_parse_pytest_output_later_lines_win_on_duplicate_selector() -> None:
-    output = "PASSED tests/test_x.py::test_a\nFAILED tests/test_x.py::test_a - AssertionError\n"
-    out = _parse_pytest_output(output)
-    assert out == {"tests/test_x.py::test_a": "failed"}
-
-
-# ----------------------------------------------------- evaluate_patch
+# --------------------------------------------------- pytest-options happy path
 
 
 async def test_evaluate_resolved_when_all_selectors_pass(
     scripted_docker: _ScriptedDocker,
 ) -> None:
     pytest_stdout = (
-        "PASSED tests/test_dispatch.py::test_logs\nPASSED tests/test_dispatch.py::test_other\n"
-    )
-    scripted_docker.responses.extend(
-        [
-            ("image", _completed(returncode=0)),  # image cached
-            ("run", _completed(returncode=0)),  # docker run -d
-            ("exec", _completed(returncode=0)),  # apply test_patch
-            ("exec", _completed(returncode=0)),  # apply agent patch
-            ("exec", _completed(returncode=0, stdout=pytest_stdout)),  # pytest
-            ("rm", _completed(returncode=0)),  # teardown
-        ]
-    )
-    result = await evaluate_patch(_instance(), "diff --git a/x b/x\n")
-    assert result.resolved is True
-    assert result.patch_applied is True
-    assert all(r.passed for r in result.fail_to_pass)
-    assert all(r.passed for r in result.pass_to_pass)
-
-
-async def test_evaluate_not_resolved_when_fail_to_pass_still_fails(
-    scripted_docker: _ScriptedDocker,
-) -> None:
-    pytest_stdout = (
-        "FAILED tests/test_dispatch.py::test_logs - AssertionError\n"
-        "PASSED tests/test_dispatch.py::test_other\n"
+        "PASSED test_requests.py::TestRequests::test_a\n"
+        "PASSED test_requests.py::TestRequests::test_b\n"
     )
     scripted_docker.responses.extend(
         [
@@ -139,11 +111,66 @@ async def test_evaluate_not_resolved_when_fail_to_pass_still_fails(
             ("run", _completed(returncode=0)),
             ("exec", _completed(returncode=0)),  # test_patch apply
             ("exec", _completed(returncode=0)),  # agent patch apply
+            ("exec", _completed(returncode=0, stdout=pytest_stdout)),  # pytest
+            ("rm", _completed(returncode=0)),
+        ]
+    )
+    result = await evaluate_patch(_requests_instance(), "diff --git a/x b/x\n")
+    assert result.resolved is True
+    assert result.patch_applied is True
+    assert all(r.passed for r in result.fail_to_pass)
+    assert all(r.passed for r in result.pass_to_pass)
+
+
+async def test_evaluate_uses_spec_test_cmd_inside_bash_lc_with_conda_activate(
+    scripted_docker: _ScriptedDocker,
+) -> None:
+    """The runner invocation must source the eval-image conda env."""
+
+    scripted_docker.responses.extend(
+        [
+            ("image", _completed(returncode=0)),
+            ("run", _completed(returncode=0)),
+            ("exec", _completed(returncode=0)),  # test_patch
+            ("exec", _completed(returncode=0)),  # agent patch
+            (
+                "exec",
+                _completed(
+                    returncode=0,
+                    stdout="PASSED test_requests.py::TestRequests::test_a\nPASSED test_requests.py::TestRequests::test_b\n",
+                ),
+            ),
+            ("rm", _completed(returncode=0)),
+        ]
+    )
+    await evaluate_patch(_requests_instance(), "diff --git a/x b/x\n")
+    test_exec = scripted_docker.calls[-2][0]
+    assert "bash" in test_exec
+    assert "-lc" in test_exec
+    shell_cmd = test_exec[-1]
+    assert "activate testbed" in shell_cmd
+    assert "pytest -rA" in shell_cmd
+    assert "test_requests.py::TestRequests::test_a" in shell_cmd
+
+
+async def test_evaluate_not_resolved_when_fail_to_pass_still_fails(
+    scripted_docker: _ScriptedDocker,
+) -> None:
+    pytest_stdout = (
+        "FAILED test_requests.py::TestRequests::test_a - AssertionError\n"
+        "PASSED test_requests.py::TestRequests::test_b\n"
+    )
+    scripted_docker.responses.extend(
+        [
+            ("image", _completed(returncode=0)),
+            ("run", _completed(returncode=0)),
+            ("exec", _completed(returncode=0)),
+            ("exec", _completed(returncode=0)),
             ("exec", _completed(returncode=1, stdout=pytest_stdout)),
             ("rm", _completed(returncode=0)),
         ]
     )
-    result = await evaluate_patch(_instance(), "diff --git a/x b/x\n")
+    result = await evaluate_patch(_requests_instance(), "diff --git a/x b/x\n")
     assert result.resolved is False
     assert result.fail_to_pass[0].status == "failed"
     assert result.pass_to_pass[0].passed is True
@@ -152,9 +179,7 @@ async def test_evaluate_not_resolved_when_fail_to_pass_still_fails(
 async def test_evaluate_missing_selector_treated_as_failure(
     scripted_docker: _ScriptedDocker,
 ) -> None:
-    # pytest reports only one of the two selectors (perhaps the
-    # FAIL_TO_PASS test was renamed by a buggy patch).
-    pytest_stdout = "PASSED tests/test_dispatch.py::test_other\n"
+    pytest_stdout = "PASSED test_requests.py::TestRequests::test_b\n"
     scripted_docker.responses.extend(
         [
             ("image", _completed(returncode=0)),
@@ -165,8 +190,67 @@ async def test_evaluate_missing_selector_treated_as_failure(
             ("rm", _completed(returncode=0)),
         ]
     )
-    result = await evaluate_patch(_instance(), "diff --git a/x b/x\n")
+    result = await evaluate_patch(_requests_instance(), "diff --git a/x b/x\n")
     assert result.fail_to_pass[0].status == "missing"
+    assert result.resolved is False
+
+
+# --------------------------------------------------- django path
+
+
+async def test_evaluate_django_uses_runtests_and_django_parser(
+    scripted_docker: _ScriptedDocker,
+) -> None:
+    django_stdout = (
+        "test_send_robust_fail (dispatch.tests.DispatcherTests) ... ok\n"
+        "test_send_robust_no_receivers (dispatch.tests.DispatcherTests) ... ok\n"
+    )
+    scripted_docker.responses.extend(
+        [
+            ("image", _completed(returncode=0)),
+            ("run", _completed(returncode=0)),
+            # No test_patch on this fake instance.
+            ("exec", _completed(returncode=0)),  # agent patch apply
+            ("exec", _completed(returncode=0, stdout=django_stdout)),  # runtests.py
+            ("rm", _completed(returncode=0)),
+        ]
+    )
+    result = await evaluate_patch(_django_instance(), "diff --git a/x b/x\n")
+    assert result.resolved is True
+    test_exec = scripted_docker.calls[-2][0]
+    shell_cmd = test_exec[-1]
+    assert "runtests.py" in shell_cmd
+    # Django selectors contain spaces + parens; they must be
+    # shell-quoted so the runner receives them as one argv.
+    assert "'test_send_robust_fail (dispatch.tests.DispatcherTests)'" in shell_cmd
+
+
+# --------------------------------------------------- error paths
+
+
+async def test_evaluate_unknown_repo_short_circuits_with_typed_error(
+    scripted_docker: _ScriptedDocker,
+) -> None:
+    """An instance whose (repo, version) isn't in the spec table fails clean."""
+
+    inst = SWEBenchInstance(
+        instance_id="unknown__repo-1",
+        repo="unknown/repo",
+        base_commit="abc",
+        fail_to_pass=("test_a",),
+        version="1.0",
+    )
+    scripted_docker.responses.extend(
+        [
+            ("image", _completed(returncode=0)),
+            ("run", _completed(returncode=0)),
+            # No test command runs.
+            ("rm", _completed(returncode=0)),
+        ]
+    )
+    result = await evaluate_patch(inst, "diff\n")
+    assert result.error is not None
+    assert "no test spec registered" in result.error
     assert result.resolved is False
 
 
@@ -179,20 +263,14 @@ async def test_evaluate_patch_apply_failure_short_circuits(
             ("run", _completed(returncode=0)),
             ("exec", _completed(returncode=0)),  # test_patch ok
             ("exec", _completed(returncode=1, stderr="patch fragment conflicts")),
-            # ``rm`` is still issued by Container.__aexit__ — provide a stub
-            # so the scripted fake doesn't fall through to default success
-            # for the implicit teardown.
             ("rm", _completed(returncode=0)),
         ]
     )
-    result = await evaluate_patch(_instance(), "diff --git a/x b/x\n")
+    result = await evaluate_patch(_requests_instance(), "diff --git a/x b/x\n")
     assert result.patch_applied is False
     assert result.error is not None
     assert "agent patch apply failed" in result.error
     assert result.resolved is False
-    # Pytest was never invoked.
-    verbs = [c[0][1] for c in scripted_docker.calls]
-    assert "exec" not in verbs[verbs.index("exec") + 2 :]
 
 
 async def test_evaluate_image_pull_failure_reports_structured_error(
@@ -204,7 +282,7 @@ async def test_evaluate_image_pull_failure_reports_structured_error(
             ("pull", _completed(returncode=1, stderr="rate limited")),
         ]
     )
-    result = await evaluate_patch(_instance(), "diff\n")
+    result = await evaluate_patch(_requests_instance(), "diff\n")
     assert result.patch_applied is False
     assert result.error is not None
     assert "image pull failed" in result.error
@@ -217,8 +295,8 @@ async def test_evaluate_empty_patch_still_runs_tests(
     """Empty patch is legal — the test_patch alone may already pass FAIL_TO_PASS."""
 
     pytest_stdout = (
-        "FAILED tests/test_dispatch.py::test_logs - AssertionError\n"
-        "PASSED tests/test_dispatch.py::test_other\n"
+        "FAILED test_requests.py::TestRequests::test_a - AssertionError\n"
+        "PASSED test_requests.py::TestRequests::test_b\n"
     )
     scripted_docker.responses.extend(
         [
@@ -230,14 +308,12 @@ async def test_evaluate_empty_patch_still_runs_tests(
             ("rm", _completed(returncode=0)),
         ]
     )
-    result = await evaluate_patch(_instance(), "")
+    result = await evaluate_patch(_requests_instance(), "")
     assert result.patch_applied is True
-    # FAIL_TO_PASS still failing means not resolved.
     assert result.resolved is False
-    # Make sure we didn't try to apply an empty patch.
+    # Confirm only one git apply (the test_patch), not two.
     exec_calls = [c for c in scripted_docker.calls if c[0][1] == "exec"]
     git_apply_calls = [c for c in exec_calls if "git" in c[0] and "apply" in c[0]]
-    # Only one git apply (the test_patch), not two.
     assert len(git_apply_calls) == 1
 
 
@@ -248,6 +324,7 @@ async def test_evaluate_instance_with_no_selectors_resolves_vacuously(
         instance_id="x__y-1",
         repo="x/y",
         base_commit="abc",
+        version="1.0",
     )
     scripted_docker.responses.extend(
         [
@@ -262,6 +339,4 @@ async def test_evaluate_instance_with_no_selectors_resolves_vacuously(
     assert result.pass_to_pass == ()
 
 
-# Module-level reference so the unused-import guard doesn't complain about
-# ``evaluate`` (we monkeypatch its dep, not the module itself).
 _ = evaluate

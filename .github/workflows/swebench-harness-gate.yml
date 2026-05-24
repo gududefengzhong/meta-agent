@@ -84,9 +84,13 @@ jobs:
           if [ -n "${INSTANCE_IDS}" ]; then
             args+=(--instance-ids "${INSTANCE_IDS}")
           else
-            # Default short list: a single small instance from the
-            # built-in fixture. Keeps the scheduled run cheap.
-            args+=(--limit 1)
+            # Default to the Django instance — exercises the
+            # django runner + parser path, which is the one
+            # most likely to silently regress (raw pytest
+            # gives no useful signal for django-format
+            # selectors). Single instance keeps the scheduled
+            # run under the 30-minute timeout.
+            args+=(--instance-ids django__django-13768)
           fi
           python -m eval.swebench score-gold-batch \
             "${args[@]}" \

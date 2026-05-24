@@ -1,53 +1,61 @@
-"""Score one SWE-bench instance against an agent-produced patch (PR 3).
+"""Score one SWE-bench instance against an agent-produced patch.
 
 The orchestrator pulls the eval image, spins up a container,
 applies the patch + the instance's ``test_patch`` (the second is
-what surfaces the FAIL_TO_PASS selectors), runs every selector
-through pytest, and parses the output into an :class:`InstanceResult`.
+what surfaces the FAIL_TO_PASS selectors), runs the selectors
+through the repo-appropriate test runner (django runner / sympy
+``bin/test`` / pytest, picked by :mod:`eval.swebench.test_specs`),
+and parses the runner's output via
+:mod:`eval.swebench.log_parsers`.
 
 The shape is "patch-in, result-out" so any agent — meta-agent,
 human, or another harness — can feed in a candidate patch and get
-back a stable comparable result. Wiring meta-agent's CLI output
-into this is a one-line orchestration on top.
+back a stable comparable result.
 
-Pytest output parsing
-=====================
-pytest's terse summary uses the format::
+Why not just call ``python -m pytest``
+======================================
+SWE-bench instances span repos that use different test runners.
+Django uses ``./tests/runtests.py`` (a unittest wrapper) with
+selectors shaped ``test_name (dotted.module.Class)``. Feeding
+those to pytest treats the parenthesised part as a separate
+positional argument and collects zero tests. The
+:class:`TestSpec` layer picks the right command + parser for each
+``(repo, version)`` instead.
 
-    PASSED tests/test_x.py::test_a
-    FAILED tests/test_x.py::test_b - AssertionError
-    ERROR tests/test_x.py::test_c - Fixture 'c' not found
-
-We parse exactly those three verbs and ignore everything else.
-Selectors the run didn't surface at all land as ``missing`` so
-the SWE-bench criterion treats them as failed without the
-parser pretending they passed.
+The runner runs inside the eval image's conda env ``testbed``
+(``/opt/miniconda3/bin/activate testbed``). Upstream
+SWE-bench's ``eval.sh`` does the same activation; we mirror it
+so package imports + entry points (``pytest``, ``bin/test``,
+``./tests/runtests.py``) resolve to the right interpreter.
 """
 
 from __future__ import annotations
 
 import logging
-import re
+import shlex
 
 from eval.swebench.containers import Container, DockerError, ensure_image_pulled
 from eval.swebench.images import image_name_for_instance
 from eval.swebench.instances import SWEBenchInstance
+from eval.swebench.log_parsers import PARSER_BY_NAME
 from eval.swebench.results import (
     InstanceResult,
     TestSelectorResult,
     TestStatus,
 )
+from eval.swebench.test_specs import TestSpecNotFoundError, spec_for
 
 logger = logging.getLogger(__name__)
 
-_PYTEST_LINE_RE = re.compile(r"^(?P<verb>PASSED|FAILED|ERROR)\s+(?P<selector>\S+)")
-"""Match pytest's `-v` per-test status lines.
+_CONDA_ACTIVATE = "source /opt/miniconda3/bin/activate testbed"
+"""Activate the eval image's testbed conda env before each test run.
 
-Trailing failure context (``- AssertionError: ...``) is ignored
-because we only care about the verdict per selector. The regex
-anchors to start-of-line; pytest writes other output (collection
-counts, summary banner) on different line shapes that this regex
-declines to match.
+The SWE-bench eval images install everything into a conda env
+called ``testbed``. ``docker exec`` does not source bash init
+files so the env isn't automatically active — without this
+prefix, ``pytest`` / ``./tests/runtests.py`` either fall through
+to a system Python (missing the repo's deps) or fail with
+``command not found``.
 """
 
 
@@ -65,8 +73,9 @@ async def evaluate_patch(
     2. Spin up a fresh container.
     3. Apply ``instance.test_patch`` (surfaces FAIL_TO_PASS tests).
     4. Apply ``patch_text`` (the agent's contribution).
-    5. Run every FAIL_TO_PASS + PASS_TO_PASS selector via pytest.
-    6. Parse + aggregate.
+    5. Resolve the :class:`TestSpec` for ``(repo, version)``.
+    6. Run the spec's test command with selectors appended.
+    7. Parse + aggregate.
 
     Returns an :class:`InstanceResult`. The container is always
     torn down — including on errors — via the async context
@@ -85,8 +94,6 @@ async def evaluate_patch(
         )
 
     async with Container(image=image) as container:
-        # Land the test_patch first (always; reveals FAIL_TO_PASS
-        # tests even before the agent's patch is in play).
         if instance.test_patch.strip():
             try:
                 container.exec(["git", "apply", "-"], input_text=instance.test_patch)
@@ -97,15 +104,11 @@ async def evaluate_patch(
                     patch_applied=False,
                     error=f"test_patch apply failed: {exc}",
                 )
-        # Apply the agent's patch.
         patch_applied = True
         if patch_text.strip():
             try:
                 container.exec(["git", "apply", "-"], input_text=patch_text)
             except DockerError as exc:
-                # The fail-to-apply path still returns a structured
-                # result so operators can see WHICH patch failed +
-                # WHICH instance — useful for triage.
                 return InstanceResult(
                     instance_id=instance.instance_id,
                     image=image,
@@ -114,23 +117,28 @@ async def evaluate_patch(
                 )
         selectors = tuple(instance.fail_to_pass) + tuple(instance.pass_to_pass)
         if not selectors:
-            # Nothing to test — produce an empty pass result so the
-            # eval succeeds vacuously. SWE-bench instances always
-            # have selectors in practice; this guard keeps unit
-            # tests with empty fixtures sane.
             return InstanceResult(
                 instance_id=instance.instance_id,
                 image=image,
                 patch_applied=patch_applied,
                 test_command_exit_code=0,
             )
-        run = container.exec(
-            ["python", "-m", "pytest", "-v", "--no-header", "-rN", *selectors],
-            check=False,
-        )
-        verdicts = _parse_pytest_output(run.stdout + "\n" + run.stderr)
-        f2p = tuple(_score(selector, verdicts) for selector in instance.fail_to_pass)
-        p2p = tuple(_score(selector, verdicts) for selector in instance.pass_to_pass)
+        try:
+            spec = spec_for(instance)
+        except TestSpecNotFoundError as exc:
+            return InstanceResult(
+                instance_id=instance.instance_id,
+                image=image,
+                patch_applied=patch_applied,
+                error=str(exc),
+            )
+        parser = PARSER_BY_NAME[spec.parser]
+        selector_args = " ".join(shlex.quote(s) for s in selectors)
+        shell_cmd = f"{_CONDA_ACTIVATE} && {spec.test_cmd} {selector_args}"
+        run = container.exec(["bash", "-lc", shell_cmd], check=False)
+        verdicts = parser(run.stdout + "\n" + run.stderr)
+        f2p = tuple(_score(s, verdicts) for s in instance.fail_to_pass)
+        p2p = tuple(_score(s, verdicts) for s in instance.pass_to_pass)
         return InstanceResult(
             instance_id=instance.instance_id,
             image=image,
@@ -139,32 +147,6 @@ async def evaluate_patch(
             patch_applied=patch_applied,
             test_command_exit_code=run.returncode,
         )
-
-
-def _parse_pytest_output(text: str) -> dict[str, TestStatus]:
-    """Map ``selector -> status`` for every PASSED / FAILED / ERROR line.
-
-    Later lines win on duplicates (rare; can happen if a selector
-    appears in multiple summary sections). Lines we don't recognise
-    are skipped.
-    """
-
-    verdicts: dict[str, TestStatus] = {}
-    for line in text.splitlines():
-        match = _PYTEST_LINE_RE.match(line.strip())
-        if match is None:
-            continue
-        verb = match.group("verb")
-        selector = match.group("selector")
-        status: TestStatus
-        if verb == "PASSED":
-            status = "passed"
-        elif verb == "FAILED":
-            status = "failed"
-        else:
-            status = "error"
-        verdicts[selector] = status
-    return verdicts
 
 
 def _score(selector: str, verdicts: dict[str, TestStatus]) -> TestSelectorResult:

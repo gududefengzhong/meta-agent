@@ -39,10 +39,16 @@ def _make_local_repo(tmp_path: Path) -> tuple[str, str, str]:
 
 
 def _write_local_dataset(tmp_path: Path, *, base_commit: str, instance_id: str) -> Path:
+    # ``psf/requests`` v2.5 is registered in the test-spec table, so the
+    # evaluate CLI can run end-to-end against this fake dataset. The
+    # test_patch still edits ``calc.py`` (the seed repo's only file)
+    # so the ``prepare --apply-test-patch`` test path keeps working
+    # — the FAIL_TO_PASS selector and the test_patch target file
+    # don't have to be the same file for these unit tests.
     rows = [
         {
             "instance_id": instance_id,
-            "repo": "test/repo",
+            "repo": "psf/requests",
             "base_commit": base_commit,
             "problem_statement": "fix the bug",
             "patch": "",
@@ -55,9 +61,9 @@ def _write_local_dataset(tmp_path: Path, *, base_commit: str, instance_id: str) 
                 "-    return x + y\n"
                 "+    return x + y  # test marker\n"
             ),
-            "FAIL_TO_PASS": ["tests/test_calc.py::test_marker"],
+            "FAIL_TO_PASS": ["test_requests.py::TestRequests::test_marker"],
             "PASS_TO_PASS": [],
-            "version": "1.0",
+            "version": "2.5",
             "environment_setup_commit": base_commit,
         }
     ]
@@ -332,7 +338,7 @@ def test_evaluate_resolved_exits_0(
             (0, "", ""),  # docker run
             (0, "", ""),  # exec: git apply test_patch
             (0, "", ""),  # exec: git apply agent patch
-            (0, "PASSED tests/test_calc.py::test_marker\n", ""),  # exec: pytest
+            (0, "PASSED test_requests.py::TestRequests::test_marker\n", ""),  # exec: pytest
             (0, "", ""),  # docker rm
         ],
     )
@@ -371,7 +377,7 @@ def test_evaluate_not_resolved_exits_5(
             (0, "", ""),
             (0, "", ""),
             (0, "", ""),
-            (1, "FAILED tests/test_calc.py::test_marker - AssertionError\n", ""),
+            (1, "FAILED test_requests.py::TestRequests::test_marker - AssertionError\n", ""),
             (0, "", ""),
         ],
     )
@@ -425,14 +431,14 @@ def _write_dataset_with_gold(
     rows = [
         {
             "instance_id": instance_id,
-            "repo": "test/repo",
+            "repo": "psf/requests",
             "base_commit": "abc123",
             "problem_statement": "fix the bug",
             "patch": gold_patch,
             "test_patch": "",
-            "FAIL_TO_PASS": ["tests/test_calc.py::test_marker"],
+            "FAIL_TO_PASS": ["test_requests.py::TestRequests::test_marker"],
             "PASS_TO_PASS": [],
-            "version": "1.0",
+            "version": "2.5",
             "environment_setup_commit": "abc123",
         }
     ]
@@ -454,7 +460,7 @@ def test_score_gold_batch_resolved_exits_0(
             (0, "", ""),  # docker image inspect
             (0, "", ""),  # docker run
             (0, "", ""),  # exec: git apply gold patch (test_patch is empty)
-            (0, "PASSED tests/test_calc.py::test_marker\n", ""),  # pytest
+            (0, "PASSED test_requests.py::TestRequests::test_marker\n", ""),  # pytest
             (0, "", ""),  # docker rm
         ],
     )
@@ -493,7 +499,11 @@ def test_score_gold_batch_default_fail_under_is_strict(
             (0, "", ""),  # inspect
             (0, "", ""),  # run
             (0, "", ""),  # apply gold
-            (1, "FAILED tests/test_calc.py::test_marker - AssertionError\n", ""),  # pytest
+            (
+                1,
+                "FAILED test_requests.py::TestRequests::test_marker - AssertionError\n",
+                "",
+            ),  # pytest
             (0, "", ""),  # rm
         ],
     )
@@ -524,7 +534,7 @@ def test_score_gold_batch_writes_report_file(
             (0, "", ""),
             (0, "", ""),
             (0, "", ""),
-            (0, "PASSED tests/test_calc.py::test_marker\n", ""),
+            (0, "PASSED test_requests.py::TestRequests::test_marker\n", ""),
             (0, "", ""),
         ],
     )
