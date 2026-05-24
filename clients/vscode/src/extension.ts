@@ -12,6 +12,10 @@
 // lifecycle stream observes a terminal state. An `AbortController`
 // owns the streams so deactivation / cancellation tears them down
 // cleanly.
+//
+// Each task gets a trajectory webview (assistant text + lifecycle
+// events + permission prompts on one timeline) as its primary view;
+// the output channel still records the raw stream for debugging.
 
 import * as vscode from "vscode";
 
@@ -25,6 +29,7 @@ import {
 } from "./client";
 import { readConfig } from "./config";
 import { EditReviewPanel } from "./diff_webview";
+import { TrajectoryPanel } from "./trajectory_webview";
 import {
     createOutputChannel,
     decidePermissionViaUi,
@@ -34,13 +39,16 @@ import {
 
 let outputChannel: vscode.OutputChannel | undefined;
 let editPanel: EditReviewPanel | undefined;
+let trajectoryPanel: TrajectoryPanel | undefined;
 const watchers = new Map<string, AbortController>();
 
 export function activate(context: vscode.ExtensionContext): void {
     outputChannel = createOutputChannel();
     editPanel = new EditReviewPanel();
+    trajectoryPanel = new TrajectoryPanel();
     context.subscriptions.push(outputChannel);
     context.subscriptions.push({ dispose: () => editPanel?.dispose() });
+    context.subscriptions.push({ dispose: () => trajectoryPanel?.dispose() });
 
     context.subscriptions.push(
         vscode.commands.registerCommand("metaAgent.run", async () => {
@@ -60,6 +68,8 @@ export function deactivate(): void {
     outputChannel?.dispose();
     editPanel?.dispose();
     editPanel = undefined;
+    trajectoryPanel?.dispose();
+    trajectoryPanel = undefined;
 }
 
 async function commandRun(): Promise<void> {
@@ -92,6 +102,7 @@ async function commandRun(): Promise<void> {
         return;
     }
     channel.appendLine(`[task ${task.task_id} state=${task.state}]`);
+    ensureTrajectoryPanel().attach(task.task_id, prompt);
     await watchTask(client, task.task_id, channel);
 }
 
@@ -111,6 +122,7 @@ async function commandTail(): Promise<void> {
     const channel = ensureOutputChannel();
     channel.show(true);
     channel.appendLine(`[attaching to ${taskId}]`);
+    ensureTrajectoryPanel().attach(taskId, null);
     await watchTask(client, taskId, channel);
 }
 
@@ -130,11 +142,14 @@ async function watchTask(
     }
     const controller = new AbortController();
     watchers.set(taskId, controller);
+    const trajectory = ensureTrajectoryPanel();
 
     const chunkLoop = (async () => {
         try {
             for await (const chunk of client.streamLlmChunks(taskId, controller.signal)) {
-                logChunk(channel, chunk as LlmStreamChunk);
+                const typed = chunk as LlmStreamChunk;
+                logChunk(channel, typed);
+                trajectory.pushChunk(taskId, typed);
             }
         } catch (err) {
             if (!isAbort(err)) {
@@ -145,16 +160,24 @@ async function watchTask(
 
     const promptLoop = (async () => {
         try {
-            for await (const prompt of client.streamPermissionPrompts(
+            for await (const promptEvent of client.streamPermissionPrompts(
                 taskId,
                 controller.signal,
             )) {
+                const prompt = promptEvent as PermissionPrompt;
+                trajectory.pushPrompt(taskId, prompt);
                 // Render + decide. We deliberately await the user's
                 // decision: a fast model emitting back-to-back
                 // prompts is rare in v0, and serialising keeps the
                 // UX comprehensible.
                 const panel = editPanel ?? new EditReviewPanel();
-                await decidePermissionViaUi(client, prompt as PermissionPrompt, panel);
+                const decision = await decidePermissionViaUi(client, prompt, panel);
+                trajectory.pushDecision(
+                    taskId,
+                    prompt.prompt_id,
+                    decision.allow,
+                    decision.reason ?? null,
+                );
             }
         } catch (err) {
             if (!isAbort(err)) {
@@ -166,7 +189,9 @@ async function watchTask(
     const eventLoop = (async () => {
         try {
             for await (const event of client.streamEvents(taskId, controller.signal)) {
-                const state = logEvent(channel, event as LifecycleEvent);
+                const typed = event as LifecycleEvent;
+                const state = logEvent(channel, typed);
+                trajectory.pushEvent(taskId, typed);
                 if (isTerminalState(state)) {
                     controller.abort();
                     return;
@@ -212,6 +237,13 @@ function ensureOutputChannel(): vscode.OutputChannel {
         outputChannel = createOutputChannel();
     }
     return outputChannel;
+}
+
+function ensureTrajectoryPanel(): TrajectoryPanel {
+    if (!trajectoryPanel) {
+        trajectoryPanel = new TrajectoryPanel();
+    }
+    return trajectoryPanel;
 }
 
 function isAbort(err: unknown): boolean {

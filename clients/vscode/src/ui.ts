@@ -39,11 +39,16 @@ export function logEvent(channel: vscode.OutputChannel, event: LifecycleEvent): 
     return state;
 }
 
+export interface PermissionDecision {
+    allow: boolean;
+    reason?: string;
+}
+
 export async function decidePermissionViaUi(
     client: MetaAgentClient,
     prompt: PermissionPrompt,
     editPanel: EditReviewPanel,
-): Promise<void> {
+): Promise<PermissionDecision> {
     const isPlan = prompt.tool_name === PLAN_TOOL_SENTINEL;
     let allow: boolean;
     let reason: string | undefined;
@@ -76,6 +81,7 @@ export async function decidePermissionViaUi(
             `meta-agent: failed to deliver permission decision: ${String(err)}`,
         );
     }
+    return { allow, reason };
 }
 
 async function showToolPrompt(prompt: PermissionPrompt): Promise<boolean> {
