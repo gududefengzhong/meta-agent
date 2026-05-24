@@ -24,6 +24,7 @@ import {
     isTerminalState,
 } from "./client";
 import { readConfig } from "./config";
+import { EditReviewPanel } from "./diff_webview";
 import {
     createOutputChannel,
     decidePermissionViaUi,
@@ -32,11 +33,14 @@ import {
 } from "./ui";
 
 let outputChannel: vscode.OutputChannel | undefined;
+let editPanel: EditReviewPanel | undefined;
 const watchers = new Map<string, AbortController>();
 
 export function activate(context: vscode.ExtensionContext): void {
     outputChannel = createOutputChannel();
+    editPanel = new EditReviewPanel();
     context.subscriptions.push(outputChannel);
+    context.subscriptions.push({ dispose: () => editPanel?.dispose() });
 
     context.subscriptions.push(
         vscode.commands.registerCommand("metaAgent.run", async () => {
@@ -54,6 +58,8 @@ export function deactivate(): void {
     }
     watchers.clear();
     outputChannel?.dispose();
+    editPanel?.dispose();
+    editPanel = undefined;
 }
 
 async function commandRun(): Promise<void> {
@@ -147,7 +153,8 @@ async function watchTask(
                 // decision: a fast model emitting back-to-back
                 // prompts is rare in v0, and serialising keeps the
                 // UX comprehensible.
-                await decidePermissionViaUi(client, prompt as PermissionPrompt);
+                const panel = editPanel ?? new EditReviewPanel();
+                await decidePermissionViaUi(client, prompt as PermissionPrompt, panel);
             }
         } catch (err) {
             if (!isAbort(err)) {

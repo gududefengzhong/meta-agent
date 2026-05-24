@@ -11,6 +11,7 @@ import type {
     MetaAgentClient,
     PermissionPrompt,
 } from "./client";
+import { type EditReviewPanel, isEditTool } from "./diff_webview";
 
 const PLAN_TOOL_SENTINEL = "<plan>";
 
@@ -41,24 +42,31 @@ export function logEvent(channel: vscode.OutputChannel, event: LifecycleEvent): 
 export async function decidePermissionViaUi(
     client: MetaAgentClient,
     prompt: PermissionPrompt,
+    editPanel: EditReviewPanel,
 ): Promise<void> {
     const isPlan = prompt.tool_name === PLAN_TOOL_SENTINEL;
     let allow: boolean;
+    let reason: string | undefined;
     if (isPlan) {
         allow = await showPlanPrompt(prompt);
+    } else if (isEditTool(prompt.tool_name)) {
+        // Edit prompts go through the webview — the modal can't render
+        // the side-by-side diff users want before approving a write.
+        const decision = await editPanel.show(prompt);
+        allow = decision.allow;
+        reason = decision.reason;
     } else {
         allow = await showToolPrompt(prompt);
     }
-    let reason: string | undefined;
-    if (!allow) {
-        reason = await vscode.window.showInputBox({
+    if (!allow && reason === undefined && !isEditTool(prompt.tool_name)) {
+        // Webview path already collected the reason inline; only the
+        // modal paths need a follow-up input box.
+        const input = await vscode.window.showInputBox({
             prompt: `Reason for denying ${prompt.tool_name} (optional)`,
             placeHolder: "Leave blank to skip",
         });
-        if (reason === undefined) {
-            reason = undefined;
-        } else if (reason.trim() === "") {
-            reason = undefined;
+        if (input !== undefined && input.trim() !== "") {
+            reason = input.trim();
         }
     }
     try {
