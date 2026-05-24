@@ -411,3 +411,161 @@ def test_evaluate_unknown_instance_id_exits_3(
         ]
     )
     assert code == EXIT_NOT_FOUND
+
+
+# --------------------------------------------------- score-gold-batch command
+
+
+def _write_dataset_with_gold(
+    tmp_path: Path,
+    *,
+    instance_id: str,
+    gold_patch: str,
+) -> Path:
+    rows = [
+        {
+            "instance_id": instance_id,
+            "repo": "test/repo",
+            "base_commit": "abc123",
+            "problem_statement": "fix the bug",
+            "patch": gold_patch,
+            "test_patch": "",
+            "FAIL_TO_PASS": ["tests/test_calc.py::test_marker"],
+            "PASS_TO_PASS": [],
+            "version": "1.0",
+            "environment_setup_commit": "abc123",
+        }
+    ]
+    path = tmp_path / "instances.json"
+    path.write_text(json.dumps(rows), encoding="utf-8")
+    return path
+
+
+def test_score_gold_batch_resolved_exits_0(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Gold patch that resolves leaves the gate green (exit 0)."""
+
+    _script_docker(
+        monkeypatch,
+        [
+            (0, "", ""),  # docker image inspect
+            (0, "", ""),  # docker run
+            (0, "", ""),  # exec: git apply gold patch (test_patch is empty)
+            (0, "PASSED tests/test_calc.py::test_marker\n", ""),  # pytest
+            (0, "", ""),  # docker rm
+        ],
+    )
+    dataset = _write_dataset_with_gold(
+        tmp_path,
+        instance_id="test__repo-1",
+        gold_patch="diff --git a/x b/x\n",
+    )
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "score-gold-batch",
+            "--instance-ids",
+            "test__repo-1",
+        ]
+    )
+    assert code == EXIT_OK
+    out = capsys.readouterr()
+    payload = json.loads(out.out)
+    assert payload["total"] == 1
+    assert payload["resolved"] == 1
+
+
+def test_score_gold_batch_default_fail_under_is_strict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing gold patch trips the default ``--fail-under 1.0`` gate."""
+
+    from eval.swebench.__main__ import EXIT_NOT_RESOLVED
+
+    _script_docker(
+        monkeypatch,
+        [
+            (0, "", ""),  # inspect
+            (0, "", ""),  # run
+            (0, "", ""),  # apply gold
+            (1, "FAILED tests/test_calc.py::test_marker - AssertionError\n", ""),  # pytest
+            (0, "", ""),  # rm
+        ],
+    )
+    dataset = _write_dataset_with_gold(
+        tmp_path,
+        instance_id="test__repo-1",
+        gold_patch="diff --git a/x b/x\n",
+    )
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "score-gold-batch",
+            "--instance-ids",
+            "test__repo-1",
+        ]
+    )
+    assert code == EXIT_NOT_RESOLVED
+
+
+def test_score_gold_batch_writes_report_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _script_docker(
+        monkeypatch,
+        [
+            (0, "", ""),
+            (0, "", ""),
+            (0, "", ""),
+            (0, "PASSED tests/test_calc.py::test_marker\n", ""),
+            (0, "", ""),
+        ],
+    )
+    dataset = _write_dataset_with_gold(
+        tmp_path,
+        instance_id="test__repo-1",
+        gold_patch="diff --git a/x b/x\n",
+    )
+    report_path = tmp_path / "reports" / "gold.json"
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "score-gold-batch",
+            "--instance-ids",
+            "test__repo-1",
+            "--report-path",
+            str(report_path),
+        ]
+    )
+    assert code == EXIT_OK
+    payload = json.loads(report_path.read_text())
+    assert payload["total"] == 1
+    assert payload["resolved"] == 1
+
+
+def test_score_gold_batch_unknown_instance_exits_3(
+    tmp_path: Path,
+) -> None:
+    dataset = _write_dataset_with_gold(
+        tmp_path,
+        instance_id="test__repo-1",
+        gold_patch="diff\n",
+    )
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "score-gold-batch",
+            "--instance-ids",
+            "nope",
+        ]
+    )
+    assert code == EXIT_NOT_FOUND
