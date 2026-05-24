@@ -50,14 +50,18 @@ def _make_remote(tmp_path: Path) -> tuple[str, str]:
 
 
 def _instance(base_commit: str) -> SWEBenchInstance:
+    # ``psf/requests`` v2.5 has a registered :class:`TestSpec`, which
+    # ``evaluate_patch`` requires. The FAIL_TO_PASS selector is in
+    # pytest-options format so the mocked pytest output stub matches.
     return SWEBenchInstance(
-        instance_id="test__repo-1",
-        repo="test/repo",
+        instance_id="psf__requests-1",
+        repo="psf/requests",
         base_commit=base_commit,
         problem_statement="Add +1 to calc.add return value.",
-        test_patch="",  # Keep the pipeline test focused on the round-trip
-        fail_to_pass=("tests/test_calc.py::test_add",),
+        test_patch="",
+        fail_to_pass=("test_requests.py::TestRequests::test_add",),
         pass_to_pass=(),
+        version="2.5",
     )
 
 
@@ -123,7 +127,7 @@ async def test_full_pipeline_resolved_when_agent_fixes_the_test(
             (0, "", ""),  # docker image inspect → cached
             (0, "", ""),  # docker run -d
             (0, "", ""),  # exec: git apply agent patch
-            (0, "PASSED tests/test_calc.py::test_add\n", ""),  # pytest
+            (0, "PASSED test_requests.py::TestRequests::test_add\n", ""),  # pytest
             (0, "", ""),  # docker rm
         ],
     )
@@ -139,7 +143,7 @@ async def test_full_pipeline_resolved_when_agent_fixes_the_test(
     assert agent_result.steps == 2
     assert "+    return x + y + 1" in agent_result.patch
     # Workspace was left on disk for inspection.
-    assert (tmp_path / "eval-runs" / "test__repo-1" / "calc.py").exists()
+    assert (tmp_path / "eval-runs" / "psf__requests-1" / "calc.py").exists()
 
 
 async def test_full_pipeline_not_resolved_when_agent_produces_wrong_patch(
@@ -170,7 +174,7 @@ async def test_full_pipeline_not_resolved_when_agent_produces_wrong_patch(
             (0, "", ""),
             (0, "", ""),
             (0, "", ""),
-            (1, "FAILED tests/test_calc.py::test_add - AssertionError\n", ""),
+            (1, "FAILED test_requests.py::TestRequests::test_add - AssertionError\n", ""),
             (0, "", ""),
         ],
     )
@@ -200,18 +204,18 @@ async def test_full_pipeline_overwrites_existing_workspace(
         [
             (0, "", ""),
             (0, "", ""),
-            (0, "PASSED tests/test_calc.py::test_add\n", ""),
+            (0, "PASSED test_requests.py::TestRequests::test_add\n", ""),
             (0, "", ""),
             (0, "", ""),
             (0, "", ""),
-            (0, "PASSED tests/test_calc.py::test_add\n", ""),
+            (0, "PASSED test_requests.py::TestRequests::test_add\n", ""),
             (0, "", ""),
         ],
     )
     work_root = tmp_path / "eval-runs"
     await run_full_pipeline(_instance(sha), llm=llm, work_root=work_root, remote_url=url)
     # Mutate the workspace to prove the second prepare overwrites it.
-    workspace = work_root / "test__repo-1"
+    workspace = work_root / "psf__requests-1"
     (workspace / "stale-file").write_text("should be wiped")
     await run_full_pipeline(_instance(sha), llm=llm, work_root=work_root, remote_url=url)
     assert not (workspace / "stale-file").exists()
