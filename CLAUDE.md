@@ -74,15 +74,36 @@
 - 开发原则：`docs/specs/ANDREJ_KARPATHY_PRINCIPLES.md`
 
 ## 当前状态
-<!-- 架构 / 模式 / 已冻结决策在 ji___；新 session 先 ji___ 回忆 /Users/mudimu/mudi/web2/meta-agent -->
-- HEAD：`main` @ `1e4767b`（Merge PR #10 from feat/bug-fix-replan-loop）
-- L0 + L1 三条 graph 全部落地，并把外部副作用通到真实 GitHub：
-  - PR #7：真实 `GitHubGitProvider`（凭据 / 限流 / 重试；live PR open 已验证）
-  - PR #8：`bug_fix` 增加 `push` 节点，凭据通过一次性 git credential helper 注入，永不进 argv / 日志
-  - PR #9：`bug_fix` → `auto_pr` 串联（task submitter；子任务 `_parent_task_id` 透传；audit `task.chain_enqueued`）
-  - PR #10：候选 C 最小子集 —— `bug_fix` verifier 失败回 `plan` 一次（`_MAX_REPLAN_ATTEMPTS=1`），verifier_output / 前次 plan / diff_stat 作为反馈段进入第二次 plan 的 user message；`output.attempts` 暴露 1/2；replan 的新 patch 叠加在失败 commit 上（无 reset/squash）。同步 `ruff format` drift 5 个无关文件，CI `quality` 转绿
-- L1 全链路 live smoke against real GitHub：Phase A（直接 AUTO_PR → PR #1）/ Phase B（BUG_FIX → chain → AUTO_PR → PR #2）均真实开出
-- 测试：264 passed（bug_fix 16，含新增 `test_replan_succeeds_after_first_verify_failure`），mypy --strict 通过，CI `quality` + `integration` 双绿
-- L2 / L3：未启动
-- 已知遗留小修：chain `_derive_issue_title` 72-char 截断不考虑词边界，会切断单词（live smoke 中出现 "F401 ruff violati"）。未来做 chain 输出修饰时再处理。
-- 下一里程碑：**待规划**。剩余候选 ①outbound webhooks / 状态回调（OutboxEvent 已有底座，需扩 consumer + retry/signing/dedupe）②orchestration 强化补完（NodeResult 错误模型、多语言 verifier）③observability / 运营底座（审计查询 + LLM 成本聚合视图）④`code_review` 接 auto_pr 开出的 PR（review/approve gate；GitProvider 端口增量）。新 session 建议先做最小化探索再选。
+<!-- 阶段进度高层快照，避免写具体 HEAD SHA（立刻就过时）。详细 PR 路径见 docs/specs/AGENT_SPEC.md 阶段段。 -->
+
+### 已完成阶段
+- **α**（安全生产线）/ **β**（tool-use loop + 容器沙箱）/ **β+**（retrieval / web 工具 / 多模型路由 / prompt 资产 / feature_impl 任务类型）— 已落地并冻结
+- **γ**（信任面 + 长程恢复）— A / B-1 / B-2 / C / D 全部合入 main
+- **δ-1 Track A**（客户端 scaffold）— **已完成**（PR #33–#41）
+  - 服务端 streaming + Redis pub/sub broadcaster + `/llm-stream` SSE
+  - Graph 全部走 `aggregate_stream_to_response`
+  - `PermissionGate` Port + Redis 实现 + `/permissions/stream` SSE + `/decide` 端点
+  - shell_agent `approve_each_tool` / `plan` 两种 inline-permission 流
+  - Session 模型 + 自动 upsert + 历史消息线注入下一轮
+  - CLI v0（submit / tail / run；inline prompt 处理）
+  - VS Code v0（metaAgent.run / tail；showWarningMessage modal）
+- **δ-2 Plan mode** — **已提前落地**（PR #40，复用 PermissionGate 走 batch-approval；更深一版"用户在 approve 前编辑 plan 文本"未做）
+
+### 进行中
+- **δ-1 Track B**（SWE-bench harness）— **harness 已就绪**（PR #42–#44）：dataset loader + image 名解析 + workspace 准备 + diff 抽取 + Docker container 生命周期 + apply patch + pytest + 结果聚合。**未做**：meta-agent ↔ eval 接入、聚合脚本（pass@1 / cost / 失败切片）、CI 集成
+
+### 未启动
+- **δ-2**（剩余）：diff review WebView / rich trajectory viewer / workspace browser / resume conversation 的 IDE UI
+- **δ-3**：AGENTS.md / PR review comments / BYO LLM 配置面 / MCP Server
+- **ε**：K8s Helm / Prometheus + Grafana / OTel exporter / SSO / RBAC / Web UI
+- **ζ**（后置）：沙箱深度 + 合规面
+
+### 下一里程碑候选
+新 session 进来时按需挑：
+1. **Meta-agent ↔ eval 接入 + SWE-bench 实跑** — 关掉 Track B 闭环；产出第一个 pass@1 数字
+2. **AWAITING_APPROVAL deprecation 清理** — γ-A 与 δ-1 两套 approval 机制并存；审计哪些 graph 还在用、缩窄 API
+3. **δ-2 deeper VS Code UX** — diff review webview / workspace browser / trajectory viewer 三选一
+4. **SWE-bench CI gate** — 即使没接 meta-agent，先用 gold patches 做 harness 回归保护
+5. **ε K8s + observability** — 与 δ 系平行的部署轨
+
+新 session 建议先 1 分钟最小化探索（git log / 相关模块 / 已有测试）再挑。
