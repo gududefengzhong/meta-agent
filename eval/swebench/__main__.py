@@ -16,9 +16,14 @@ Commands:
 * ``run-agent <instance_id> --work-root <dir>`` (PR 4) — full
   pipeline: prepare workspace + drive ``builtin.shell_agent`` to
   produce a patch + score it. Closes the Track B loop end-to-end.
+* ``run-batch [--instance-ids X,Y | --limit N] --work-root <dir>
+  --report-path <file>`` (PR 5) — run-agent across many instances;
+  aggregate into a :class:`BatchReport` with pass@1.
 
-Exit codes: 0=ok/resolved, 5=not resolved, 3=instance not found,
-4=workspace error, 6=docker error, 7=LLM config error.
+Exit codes: 0=ok/resolved (single) / batch finished cleanly,
+5=not resolved (single) / pass@1 below ``--fail-under`` (batch),
+3=instance not found, 4=workspace error, 6=docker error,
+7=LLM config error.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ import json
 import sys
 from pathlib import Path
 
+from eval.swebench.batch import run_batch
 from eval.swebench.containers import DockerError
 from eval.swebench.dataset import SWEBenchDatasetError, load_instance, load_instances
 from eval.swebench.evaluate import evaluate_patch
@@ -36,6 +42,7 @@ from eval.swebench.images import image_name_for_instance
 from eval.swebench.llm_factory import EvalLLMConfigError, build_default_llm
 from eval.swebench.patches import apply_test_patch, extract_patch
 from eval.swebench.pipeline import run_full_pipeline
+from eval.swebench.results import InstanceReport
 from eval.swebench.workspace import WorkspaceError, prepare_workspace
 
 EXIT_OK = 0
@@ -180,6 +187,76 @@ def build_parser() -> argparse.ArgumentParser:
         help="shell_agent max plan iterations (default 20; production uses 8).",
     )
 
+    p_batch = sub.add_parser(
+        "run-batch",
+        help="Run the agent pipeline across multiple instances; aggregate into a BatchReport",
+    )
+    selector = p_batch.add_mutually_exclusive_group()
+    selector.add_argument(
+        "--instance-ids",
+        default=None,
+        help="Comma-separated instance ids to run (exact match against the dataset).",
+    )
+    selector.add_argument(
+        "--repo",
+        action="append",
+        default=[],
+        help="Repo filter (org/repo). Repeatable. Mutually exclusive with --instance-ids.",
+    )
+    p_batch.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Cap the number of instances after filtering. Default: all matched.",
+    )
+    p_batch.add_argument(
+        "--work-root",
+        type=Path,
+        required=True,
+        help="Parent directory for per-instance workspaces (one subdir per instance).",
+    )
+    p_batch.add_argument(
+        "--report-path",
+        type=Path,
+        default=None,
+        help="If set, write the BatchReport JSON here in addition to stdout.",
+    )
+    p_batch.add_argument(
+        "--api-key",
+        default=None,
+        help="OpenRouter API key. Defaults to $OPENROUTER_API_KEY.",
+    )
+    p_batch.add_argument(
+        "--model",
+        default="deepseek/deepseek-chat",
+        help="Default LLM model passed to OpenRouter.",
+    )
+    p_batch.add_argument(
+        "--remote-url",
+        default=None,
+        help="Override the clone URL (same semantics as ``prepare --remote-url``).",
+    )
+    p_batch.add_argument(
+        "--arch",
+        default=None,
+        help="Image arch override (x86_64 / arm64).",
+    )
+    p_batch.add_argument(
+        "--max-steps",
+        type=int,
+        default=20,
+        help="shell_agent max plan iterations per instance.",
+    )
+    p_batch.add_argument(
+        "--fail-under",
+        type=float,
+        default=None,
+        help=(
+            "If set, exit 5 when pass@1 falls below this fraction (0.0–1.0). "
+            "Use in CI to gate on quality regression. Default: never fail."
+        ),
+    )
+
     return parser
 
 
@@ -199,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_evaluate(args)
         if args.command == "run-agent":
             return _cmd_run_agent(args)
+        if args.command == "run-batch":
+            return _cmd_run_batch(args)
     except SWEBenchDatasetError as exc:
         print(f"eval.swebench: {exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -326,6 +405,72 @@ def _cmd_run_agent(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     return EXIT_OK if eval_result.resolved else EXIT_NOT_RESOLVED
+
+
+def _cmd_run_batch(args: argparse.Namespace) -> int:
+    if args.instance_ids:
+        wanted = {s.strip() for s in args.instance_ids.split(",") if s.strip()}
+        all_instances = load_instances(args.dataset)
+        instances = [inst for inst in all_instances if inst.instance_id in wanted]
+        missing = wanted.difference({inst.instance_id for inst in instances})
+        if missing:
+            print(
+                f"eval.swebench: instance ids not in dataset: {sorted(missing)}",
+                file=sys.stderr,
+            )
+            return EXIT_NOT_FOUND
+    else:
+        repos = args.repo or None
+        instances = load_instances(args.dataset, repos=repos, limit=args.limit)
+    if not instances:
+        print("eval.swebench: no instances matched the selector", file=sys.stderr)
+        return EXIT_USAGE
+    if args.limit is not None and args.instance_ids:
+        instances = instances[: args.limit]
+
+    llm = build_default_llm(api_key=args.api_key, default_model=args.model)
+
+    def on_progress(row: InstanceReport) -> None:
+        if row.error is not None:
+            status = "ERROR"
+        elif row.result is not None and row.result.resolved:
+            status = "RESOLVED"
+        else:
+            status = "FAILED"
+        print(
+            f"  [{status}] {row.instance_id} ({row.duration_seconds:.1f}s, "
+            f"{row.agent_steps} steps)",
+            file=sys.stderr,
+        )
+
+    print(
+        f"eval.swebench: running {len(instances)} instance(s) sequentially",
+        file=sys.stderr,
+    )
+    report = asyncio.run(
+        run_batch(
+            instances,
+            llm=llm,
+            work_root=args.work_root,
+            remote_url=args.remote_url,
+            arch=args.arch,
+            max_steps=args.max_steps,
+            progress=on_progress,
+        )
+    )
+    payload = report.model_dump_json(indent=2)
+    print(payload)
+    if args.report_path is not None:
+        args.report_path.parent.mkdir(parents=True, exist_ok=True)
+        args.report_path.write_text(payload + "\n", encoding="utf-8")
+    print(report.summary, file=sys.stderr)
+    if args.fail_under is not None and report.pass_at_1 < args.fail_under:
+        print(
+            f"eval.swebench: pass@1 {report.pass_at_1:.1%} < --fail-under {args.fail_under:.1%}",
+            file=sys.stderr,
+        )
+        return EXIT_NOT_RESOLVED
+    return EXIT_OK
 
 
 if __name__ == "__main__":  # pragma: no cover - executed via python -m
