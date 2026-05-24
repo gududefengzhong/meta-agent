@@ -90,20 +90,24 @@
 - **δ-2 Plan mode** — **已提前落地**（PR #40，复用 PermissionGate 走 batch-approval；更深一版"用户在 approve 前编辑 plan 文本"未做）
 
 ### 进行中
-- **δ-1 Track B**（SWE-bench harness）— **harness 已就绪**（PR #42–#44）：dataset loader + image 名解析 + workspace 准备 + diff 抽取 + Docker container 生命周期 + apply patch + pytest + 结果聚合。**未做**：meta-agent ↔ eval 接入、聚合脚本（pass@1 / cost / 失败切片）、CI 集成
+- （无）
+
+### 已撤回 / 推迟
+- **δ-1 Track B（SWE-bench harness）已整体撤回**（revert PR；之前的 #42–#47、#50–#52 已不在仓内）。原因：连续真跑 gate 暴露多个 harness 实现差异（test_patch 解析 / Django 选择器格式 / conda env 激活 / 输出 parser），我们在用很慢的方式重新发明上游 `swebench` 库。行业标准是写 agent 不写 harness（Anthropic Sonnet 用 SWE-agent framework；Aider / OpenHands 都是薄胶水调上游打分）。
+- **跑分时机** 推到 base agent 经过真实使用验证之后。届时基准选择**不再默认 SWE-bench Verified**：OpenAI 2026 已公开建议业界停用 Verified（59% 题目测试有缺陷 + 训练数据污染），改报 SWE-bench Pro。具体基准等做的时候再定。
 
 ### 未启动
-- **δ-2**（剩余）：diff review WebView / rich trajectory viewer / workspace browser / resume conversation 的 IDE UI
+- **δ-2**（剩余）：diff review WebView ✅ / rich trajectory viewer ✅ / workspace browser / resume conversation 的 IDE UI
 - **δ-3**：AGENTS.md / PR review comments / BYO LLM 配置面 / MCP Server
 - **ε**：K8s Helm / Prometheus + Grafana / OTel exporter / SSO / RBAC / Web UI
 - **ζ**（后置）：沙箱深度 + 合规面
 
 ### 下一里程碑候选
-新 session 进来时按需挑：
-1. **Meta-agent ↔ eval 接入 + SWE-bench 实跑** — 关掉 Track B 闭环；产出第一个 pass@1 数字
-2. **AWAITING_APPROVAL deprecation 清理** — γ-A 与 δ-1 两套 approval 机制并存；审计哪些 graph 还在用、缩窄 API
-3. **δ-2 deeper VS Code UX** — diff review webview / workspace browser / trajectory viewer 三选一
-4. **SWE-bench CI gate** — 即使没接 meta-agent，先用 gold patches 做 harness 回归保护
+新 session 进来时按需挑（**注意：在挑下一个 feature 之前优先 dogfood —— base agent 还没在真活上跑通过**）：
+1. **Dogfood** — 用 meta-agent VS Code 插件 / CLI 解决一个真实任务（非 meta-agent 自身的修改），找基础层的坑（onboarding / docker sandbox 实跑 / streaming UX 真表现 / permission gate 真用体验）
+2. **AWAITING_APPROVAL deprecation 清理** — γ-A 与 δ-1 两套 approval 机制并存的债务
+3. **δ-2 deeper VS Code UX** — workspace browser / resume conversation IDE UI（diff review + trajectory 已落地）
+4. **薄 SWE-bench 胶水**（dogfood 验证之后）：~200 行写一个 driver + predictions.jsonl + `python -m swebench.harness.run_evaluation` 调上游打分；不再重新实现 harness。参考 OpenHands 的 `evaluation/benchmarks/swe_bench/`
 5. **ε K8s + observability** — 与 δ 系平行的部署轨
 
 新 session 建议先 1 分钟最小化探索（git log / 相关模块 / 已有测试）再挑。
