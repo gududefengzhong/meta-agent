@@ -117,4 +117,70 @@ class InstanceResult(BaseModel):
         )
 
 
-__all__ = ["InstanceResult", "TestSelectorResult", "TestStatus"]
+class InstanceReport(BaseModel):
+    """Per-instance row in a :class:`BatchReport`.
+
+    Combines the eval verdict (:class:`InstanceResult`) with run
+    metadata (wallclock, agent step count, patch size). Errors
+    that aborted the pipeline before we could produce an
+    :class:`InstanceResult` land in :attr:`error` and leave
+    :attr:`result` ``None``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    instance_id: str = Field(..., min_length=1)
+    result: InstanceResult | None = None
+    error: str | None = None
+    duration_seconds: float = Field(..., ge=0.0)
+    agent_steps: int = Field(default=0, ge=0)
+    patch_size_bytes: int = Field(default=0, ge=0)
+
+
+class BatchReport(BaseModel):
+    """Aggregate of one batch of SWE-bench evaluations.
+
+    The primary headline number is :attr:`pass_at_1` — the
+    fraction of instances that ended ``resolved=True``. Instances
+    that errored mid-pipeline count as failures (not as skipped):
+    a benchmark you can't run scores the same as a benchmark you
+    failed. Operators triaging a low number mine :attr:`instances`
+    for the per-instance ``error`` column.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    total: int = Field(..., ge=0)
+    resolved: int = Field(..., ge=0)
+    not_resolved: int = Field(..., ge=0)
+    errored: int = Field(..., ge=0)
+    duration_seconds: float = Field(..., ge=0.0)
+    instances: tuple[InstanceReport, ...] = Field(default_factory=tuple)
+
+    @property
+    def pass_at_1(self) -> float:
+        """``resolved / total``. Returns ``0.0`` for empty batches."""
+
+        if self.total == 0:
+            return 0.0
+        return self.resolved / self.total
+
+    @property
+    def summary(self) -> str:
+        """Single-line human-readable status; goes to stderr in the CLI."""
+
+        return (
+            f"batch: {self.resolved}/{self.total} resolved "
+            f"(pass@1 = {self.pass_at_1:.1%}) — "
+            f"not-resolved {self.not_resolved}, errored {self.errored}, "
+            f"{self.duration_seconds:.1f}s wall"
+        )
+
+
+__all__ = [
+    "BatchReport",
+    "InstanceReport",
+    "InstanceResult",
+    "TestSelectorResult",
+    "TestStatus",
+]
