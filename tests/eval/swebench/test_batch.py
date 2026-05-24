@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 from eval.swebench.agent import AgentRunResult
-from eval.swebench.batch import run_batch
+from eval.swebench.batch import run_batch, score_gold_batch
 from eval.swebench.instances import SWEBenchInstance
 from eval.swebench.results import InstanceReport, InstanceResult, TestSelectorResult
 
@@ -244,3 +244,121 @@ def test_batch_report_pass_at_1_empty_batch_is_zero() -> None:
         instances=(),
     )
     assert empty.pass_at_1 == 0.0
+
+
+# ----------------------------------------------------------- score_gold_batch
+
+
+def _gold_instance(instance_id: str, *, patch: str = "diff --git a/x b/x\n") -> SWEBenchInstance:
+    return SWEBenchInstance(
+        instance_id=instance_id,
+        repo="test/repo",
+        base_commit="abc",
+        patch=patch,
+    )
+
+
+class _ScriptedEvaluator:
+    """Per-instance scripted outcomes for ``evaluate_patch``."""
+
+    def __init__(self, outcomes: dict[str, InstanceResult | Exception]) -> None:
+        self._outcomes = outcomes
+        self.calls: list[tuple[str, str]] = []
+
+    async def __call__(
+        self,
+        instance: SWEBenchInstance,
+        patch_text: str,
+        *,
+        arch: str | None = None,
+    ) -> InstanceResult:
+        self.calls.append((instance.instance_id, patch_text))
+        outcome = self._outcomes.get(instance.instance_id)
+        if isinstance(outcome, Exception):
+            raise outcome
+        if outcome is None:
+            return _resolved_result(instance.instance_id)
+        return outcome
+
+
+@pytest.fixture
+def gold_eval(monkeypatch: pytest.MonkeyPatch) -> _ScriptedEvaluator:
+    scripted = _ScriptedEvaluator({})
+    monkeypatch.setattr(batch_module, "evaluate_patch", scripted)
+    return scripted
+
+
+async def test_gold_batch_all_resolved_yields_pass_at_1_of_1(
+    gold_eval: _ScriptedEvaluator,
+) -> None:
+    report = await score_gold_batch([_gold_instance(f"x__y-{i}") for i in range(3)])
+    assert report.total == 3
+    assert report.resolved == 3
+    assert report.pass_at_1 == 1.0
+    # Each call must have fed the instance's gold patch through.
+    assert [patch for _, patch in gold_eval.calls] == ["diff --git a/x b/x\n"] * 3
+
+
+async def test_gold_batch_empty_gold_patch_lands_as_error(
+    gold_eval: _ScriptedEvaluator,
+) -> None:
+    instances = [
+        _gold_instance("has-patch"),
+        _gold_instance("no-patch", patch="   "),
+    ]
+    report = await score_gold_batch(instances)
+    assert report.errored == 1
+    assert report.resolved == 1
+    no_patch_row = next(r for r in report.instances if r.instance_id == "no-patch")
+    assert no_patch_row.error == "dataset row has empty gold patch"
+    assert no_patch_row.result is None
+    # ``evaluate_patch`` should not have been called for the empty row.
+    assert [name for name, _ in gold_eval.calls] == ["has-patch"]
+
+
+async def test_gold_batch_evaluate_exception_recorded_as_error(
+    gold_eval: _ScriptedEvaluator,
+) -> None:
+    gold_eval._outcomes = {"boom": RuntimeError("docker daemon refused connection")}
+    report = await score_gold_batch([_gold_instance("boom"), _gold_instance("ok")])
+    boom_row = next(r for r in report.instances if r.instance_id == "boom")
+    assert boom_row.error == "RuntimeError: docker daemon refused connection"
+    assert boom_row.result is None
+    assert report.errored == 1
+    assert report.resolved == 1
+
+
+async def test_gold_batch_failed_gold_patch_counts_as_not_resolved(
+    gold_eval: _ScriptedEvaluator,
+) -> None:
+    gold_eval._outcomes = {"buggy": _failed_result("buggy")}
+    report = await score_gold_batch([_gold_instance("buggy")])
+    assert report.not_resolved == 1
+    assert report.resolved == 0
+    assert report.errored == 0
+    assert report.pass_at_1 == 0.0
+
+
+async def test_gold_batch_progress_callback_fires_per_instance(
+    gold_eval: _ScriptedEvaluator,
+) -> None:
+    rows: list[InstanceReport] = []
+    await score_gold_batch(
+        [_gold_instance(f"x__y-{i}") for i in range(2)],
+        progress=rows.append,
+    )
+    assert [r.instance_id for r in rows] == ["x__y-0", "x__y-1"]
+
+
+async def test_gold_batch_progress_callback_failure_does_not_kill_batch(
+    gold_eval: _ScriptedEvaluator,
+) -> None:
+    def broken(_row: InstanceReport) -> None:
+        raise RuntimeError("buggy renderer")
+
+    report = await score_gold_batch(
+        [_gold_instance(f"x__y-{i}") for i in range(2)],
+        progress=broken,
+    )
+    assert report.total == 2
+    assert report.resolved == 2

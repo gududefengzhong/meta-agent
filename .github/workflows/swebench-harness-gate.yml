@@ -1,0 +1,102 @@
+# SWE-bench harness regression gate.
+#
+# Feeds the dataset's gold patches through the eval pipeline and
+# fails the workflow if any of them stop resolving. The point is to
+# catch harness drift (image resolver bug, pytest output parser
+# change, container teardown break, etc.) before a real agent run
+# masks it as "the agent failed."
+#
+# Cost shape:
+#   * Pulls real SWE-bench eval images (~1–5 GB each).
+#   * Runs real Docker, real pytest. Per instance ~3–8 minutes on
+#     a GitHub-hosted runner.
+#   * Default instance list is kept short so the gate finishes in
+#     under ~15 minutes for the smallest realistic signal.
+#
+# Triggers:
+#   * ``workflow_dispatch`` (manual) — for ad-hoc validation before
+#     merging risky harness changes.
+#   * weekly schedule — catches drift introduced by upstream
+#     dependency bumps (Docker, pytest, etc.) that didn't go
+#     through a PR.
+#
+# We intentionally do NOT run this on every PR: full eval images
+# are too expensive to pull on every commit. The mocked unit tests
+# in tests/eval/swebench/ already cover harness logic and run on
+# the main CI workflow (ci.yml).
+
+name: SWE-bench harness gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_ids:
+        description: "Comma-separated SWE-bench instance ids. Empty = use default short list."
+        required: false
+        default: ""
+      fail_under:
+        description: "Minimum gold pass@1 (0.0–1.0). Default 1.0 — every gold patch must resolve."
+        required: false
+        default: "1.0"
+  schedule:
+    # Weekly, Sunday 04:00 UTC. Off-hours so a slow run doesn't
+    # block other CI, and weekly is enough to catch passive drift.
+    - cron: "0 4 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swebench-harness-gate
+  cancel-in-progress: true
+
+jobs:
+  gold-patches:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project (with dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Show Docker info
+        # A failed daemon explains every downstream "image pull
+        # failed" line; surface it up front rather than buried in
+        # the harness error column.
+        run: docker version && docker info
+
+      - name: Score gold patches
+        env:
+          INSTANCE_IDS: ${{ github.event.inputs.instance_ids }}
+          FAIL_UNDER: ${{ github.event.inputs.fail_under || '1.0' }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${INSTANCE_IDS}" ]; then
+            args+=(--instance-ids "${INSTANCE_IDS}")
+          else
+            # Default short list: a single small instance from the
+            # built-in fixture. Keeps the scheduled run cheap.
+            args+=(--limit 1)
+          fi
+          python -m eval.swebench score-gold-batch \
+            "${args[@]}" \
+            --fail-under "${FAIL_UNDER}" \
+            --report-path artifacts/gold-report.json
+
+      - name: Upload gold report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swebench-gold-report
+          path: artifacts/gold-report.json
+          if-no-files-found: ignore

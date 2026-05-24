@@ -19,6 +19,11 @@ Commands:
 * ``run-batch [--instance-ids X,Y | --limit N] --work-root <dir>
   --report-path <file>`` (PR 5) — run-agent across many instances;
   aggregate into a :class:`BatchReport` with pass@1.
+* ``score-gold-batch [--instance-ids X,Y | --limit N]
+  --fail-under F`` — feed the dataset's gold patches through the
+  eval harness as a regression gate. No agent / LLM / workspace
+  involvement; surfaces harness drift (image resolver, pytest
+  parser, container teardown) before a real agent run masks it.
 
 Exit codes: 0=ok/resolved (single) / batch finished cleanly,
 5=not resolved (single) / pass@1 below ``--fail-under`` (batch),
@@ -34,7 +39,7 @@ import json
 import sys
 from pathlib import Path
 
-from eval.swebench.batch import run_batch
+from eval.swebench.batch import run_batch, score_gold_batch
 from eval.swebench.containers import DockerError
 from eval.swebench.dataset import SWEBenchDatasetError, load_instance, load_instances
 from eval.swebench.evaluate import evaluate_patch
@@ -257,6 +262,53 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    p_gold = sub.add_parser(
+        "score-gold-batch",
+        help=(
+            "Score the dataset's gold patches through the eval harness. "
+            "No agent / LLM. Used as a harness regression gate."
+        ),
+    )
+    gold_selector = p_gold.add_mutually_exclusive_group()
+    gold_selector.add_argument(
+        "--instance-ids",
+        default=None,
+        help="Comma-separated instance ids to score.",
+    )
+    gold_selector.add_argument(
+        "--repo",
+        action="append",
+        default=[],
+        help="Repo filter (org/repo). Repeatable.",
+    )
+    p_gold.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Cap the number of instances after filtering.",
+    )
+    p_gold.add_argument(
+        "--arch",
+        default=None,
+        help="Image arch override (x86_64 / arm64).",
+    )
+    p_gold.add_argument(
+        "--report-path",
+        type=Path,
+        default=None,
+        help="If set, write the BatchReport JSON here in addition to stdout.",
+    )
+    p_gold.add_argument(
+        "--fail-under",
+        type=float,
+        default=1.0,
+        help=(
+            "Exit 5 when gold-patch pass@1 falls below this fraction. "
+            "Default 1.0 — every gold patch must resolve for the harness "
+            "to be considered healthy."
+        ),
+    )
+
     return parser
 
 
@@ -278,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_run_agent(args)
         if args.command == "run-batch":
             return _cmd_run_batch(args)
+        if args.command == "score-gold-batch":
+            return _cmd_score_gold_batch(args)
     except SWEBenchDatasetError as exc:
         print(f"eval.swebench: {exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -467,6 +521,57 @@ def _cmd_run_batch(args: argparse.Namespace) -> int:
     if args.fail_under is not None and report.pass_at_1 < args.fail_under:
         print(
             f"eval.swebench: pass@1 {report.pass_at_1:.1%} < --fail-under {args.fail_under:.1%}",
+            file=sys.stderr,
+        )
+        return EXIT_NOT_RESOLVED
+    return EXIT_OK
+
+
+def _cmd_score_gold_batch(args: argparse.Namespace) -> int:
+    if args.instance_ids:
+        wanted = {s.strip() for s in args.instance_ids.split(",") if s.strip()}
+        all_instances = load_instances(args.dataset)
+        instances = [inst for inst in all_instances if inst.instance_id in wanted]
+        missing = wanted.difference({inst.instance_id for inst in instances})
+        if missing:
+            print(
+                f"eval.swebench: instance ids not in dataset: {sorted(missing)}",
+                file=sys.stderr,
+            )
+            return EXIT_NOT_FOUND
+    else:
+        repos = args.repo or None
+        instances = load_instances(args.dataset, repos=repos, limit=args.limit)
+    if not instances:
+        print("eval.swebench: no instances matched the selector", file=sys.stderr)
+        return EXIT_USAGE
+
+    def on_progress(row: InstanceReport) -> None:
+        if row.error is not None:
+            status = "ERROR"
+        elif row.result is not None and row.result.resolved:
+            status = "RESOLVED"
+        else:
+            status = "FAILED"
+        print(
+            f"  [{status}] {row.instance_id} ({row.duration_seconds:.1f}s)",
+            file=sys.stderr,
+        )
+
+    print(
+        f"eval.swebench: scoring {len(instances)} gold patch(es) sequentially",
+        file=sys.stderr,
+    )
+    report = asyncio.run(score_gold_batch(instances, arch=args.arch, progress=on_progress))
+    payload = report.model_dump_json(indent=2)
+    print(payload)
+    if args.report_path is not None:
+        args.report_path.parent.mkdir(parents=True, exist_ok=True)
+        args.report_path.write_text(payload + "\n", encoding="utf-8")
+    print(report.summary, file=sys.stderr)
+    if report.pass_at_1 < args.fail_under:
+        print(
+            f"eval.swebench: gold pass@1 {report.pass_at_1:.1%} < --fail-under {args.fail_under:.1%}",
             file=sys.stderr,
         )
         return EXIT_NOT_RESOLVED

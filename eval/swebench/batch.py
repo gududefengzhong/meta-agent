@@ -36,6 +36,7 @@ import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
+from eval.swebench.evaluate import evaluate_patch
 from eval.swebench.instances import SWEBenchInstance
 from eval.swebench.pipeline import run_full_pipeline
 from eval.swebench.results import BatchReport, InstanceReport
@@ -154,4 +155,91 @@ async def _run_one(
     )
 
 
-__all__ = ["ProgressCallback", "run_batch"]
+async def score_gold_batch(
+    instances: Iterable[SWEBenchInstance],
+    *,
+    arch: str | None = None,
+    progress: ProgressCallback | None = None,
+) -> BatchReport:
+    """Score the dataset's gold patches through the eval harness.
+
+    Used as a harness self-check: every gold patch is the human-
+    written reference fix, so pass@1 here should be 1.0 modulo
+    instances whose gold patch is empty or whose image is missing.
+    A regression in the harness (image resolver bug, pytest parser
+    drift, container teardown breakage) shows up as gold patches
+    that suddenly stop resolving — which is exactly what the
+    CI gate is meant to catch.
+
+    The agent / workspace / LLM are never involved; this calls
+    :func:`evaluate_patch` directly with ``instance.patch``.
+    Instances with an empty ``patch`` field land as ``error`` rows
+    rather than silently passing — a missing reference patch is a
+    dataset problem, not a harness pass.
+    """
+
+    rows: list[InstanceReport] = []
+    resolved = 0
+    not_resolved = 0
+    errored = 0
+    batch_started = time.monotonic()
+
+    for instance in instances:
+        row = await _score_one_gold(instance, arch=arch)
+        rows.append(row)
+        if row.error is not None:
+            errored += 1
+        elif row.result is not None and row.result.resolved:
+            resolved += 1
+        else:
+            not_resolved += 1
+        if progress is not None:
+            try:
+                progress(row)
+            except Exception:
+                logger.exception("swebench.batch.gold_progress_callback_failed")
+
+    duration = time.monotonic() - batch_started
+    return BatchReport(
+        total=len(rows),
+        resolved=resolved,
+        not_resolved=not_resolved,
+        errored=errored,
+        duration_seconds=duration,
+        instances=tuple(rows),
+    )
+
+
+async def _score_one_gold(
+    instance: SWEBenchInstance,
+    *,
+    arch: str | None,
+) -> InstanceReport:
+    started = time.monotonic()
+    if not instance.patch.strip():
+        return InstanceReport(
+            instance_id=instance.instance_id,
+            result=None,
+            error="dataset row has empty gold patch",
+            duration_seconds=time.monotonic() - started,
+        )
+    try:
+        eval_result = await evaluate_patch(instance, instance.patch, arch=arch)
+    except Exception as exc:
+        return InstanceReport(
+            instance_id=instance.instance_id,
+            result=None,
+            error=f"{type(exc).__name__}: {exc}",
+            duration_seconds=time.monotonic() - started,
+        )
+    return InstanceReport(
+        instance_id=instance.instance_id,
+        result=eval_result,
+        error=None,
+        duration_seconds=time.monotonic() - started,
+        agent_steps=0,
+        patch_size_bytes=len(instance.patch.encode("utf-8")),
+    )
+
+
+__all__ = ["ProgressCallback", "run_batch", "score_gold_batch"]
