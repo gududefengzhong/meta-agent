@@ -86,6 +86,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Image arch override (x86_64 / arm64). Default: current process arch.",
     )
+    p_eval.add_argument(
+        "--log-test-output",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to write the test runner's raw stdout+stderr. "
+            "Use this when a result has 'all selectors missing' or pytest exited "
+            "non-zero with no FAILED line — without it, every diagnosis means "
+            "exec-ing into the container manually."
+        ),
+    )
 
     return parser
 
@@ -142,7 +153,14 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
         print(f"eval.swebench: {exc}", file=sys.stderr)
         return EXIT_NOT_FOUND
     patch_text = _read_patch(args.patch)
-    result = asyncio.run(evaluate_patch(inst, patch_text, arch=args.arch))
+    result = asyncio.run(
+        evaluate_patch(
+            inst,
+            patch_text,
+            arch=args.arch,
+            test_output_path=args.log_test_output,
+        )
+    )
     print(result.model_dump_json(indent=2))
     print(result.summary, file=sys.stderr)
     return EXIT_OK if result.resolved else EXIT_NOT_RESOLVED

@@ -3,36 +3,50 @@
 The orchestrator pulls the eval image, spins up a container,
 applies the patch + the instance's ``test_patch`` (the second is
 what surfaces the FAIL_TO_PASS selectors), runs the selectors
-through the repo-appropriate test runner (django runner / sympy
-``bin/test`` / pytest, picked by :mod:`eval.swebench.test_specs`),
-and parses the runner's output via
-:mod:`eval.swebench.log_parsers`.
+through the repo-appropriate test runner picked by
+:mod:`eval.swebench.test_specs`, and parses the runner's output
+via :mod:`eval.swebench.log_parsers`.
 
 The shape is "patch-in, result-out" so any agent — meta-agent,
 human, or another harness — can feed in a candidate patch and get
 back a stable comparable result.
 
-Why not just call ``python -m pytest``
-======================================
-SWE-bench instances span repos that use different test runners.
-Django uses ``./tests/runtests.py`` (a unittest wrapper) with
-selectors shaped ``test_name (dotted.module.Class)``. Feeding
-those to pytest treats the parenthesised part as a separate
-positional argument and collects zero tests. The
-:class:`TestSpec` layer picks the right command + parser for each
-``(repo, version)`` instead.
+Why not just call ``python -m pytest`` directly
+================================================
+SWE-bench instances span repos that disagree on how to run tests
+(Django's ``./tests/runtests.py``, sympy's ``bin/test``, plain
+pytest, pytest with ``-rA``, …) and on selector format. The
+:class:`TestSpec` layer encodes the right command + parser for
+each ``(repo, version)`` so the runner actually collects the right
+tests. Phase-1 scope (see ``docs/specs/EVAL_BASELINE.md``) is
+pytest-friendly repos only.
 
+Conda env activation
+====================
 The runner runs inside the eval image's conda env ``testbed``
 (``/opt/miniconda3/bin/activate testbed``). Upstream
-SWE-bench's ``eval.sh`` does the same activation; we mirror it
-so package imports + entry points (``pytest``, ``bin/test``,
-``./tests/runtests.py``) resolve to the right interpreter.
+SWE-bench's eval script does the same activation; we mirror it
+so package imports + entry points (``pytest`` etc.) resolve to
+the right interpreter. Verified by exec-ing into a real eval
+image; ``setup_env.sh`` inside every image creates this env at
+exactly this path.
+
+Raw test output
+===============
+``evaluate_patch`` accepts an optional ``test_output_path`` arg.
+When set, the runner's full stdout+stderr lands at that path.
+Default behaviour writes nothing — keeps the happy path quiet,
+keeps reports deterministic. Use the path for triage when a
+parser produces "all selectors missing" or "test_command_exit_code
+non-zero but no FAILED line": without raw output, every
+diagnosis requires a manual ``docker exec``.
 """
 
 from __future__ import annotations
 
 import logging
 import shlex
+from pathlib import Path
 
 from eval.swebench.containers import Container, DockerError, ensure_image_pulled
 from eval.swebench.images import image_name_for_instance
@@ -53,9 +67,8 @@ _CONDA_ACTIVATE = "source /opt/miniconda3/bin/activate testbed"
 The SWE-bench eval images install everything into a conda env
 called ``testbed``. ``docker exec`` does not source bash init
 files so the env isn't automatically active — without this
-prefix, ``pytest`` / ``./tests/runtests.py`` either fall through
-to a system Python (missing the repo's deps) or fail with
-``command not found``.
+prefix, ``pytest`` either falls through to a system Python
+(missing the repo's deps) or fails with ``command not found``.
 """
 
 
@@ -64,6 +77,7 @@ async def evaluate_patch(
     patch_text: str,
     *,
     arch: str | None = None,
+    test_output_path: Path | None = None,
 ) -> InstanceResult:
     """Run the full SWE-bench eval pipeline for ``instance`` + ``patch_text``.
 
@@ -79,7 +93,8 @@ async def evaluate_patch(
 
     Returns an :class:`InstanceResult`. The container is always
     torn down — including on errors — via the async context
-    manager exit.
+    manager exit. When ``test_output_path`` is set, the raw
+    runner stdout+stderr lands there for triage.
     """
 
     image = image_name_for_instance(instance, arch=arch)
@@ -136,7 +151,11 @@ async def evaluate_patch(
         selector_args = " ".join(shlex.quote(s) for s in selectors)
         shell_cmd = f"{_CONDA_ACTIVATE} && {spec.test_cmd} {selector_args}"
         run = container.exec(["bash", "-lc", shell_cmd], check=False)
-        verdicts = parser(run.stdout + "\n" + run.stderr)
+        raw_output = run.stdout + "\n" + run.stderr
+        if test_output_path is not None:
+            test_output_path.parent.mkdir(parents=True, exist_ok=True)
+            test_output_path.write_text(raw_output, encoding="utf-8")
+        verdicts = parser(raw_output)
         f2p = tuple(_score(s, verdicts) for s in instance.fail_to_pass)
         p2p = tuple(_score(s, verdicts) for s in instance.pass_to_pass)
         return InstanceResult(
