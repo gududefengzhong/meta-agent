@@ -80,6 +80,8 @@ async def evaluate_patch(
     test_output_path: Path | None = None,
     dataset_snapshot: str | None = None,
     harness_version: str | None = None,
+    model: str | None = None,
+    prompt_version: str | None = None,
 ) -> InstanceResult:
     """Run the full SWE-bench eval pipeline for ``instance`` + ``patch_text``.
 
@@ -111,6 +113,8 @@ async def evaluate_patch(
         update={
             "dataset_snapshot": dataset_snapshot,
             "harness_version": harness_version,
+            "model": model,
+            "prompt_version": prompt_version,
         }
     )
 
