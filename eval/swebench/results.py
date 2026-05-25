@@ -86,6 +86,37 @@ class InstanceResult(BaseModel):
     """Free-text error description when the pipeline aborted before
     a full result could be computed. ``None`` for clean runs."""
 
+    # ---- Identity fields per EVAL_BASELINE.md Standards 1 + 2 ----
+    # These pin a report to the (dataset, harness, model, prompt) tuple
+    # that produced it, so two runs with the same identity should
+    # produce comparable scores. ``model`` and ``prompt_version`` are
+    # populated by the agent-path CLI (not in scope this phase) — they
+    # default to ``None`` for gold-patch runs where there's no model.
+
+    dataset_snapshot: str | None = None
+    """Short hash (SHA-256[:12]) of the dataset JSON used at load time.
+
+    Same dataset → same hash. Use it to verify two reports were
+    scored against the same instance set.
+    """
+
+    harness_version: str | None = None
+    """Identifier of the ``eval/swebench/`` code that produced this
+    result. CLI fills this from the git short SHA when available;
+    falls back to ``"unknown"`` when not in a git checkout.
+    """
+
+    model: str | None = None
+    """LLM model ID that produced the patch (e.g. ``deepseek/deepseek-chat``).
+    ``None`` for gold-patch / human-supplied patches — there is no model
+    in that case.
+    """
+
+    prompt_version: str | None = None
+    """Short hash of the prompt asset that drove the agent.
+    ``None`` when no agent was involved.
+    """
+
     @property
     def resolved(self) -> bool:
         """``True`` iff the instance passed the SWE-bench criterion.

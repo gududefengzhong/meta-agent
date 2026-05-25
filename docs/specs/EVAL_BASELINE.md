@@ -100,12 +100,12 @@
 
 **全部满足**才算这阶段完成：
 
-- [ ] 标准 1：固定 dataset 加载到 fixture，运行不联网
-- [ ] 标准 2：report 包含 4 个固定字段（model / prompt_version / dataset_snapshot / harness_version）
-- [ ] 标准 3：连续 2 次同输入 run，resolved 集合一致率 ≥ 95%
-- [ ] 标准 4：连续 2 次同输入 run，report `diff` ≤ 1 KB 噪声
-- [ ] 标准 5：白名单内 5+ 个 pytest-friendly Verified instance 全跑通；白名单外 instance 进 `skipped` 不进 `failed`
-- [ ] 跑通的 instance 数 ≥ 5，gold patch pass@1 = 100%（gold 不过 = harness 有问题）
+- [x] 标准 1：固定 dataset 加载到 fixture，运行不联网（PR #55；CLI 不联网取数）
+- [x] 标准 2 ↗ 部分：`dataset_snapshot` + `harness_version` 字段（本 PR）；`model` + `prompt_version` 在 agent path 回归后补
+- [ ] 标准 3：连续 2 次同输入 run，resolved 集合一致率 ≥ 95%（依赖 agent path）
+- [x] 标准 4 ↗ 部分：InstanceResult pydantic 字段顺序 deterministic（PR #55）；连续 2 次同输入完整 diff 验证依赖 agent path
+- [x] 标准 5：pytest-only 白名单生效；非白名单 instance 通过 `TestSpecNotFoundError` 显式报错（PR #55）
+- [ ] 跑通的 instance 数 ≥ 5，gold patch pass@1 = 100%（当前 1/1 验证：psf__requests-2317 in #56）
 - [ ] 同样 instance 用一个简单 baseline agent（甚至单步 LLM 直接吐 patch）跑出**非零** pass@1（哪怕 5%）—— 证明 agent path 真接通了，不只是 gold path
 
 ---

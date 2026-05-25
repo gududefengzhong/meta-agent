@@ -78,6 +78,8 @@ async def evaluate_patch(
     *,
     arch: str | None = None,
     test_output_path: Path | None = None,
+    dataset_snapshot: str | None = None,
+    harness_version: str | None = None,
 ) -> InstanceResult:
     """Run the full SWE-bench eval pipeline for ``instance`` + ``patch_text``.
 
@@ -94,7 +96,35 @@ async def evaluate_patch(
     Returns an :class:`InstanceResult`. The container is always
     torn down — including on errors — via the async context
     manager exit. When ``test_output_path`` is set, the raw
-    runner stdout+stderr lands there for triage.
+    runner stdout+stderr lands there for triage. ``dataset_snapshot``
+    and ``harness_version``, when set, get stamped onto the
+    returned result (EVAL_BASELINE Standards 1 + 2).
+    """
+
+    result = await _evaluate_patch_inner(
+        instance,
+        patch_text,
+        arch=arch,
+        test_output_path=test_output_path,
+    )
+    return result.model_copy(
+        update={
+            "dataset_snapshot": dataset_snapshot,
+            "harness_version": harness_version,
+        }
+    )
+
+
+async def _evaluate_patch_inner(
+    instance: SWEBenchInstance,
+    patch_text: str,
+    *,
+    arch: str | None,
+    test_output_path: Path | None,
+) -> InstanceResult:
+    """Core evaluation flow. Returns an InstanceResult without identity
+    stamps — :func:`evaluate_patch` adds those at the end so every
+    early-return path picks them up uniformly.
     """
 
     image = image_name_for_instance(instance, arch=arch)
