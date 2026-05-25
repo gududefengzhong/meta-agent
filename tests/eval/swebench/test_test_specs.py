@@ -29,6 +29,18 @@ def test_spec_for_psf_requests_2_4_uses_pytest_options() -> None:
     assert spec.parser == "pytest_options"
 
 
+def test_spec_for_pallets_flask_2_0_uses_pytest_parser() -> None:
+    spec = spec_for(_instance(repo="pallets/flask", version="2.0"))
+    assert "pytest" in spec.test_cmd
+    assert spec.parser == "pytest"
+
+
+def test_spec_for_pylint_2_13_uses_pytest_options_parser() -> None:
+    spec = spec_for(_instance(repo="pylint-dev/pylint", version="2.13"))
+    assert "pytest" in spec.test_cmd
+    assert spec.parser == "pytest_options"
+
+
 def test_spec_for_django_is_explicitly_not_supported_in_phase_1() -> None:
     # Standard 5: Django runner is whitelist-deferred. A miss here
     # is the correct, intended behaviour for this phase.
