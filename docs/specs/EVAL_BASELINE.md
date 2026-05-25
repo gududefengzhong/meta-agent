@@ -106,7 +106,7 @@
 - [x] 标准 4 ↗ 部分：InstanceResult pydantic 字段顺序 deterministic（PR #55）；连续 2 次同输入完整 diff 验证下个阶段 baseline run 时做
 - [x] 标准 5：pytest-only 白名单生效；非白名单 instance 通过 `TestSpecNotFoundError` 显式报错（PR #55）
 - [ ] 跑通的 instance 数 ≥ 5，gold patch pass@1 = 100%（当前 **3/3 已验证**：psf__requests-2317 in #56 — FAIL_TO_PASS 8/8 ✅，PASS_TO_PASS 128/133（5 个 DNS 环境敏感失败）；pallets__flask-4045 in #58 — 2/2 + 50/50 ✅；pylint-dev__pylint-5859 in #58 — 1/1 + 10/10 ✅）
-- [ ] 同样 instance 用一个简单 baseline agent（甚至单步 LLM 直接吐 patch）跑出**非零** pass@1（哪怕 5%）—— agent path 本 PR 接通；非零分数需要在后续 PR 拿真 LLM 真跑一次
+- [ ] 同样 instance 用一个简单 baseline agent（甚至单步 LLM 直接吐 patch）跑出**非零** pass@1（哪怕 5%）—— agent path 已接通；第一次真跑（baseline-v1）拿到 **0% on psf__requests-2317 with deepseek-chat / max_steps=20**（agent 改对了 ``builtin_str`` 但同时删掉了 ``elif is_py3:`` 块、破坏了 imports）。第一个真信号已经在；非零分数等下个 PR 改 prompt / 换模型 / 加 test-before-done 工具后再迭代。Baseline 工件落在 ``eval/results/baseline-v1/``
 
 ---
 

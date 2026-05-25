@@ -1,0 +1,33 @@
+diff --git a/requests/compat.py b/requests/compat.py
+index be5a1ed6..2a7c5432 100644
+--- a/requests/compat.py
++++ b/requests/compat.py
+@@ -93,23 +93,10 @@ if is_py2:
+     from StringIO import StringIO
+     from .packages.urllib3.packages.ordered_dict import OrderedDict
+ 
+-    builtin_str = str
++    def builtin_str(s):
++        if isinstance(s, bytes):
++            return s.decode('ascii')
++        return str(s)
+     bytes = str
+     str = unicode
+-    basestring = basestring
+-    numeric_types = (int, long, float)
+-
+-
+-elif is_py3:
+-    from urllib.parse import urlparse, urlunparse, urljoin, urlsplit, urlencode, quote, unquote, quote_plus, unquote_plus, urldefrag
+-    from urllib.request import parse_http_list, getproxies, proxy_bypass
+-    from http import cookiejar as cookielib
+-    from http.cookies import Morsel
+-    from io import StringIO
+-    from collections import OrderedDict
+-
+-    builtin_str = str
+-    str = str
+-    bytes = bytes
+-    basestring = (str, bytes)
+-    numeric_types = (int, float)
++else:

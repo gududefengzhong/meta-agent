@@ -112,6 +112,7 @@ async def run_agent_on_instance(
     *,
     max_steps: int = _DEFAULT_MAX_STEPS,
     state_overrides: dict[str, object] | None = None,
+    base_ref: str | None = None,
 ) -> AgentRunResult:
     """Run ``builtin.shell_agent`` against the prepared workspace.
 
@@ -119,6 +120,13 @@ async def run_agent_on_instance(
     ``instance.base_commit`` (use :func:`prepare_workspace`); the
     test_patch may or may not be applied depending on what eval
     flow the caller is running.
+
+    ``base_ref`` is the SHA returned by
+    :func:`apply_test_patch` — the diff captured at the end uses
+    it as the comparison base so test_patch additions don't end
+    up in the agent's extracted patch. Defaults to
+    ``instance.base_commit`` for callers that haven't applied
+    test_patch (eg. instances with empty test_patch).
 
     ``state_overrides`` lets callers tweak the seed state — useful
     for tests injecting a smaller ``max_steps`` or extra
@@ -162,7 +170,7 @@ async def run_agent_on_instance(
         s = output.get("steps")
         if isinstance(s, int):
             steps_completed = s
-    patch = extract_patch(workspace_path, instance.base_commit)
+    patch = extract_patch(workspace_path, base_ref or instance.base_commit)
     return AgentRunResult(
         patch=patch,
         assistant_message=assistant_message,

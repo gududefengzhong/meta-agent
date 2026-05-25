@@ -110,10 +110,21 @@ async def run_full_pipeline(
         remote_url=remote_url,
         overwrite=True,
     )
-    if instance.test_patch.strip():
-        apply_test_patch(workspace_path, instance.test_patch)
+    # ``apply_test_patch`` commits the patch so the SHA returned here
+    # is the post-test_patch HEAD. Threading it into the agent
+    # ensures :func:`extract_patch` captures only the agent's net
+    # edits, not the test_patch additions (which the eval container
+    # re-applies independently). Returns the current HEAD when
+    # ``test_patch`` is empty so the contract is uniform.
+    base_ref = apply_test_patch(workspace_path, instance.test_patch)
 
-    agent_result = await run_agent_on_instance(instance, workspace_path, llm, max_steps=max_steps)
+    agent_result = await run_agent_on_instance(
+        instance,
+        workspace_path,
+        llm,
+        max_steps=max_steps,
+        base_ref=base_ref,
+    )
     eval_result = await evaluate_patch(
         instance,
         agent_result.patch,

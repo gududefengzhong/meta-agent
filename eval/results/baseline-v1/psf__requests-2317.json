@@ -1,0 +1,579 @@
+{
+  "instance_id": "psf__requests-2317",
+  "image": "swebench/sweb.eval.arm64.psf_1776_requests-2317:latest",
+  "fail_to_pass": [
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_HTTP_302_ALLOW_REDIRECT_GET",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_POSTBIN_GET_POST_FILES",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_POSTBIN_GET_POST_FILES_WITH_DATA",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_basicauth_with_netrc",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_json_param_post_content_type_works",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_manual_redirect_with_partial_body_read",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_requests_history_is_saved",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestTimeout::test_encoded_methods",
+      "status": "missing"
+    }
+  ],
+  "pass_to_pass": [
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_BASICAUTH_TUPLE_HTTP_200_OK_GET",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_DIGESTAUTH_QUOTES_QOP_VALUE",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_DIGESTAUTH_WRONG_HTTP_401_GET",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_DIGEST_AUTH_RETURNS_COOKIE",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_DIGEST_AUTH_SETS_SESSION_COOKIES",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_DIGEST_HTTP_200_OK_GET",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_DIGEST_STREAM",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_HTTP_200_OK_GET_ALTERNATIVE",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_HTTP_200_OK_GET_WITH_MIXED_PARAMS",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_HTTP_200_OK_GET_WITH_PARAMS",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_HTTP_200_OK_HEAD",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_HTTP_200_OK_PUT",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_auth_is_retained_for_redirect_on_host",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_auth_is_stripped_on_redirect_off_host",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_autoset_header_values_are_native",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_basic_auth_str_is_always_native",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_basic_building",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_can_send_nonstring_objects_with_files",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_cannot_send_unprepared_requests",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_connection_error",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_cookie_as_dict_items",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_cookie_as_dict_keeps_items",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_cookie_as_dict_keeps_len",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_cookie_as_dict_keys",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_cookie_as_dict_values",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_cookie_parameters",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_cookie_persists_via_api",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_cookie_quote_wrapped",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_cookie_removed_on_expire",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_cookie_sent_on_redirect",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_custom_content_type",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_decompress_gzip",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_different_encodings_dont_break_post",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_entry_points",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_fixes_1329",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_generic_cookiejar_works",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_get_auth_from_url",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_get_auth_from_url_encoded_hashes",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_get_auth_from_url_encoded_spaces",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_get_auth_from_url_not_encoded_spaces",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_get_auth_from_url_percent_chars",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_header_keys_are_native",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_header_remove_is_case_insensitive",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_headers_on_session_with_None_are_not_sent",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_history_is_always_a_list",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_hook_receives_request_arguments",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_http_error",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_invalid_url",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_links",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_long_authinfo_in_url",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_mixed_case_scheme_acceptable",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_no_content_length",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_nonhttp_schemes_dont_check_URLs",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_param_cookiejar_works",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_params_are_added_before_fragment",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_params_are_merged_case_sensitive",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_path_is_not_double_encoded",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_prepare_request_with_bytestring_url",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_prepared_from_session",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_prepared_request_hook",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_pyopenssl_redirect",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_redirect_with_wrong_gzipped_header",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_request_and_response_are_pickleable",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_request_cookie_overrides_session_cookie",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_request_cookies_not_persisted",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_request_ok_set",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_requests_in_history_are_not_overridden",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_response_decode_unicode",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_response_is_iterable",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_session_hooks_are_overriden_by_request_hooks",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_session_hooks_are_used_with_no_request_hooks",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_session_pickling",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_set_cookie_on_301",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_status_raising",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_time_elapsed_blank",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_transport_adapter_ordering",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_unicode_get",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_unicode_header_name",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_unicode_method_name",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_unicode_multipart_post_fieldnames",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_uppercase_scheme_redirect",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_urlencoded_get_query_multivalued_param",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::RequestsTestCase::test_user_agent_transfers",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestContentEncodingDetection::test_html4_pragma",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestContentEncodingDetection::test_html_charset",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestContentEncodingDetection::test_none",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestContentEncodingDetection::test_precedence",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestContentEncodingDetection::test_xhtml_pragma",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestContentEncodingDetection::test_xml",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_contains",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_delitem",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_docstring_example",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_equality",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_fixes_649",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_get",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_getitem",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_iter",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_iterable_init",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_kwargs_init",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_len",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_lower_items",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_mapping_init",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_preserve_key_case",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_preserve_last_key_case",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_setdefault",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_update",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestCaseInsensitiveDict::test_update_retains_unchanged",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::UtilsTestCase::test_address_in_network",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::UtilsTestCase::test_dotted_netmask",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::UtilsTestCase::test_get_auth_from_url",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::UtilsTestCase::test_get_environ_proxies",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::UtilsTestCase::test_get_environ_proxies_ip_ranges",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::UtilsTestCase::test_is_ipv4_address",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::UtilsTestCase::test_is_valid_cidr",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::UtilsTestCase::test_super_len_io_streams",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestMorselToCookieExpires::test_expires_invalid_int",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestMorselToCookieExpires::test_expires_invalid_str",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestMorselToCookieExpires::test_expires_none",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestMorselToCookieExpires::test_expires_valid_str",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestMorselToCookieMaxAge::test_max_age_invalid_str",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestMorselToCookieMaxAge::test_max_age_valid_int",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestTimeout::test_stream_timeout",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestTimeout::test_invalid_timeout",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestTimeout::test_none_timeout",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestTimeout::test_read_timeout",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestTimeout::test_connect_timeout",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestTimeout::test_total_timeout_connect",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::TestRedirects::test_requests_are_updated_each_time",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::test_data_argument_accepts_tuples",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::test_prepared_request_empty_copy",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::test_prepared_request_no_cookies_copy",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::test_prepared_request_complete_copy",
+      "status": "missing"
+    },
+    {
+      "selector": "test_requests.py::test_prepare_unicode_url",
+      "status": "missing"
+    }
+  ],
+  "patch_applied": true,
+  "test_command_exit_code": 4,
+  "error": null,
+  "dataset_snapshot": "97078781bcc6",
+  "harness_version": "0355e930ae39",
+  "model": "deepseek/deepseek-chat",
+  "prompt_version": "c6c02afc1db7"
+}
