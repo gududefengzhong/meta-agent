@@ -234,3 +234,74 @@ def test_evaluate_unknown_instance_id_exits_3(
         ]
     )
     assert code == EXIT_NOT_FOUND
+
+
+# ----------------------------------------------------------------- run-agent
+
+
+def test_run_agent_missing_llm_config_exits_7(tmp_path: Path) -> None:
+    """``run-agent`` without an OpenRouter key surfaces a clean exit 7,
+    not a stack trace. EVAL_BASELINE Standard 2 requires the model
+    flag, so an empty key is the only LLM-config failure to surface
+    via this CLI surface.
+    """
+
+    from eval.swebench.__main__ import EXIT_LLM_CONFIG
+
+    dataset = _write_local_dataset(tmp_path, base_commit="abc123", instance_id="test__repo-1")
+    work_root = tmp_path / "runs"
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "run-agent",
+            "test__repo-1",
+            "--work-root",
+            str(work_root),
+            "--api-key",
+            "   ",  # blank → EvalLLMConfigError
+            "--model",
+            "deepseek/deepseek-chat",
+        ]
+    )
+    assert code == EXIT_LLM_CONFIG
+
+
+def test_run_agent_requires_model_flag(tmp_path: Path) -> None:
+    """``--model`` is mandatory; argparse rejects an invocation without it.
+
+    Standard 2 says every report carries a model identity. CLI
+    enforces this by making the flag required.
+    """
+
+    dataset = _write_local_dataset(tmp_path, base_commit="abc123", instance_id="test__repo-1")
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--dataset",
+                str(dataset),
+                "run-agent",
+                "test__repo-1",
+                "--work-root",
+                str(tmp_path / "runs"),
+            ]
+        )
+
+
+def test_run_agent_unknown_instance_exits_3(tmp_path: Path) -> None:
+    dataset = _write_local_dataset(tmp_path, base_commit="abc123", instance_id="test__repo-1")
+    code = main(
+        [
+            "--dataset",
+            str(dataset),
+            "run-agent",
+            "nonexistent",
+            "--work-root",
+            str(tmp_path / "runs"),
+            "--api-key",
+            "tok-test",
+            "--model",
+            "deepseek/deepseek-chat",
+        ]
+    )
+    assert code == EXIT_NOT_FOUND

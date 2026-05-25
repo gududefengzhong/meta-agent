@@ -101,12 +101,12 @@
 **全部满足**才算这阶段完成：
 
 - [x] 标准 1：固定 dataset 加载到 fixture，运行不联网（PR #55；CLI 不联网取数）
-- [x] 标准 2 ↗ 部分：`dataset_snapshot` + `harness_version` 字段（本 PR）；`model` + `prompt_version` 在 agent path 回归后补
-- [ ] 标准 3：连续 2 次同输入 run，resolved 集合一致率 ≥ 95%（依赖 agent path）
-- [x] 标准 4 ↗ 部分：InstanceResult pydantic 字段顺序 deterministic（PR #55）；连续 2 次同输入完整 diff 验证依赖 agent path
+- [x] 标准 2：4 个 identity 字段（`dataset_snapshot` + `harness_version` PR #57；`model` + `prompt_version` 本 PR — run-agent CLI 必填 `--model`，prompt_version 自动取 prompt 模板的 sha256[:12]）
+- [ ] 标准 3：连续 2 次同输入 run，resolved 集合一致率 ≥ 95%（agent path 在了但 temperature=0 强制还没做；下个 PR）
+- [x] 标准 4 ↗ 部分：InstanceResult pydantic 字段顺序 deterministic（PR #55）；连续 2 次同输入完整 diff 验证下个阶段 baseline run 时做
 - [x] 标准 5：pytest-only 白名单生效；非白名单 instance 通过 `TestSpecNotFoundError` 显式报错（PR #55）
-- [ ] 跑通的 instance 数 ≥ 5，gold patch pass@1 = 100%（当前 **3/3 已验证**：psf__requests-2317 in #56 — FAIL_TO_PASS 8/8 ✅，PASS_TO_PASS 128/133（5 个 DNS 环境敏感失败）；pallets__flask-4045 in 本 PR — 2/2 + 50/50 ✅；pylint-dev__pylint-5859 in 本 PR — 1/1 + 10/10 ✅）
-- [ ] 同样 instance 用一个简单 baseline agent（甚至单步 LLM 直接吐 patch）跑出**非零** pass@1（哪怕 5%）—— 证明 agent path 真接通了，不只是 gold path
+- [ ] 跑通的 instance 数 ≥ 5，gold patch pass@1 = 100%（当前 **3/3 已验证**：psf__requests-2317 in #56 — FAIL_TO_PASS 8/8 ✅，PASS_TO_PASS 128/133（5 个 DNS 环境敏感失败）；pallets__flask-4045 in #58 — 2/2 + 50/50 ✅；pylint-dev__pylint-5859 in #58 — 1/1 + 10/10 ✅）
+- [ ] 同样 instance 用一个简单 baseline agent（甚至单步 LLM 直接吐 patch）跑出**非零** pass@1（哪怕 5%）—— agent path 本 PR 接通；非零分数需要在后续 PR 拿真 LLM 真跑一次
 
 ---
 
