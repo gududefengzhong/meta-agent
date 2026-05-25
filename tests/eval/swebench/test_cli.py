@@ -239,14 +239,25 @@ def test_evaluate_unknown_instance_id_exits_3(
 # ----------------------------------------------------------------- run-agent
 
 
-def test_run_agent_missing_llm_config_exits_7(tmp_path: Path) -> None:
+def test_run_agent_missing_llm_config_exits_7(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``run-agent`` without an OpenRouter key surfaces a clean exit 7,
     not a stack trace. EVAL_BASELINE Standard 2 requires the model
     flag, so an empty key is the only LLM-config failure to surface
     via this CLI surface.
+
+    The dotenv lookup is repointed at an empty tmp dir so a developer
+    machine's real ``<repo>/.env`` doesn't accidentally satisfy the
+    resolution chain and mask the missing-key path.
     """
 
     from eval.swebench.__main__ import EXIT_LLM_CONFIG
+
+    from eval.swebench import llm_factory
+
+    monkeypatch.setattr(llm_factory, "_REPO_ROOT", tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     dataset = _write_local_dataset(tmp_path, base_commit="abc123", instance_id="test__repo-1")
     work_root = tmp_path / "runs"
