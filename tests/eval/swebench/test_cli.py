@@ -170,6 +170,15 @@ def test_evaluate_resolved_exits_0(
     payload = json.loads(out.out)
     assert payload["instance_id"] == "test__repo-1"
     assert "RESOLVED" in out.err
+    # Identity fields (EVAL_BASELINE Standards 1 + 2): CLI populates
+    # dataset_snapshot + harness_version on every result.
+    assert payload["dataset_snapshot"] is not None
+    assert len(payload["dataset_snapshot"]) == 12
+    assert payload["harness_version"] is not None
+    # ``model`` and ``prompt_version`` stay None for the gold/supplied-
+    # patch path — they're only set when an agent generates the patch.
+    assert payload["model"] is None
+    assert payload["prompt_version"] is None
 
 
 def test_evaluate_not_resolved_exits_5(

@@ -38,6 +38,23 @@ from eval.swebench.instances import SWEBenchInstance
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "instances_sample.json"
 
 
+def builtin_dataset_path() -> Path:
+    """Return the path of the built-in fixture dataset.
+
+    Stable across the process lifetime. Used by callers that need
+    the dataset *path* (not its contents) — eg the identity layer
+    hashing it for ``dataset_snapshot``.
+    """
+
+    return _FIXTURE_PATH
+
+
+def resolve_dataset_path(path: Path | str | None) -> Path:
+    """Return the effective dataset path: ``path`` if given, else the fixture."""
+
+    return Path(path) if path is not None else _FIXTURE_PATH
+
+
 class SWEBenchDatasetError(Exception):
     """Raised when a dataset file is missing, malformed, or schema-invalid."""
 
@@ -161,4 +178,10 @@ def _normalise_test_selectors(value: Any) -> tuple[str, ...]:
     )
 
 
-__all__ = ["SWEBenchDatasetError", "load_instance", "load_instances"]
+__all__ = [
+    "SWEBenchDatasetError",
+    "builtin_dataset_path",
+    "load_instance",
+    "load_instances",
+    "resolve_dataset_path",
+]

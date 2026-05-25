@@ -29,8 +29,14 @@ import sys
 from pathlib import Path
 
 from eval.swebench.containers import DockerError
-from eval.swebench.dataset import SWEBenchDatasetError, load_instance, load_instances
+from eval.swebench.dataset import (
+    SWEBenchDatasetError,
+    builtin_dataset_path,
+    load_instance,
+    load_instances,
+)
 from eval.swebench.evaluate import evaluate_patch
+from eval.swebench.identity import dataset_snapshot, harness_version
 from eval.swebench.images import image_name_for_instance
 
 EXIT_OK = 0
@@ -147,8 +153,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 
 def _cmd_evaluate(args: argparse.Namespace) -> int:
+    dataset_path = Path(args.dataset) if args.dataset is not None else builtin_dataset_path()
     try:
-        inst = load_instance(args.instance_id, args.dataset)
+        inst = load_instance(args.instance_id, dataset_path)
     except SWEBenchDatasetError as exc:
         print(f"eval.swebench: {exc}", file=sys.stderr)
         return EXIT_NOT_FOUND
@@ -159,6 +166,8 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
             patch_text,
             arch=args.arch,
             test_output_path=args.log_test_output,
+            dataset_snapshot=dataset_snapshot(dataset_path),
+            harness_version=harness_version(),
         )
     )
     print(result.model_dump_json(indent=2))
