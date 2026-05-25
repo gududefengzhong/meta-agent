@@ -128,3 +128,26 @@
 - 本文档**先于代码 commit**。代码恢复 PR 引用本文档作为 acceptance criteria，每个标准对应至少一个单元 / 集成测试
 - 任何"我觉得标准 X 太严了" / "标准 Y 太松了"的反馈，**改文档**而不是改实现去绕开
 - 上一轮的教训：**没有 SLA 的工程 = 永远在 chase 下一个 bug**。本文档存在的全部意义就是给那条线设界
+
+---
+
+## 已知环境敏感性（不计入"不稳"）
+
+SWE-bench 上游有少量测试是**网络环境敏感**的，结果不只取决于 patch 是否正确，还取决于跑测试的网络栈：
+
+- **DNS 行为**：`psf/requests` v2.4 的 `test_connection_error` / `test_connect_timeout` / `test_total_timeout_connect` 这类测试假定不存在的域名（如 `fooobarbangbazbing.httpbin.org`）会**解析失败**。但很多 ISP / VPN / corp DNS / Docker Desktop 配置会**劫持**不可解析域名到一个 502 的兜底 IP（典型 `198.18.0.x` 段），导致这些测试在你本地跑不出预期的 `ConnectionError` → fail。
+- **外部 HTTP 服务**：少数测试依赖 `httpbin.org` 真实响应；服务降级 / 限流期间结果不稳。
+
+**怎么算"跑稳"**：
+
+- 同环境下，gold patch 的 **FAIL_TO_PASS 全部 passed** + **PASS_TO_PASS 非环境敏感子集 100% passed**
+- 环境敏感的 PASS_TO_PASS 失败**不算 harness 失败**，但需在 report 里能识别出来（按 selector 名字 + 既知 known-flaky 清单）
+- 整体退出条件里的"gold patch pass@1 = 100%"理解为"**所有非环境敏感 selector** pass"
+
+这条不是宽容标准，是诚实承认：**有些上游测试在 isolated CI 环境之外不可重复**。等真有人需要跑到 100% 时再投入解决 DNS / network namespace 隔离，本阶段不投入。
+
+---
+
+## 调试入口（不计入退出条件，但每个 eval CLI 必须有）
+
+- ``--log-test-output PATH`` 把 runner 的 raw stdout+stderr 落地。上一轮 gate 卡在 "all selectors missing" 时，**没有这个文件就只能 docker exec 复现一次**。任何重写 CLI 都必须先暴露这个口子
