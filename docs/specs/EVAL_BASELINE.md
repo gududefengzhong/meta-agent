@@ -105,7 +105,7 @@
 - [ ] 标准 3：连续 2 次同输入 run，resolved 集合一致率 ≥ 95%（依赖 agent path）
 - [x] 标准 4 ↗ 部分：InstanceResult pydantic 字段顺序 deterministic（PR #55）；连续 2 次同输入完整 diff 验证依赖 agent path
 - [x] 标准 5：pytest-only 白名单生效；非白名单 instance 通过 `TestSpecNotFoundError` 显式报错（PR #55）
-- [ ] 跑通的 instance 数 ≥ 5，gold patch pass@1 = 100%（当前 1/1 验证：psf__requests-2317 in #56）
+- [ ] 跑通的 instance 数 ≥ 5，gold patch pass@1 = 100%（当前 **3/3 已验证**：psf__requests-2317 in #56 — FAIL_TO_PASS 8/8 ✅，PASS_TO_PASS 128/133（5 个 DNS 环境敏感失败）；pallets__flask-4045 in 本 PR — 2/2 + 50/50 ✅；pylint-dev__pylint-5859 in 本 PR — 1/1 + 10/10 ✅）
 - [ ] 同样 instance 用一个简单 baseline agent（甚至单步 LLM 直接吐 patch）跑出**非零** pass@1（哪怕 5%）—— 证明 agent path 真接通了，不只是 gold path
 
 ---

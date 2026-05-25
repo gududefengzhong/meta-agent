@@ -70,6 +70,14 @@ _SPECS: dict[tuple[str, str], TestSpec] = {
         test_cmd="pytest -rA",
         parser="pytest_options",
     ),
+    ("pallets/flask", "2.0"): TestSpec(
+        test_cmd="pytest -rA",
+        parser="pytest",
+    ),
+    ("pylint-dev/pylint", "2.13"): TestSpec(
+        test_cmd="pytest -rA",
+        parser="pytest_options",
+    ),
 }
 
 
