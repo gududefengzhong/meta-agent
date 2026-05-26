@@ -116,6 +116,22 @@ async def test_submit_task_5xx_raises_cli_error_with_network_exit_code() -> None
     assert excinfo.value.exit_code == EXIT_NETWORK
 
 
+async def test_get_trajectory_fetches_task_timeline_with_limit() -> None:
+    received: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        received.append(req)
+        return httpx.Response(200, json={"items": [], "truncated": False})
+
+    async with _client(handler) as client:
+        body = await client.get_trajectory("t-1", limit_per_source=42)
+
+    assert body == {"items": [], "truncated": False}
+    req = received[0]
+    assert req.url.path == "/v1/tasks/t-1/trajectory"
+    assert req.url.params["limit_per_source"] == "42"
+
+
 async def test_stream_llm_chunks_yields_parsed_payloads() -> None:
     def handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(

@@ -9,6 +9,7 @@ from meta_agent.core.capabilities.executor import ToolExecutor
 from meta_agent.core.capabilities.registry import ToolRegistry
 from meta_agent.core.domain.prompt_asset import PromptAsset
 from meta_agent.core.orchestration.deps import GraphDeps
+from meta_agent.core.ports.audit_sink import AuditSink
 from meta_agent.core.ports.llm import (
     FinishReason,
     LLMClient,
@@ -122,6 +123,7 @@ def fake_deps(
     tool_executor: ToolExecutor | None = None,
     prompt_registry: PromptRegistry | None = None,
     permission_gate: PermissionGate | None = None,
+    audit_sink: AuditSink | None = None,
 ) -> GraphDeps:
     """Build a :class:`GraphDeps` with an opinionated :class:`FakeLLMClient`.
 
@@ -151,4 +153,5 @@ def fake_deps(
         tool_executor=tool_executor,
         prompt_registry=prompt_registry,
         permission_gate=permission_gate,
+        audit_sink=audit_sink,
     )

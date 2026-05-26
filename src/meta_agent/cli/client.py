@@ -144,6 +144,19 @@ class TaskClient:
             ) from exc
         return _decode_or_raise(resp)
 
+    async def get_trajectory(self, task_id: str, *, limit_per_source: int = 1000) -> dict[str, Any]:
+        try:
+            resp = await self._client.get(
+                f"/v1/tasks/{task_id}/trajectory",
+                params={"limit_per_source": limit_per_source},
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise CLIError(
+                EXIT_NETWORK,
+                f"network error reaching {self._config.api_url}: {exc!s}",
+            ) from exc
+        return _decode_or_raise(resp)
+
     async def stream_llm_chunks(self, task_id: str) -> AsyncIterator[dict[str, Any]]:
         """Yield parsed chunks from /v1/tasks/{id}/llm-stream."""
         path = f"/v1/tasks/{task_id}/llm-stream"
