@@ -147,8 +147,7 @@ def real_llm_client() -> LLMClient:
                     break
     if not api_key:
         pytest.skip(
-            "OPENROUTER_API_KEY not set in env or <repo>/.env; "
-            "set it to run real-LLM dogfood test"
+            "OPENROUTER_API_KEY not set in env or <repo>/.env; set it to run real-LLM dogfood test"
         )
     config = OpenRouterConfig(api_key=api_key, default_model=_DEFAULT_MODEL)
     inner: LLMClient = OpenRouterClient(config)
@@ -240,13 +239,13 @@ def test_discount_over_100_raises() -> None:
     )
 
     _run("git", "-C", str(repo), "add", ".")
-    _run("git", "-C", str(repo), "commit", "-m", "initial: discount module with input-validation bug")
+    _run(
+        "git", "-C", str(repo), "commit", "-m", "initial: discount module with input-validation bug"
+    )
     return repo
 
 
-def _registry_for_docker_workspace(
-    llm: LLMClient, workspace_root: Path
-) -> GraphRegistry:
+def _registry_for_docker_workspace(llm: LLMClient, workspace_root: Path) -> GraphRegistry:
     tool_registry, tool_executor = build_local_tool_stack(
         fs=DockerWorkspaceFileSystemTool(workspace_root=workspace_root),
         edit=DockerWorkspaceEditTool(workspace_root=workspace_root),
@@ -498,7 +497,9 @@ async def test_bug_fix_v2_real_llm_discount_validation_bug(
     print(f"  Verifier passed:    {verifier_passed}")
     print(f"  Files changed:      {files_changed}")
     print(f"  Push skip reason:   {push_skip_reason}")
-    print(f"  Pytest (post-fix):  {pytest_passed_count}/{pytest_total} passed, {pytest_failed_count} failed")
+    print(
+        f"  Pytest (post-fix):  {pytest_passed_count}/{pytest_total} passed, {pytest_failed_count} failed"
+    )
     print("-" * 72)
     print("  Verifier output (last 800 chars):")
     print(verifier_output[-800:] if verifier_output else "  (none)")
