@@ -46,19 +46,15 @@ from meta_agent.core.orchestration.graphs import (
     BUG_FIX_V2_GRAPH_ID,
     CODE_REVIEW_GRAPH_ID,
     ECHO_GRAPH_ID,
-    FEATURE_IMPL_GRAPH_ID,
     GIT_INSPECT_GRAPH_ID,
     SHELL_AGENT_GRAPH_ID,
-    SIMPLE_CHAT_GRAPH_ID,
     build_auto_pr_graph,
     build_bug_fix_graph,
     build_bug_fix_v2_graph,
     build_code_review_graph,
     build_echo_graph,
-    build_feature_impl_graph,
     build_git_inspect_graph,
     build_shell_agent_graph,
-    build_simple_chat_graph,
 )
 from meta_agent.core.ports.audit_sink import AuditSink
 from meta_agent.core.ports.budget import BudgetEnforcer
@@ -490,11 +486,6 @@ def build_registry(deps: GraphDeps) -> GraphRegistry:
         default_for=TaskType.SYSTEM_ECHO,
     )
     registry.register(
-        SIMPLE_CHAT_GRAPH_ID,
-        build_simple_chat_graph,
-        default_for=TaskType.SYSTEM_CHAT,
-    )
-    registry.register(
         GIT_INSPECT_GRAPH_ID,
         lambda _deps: build_git_inspect_graph(),
         default_for=TaskType.SYSTEM_GIT_INSPECT,
@@ -527,12 +518,6 @@ def build_registry(deps: GraphDeps) -> GraphRegistry:
             SHELL_AGENT_GRAPH_ID,
             build_shell_agent_graph,
             default_for=TaskType.SYSTEM_SHELL_AGENT,
-            requires_workspace=True,
-        )
-        registry.register(
-            FEATURE_IMPL_GRAPH_ID,
-            build_feature_impl_graph,
-            default_for=TaskType.FEATURE_IMPL,
             requires_workspace=True,
         )
     registry.materialize(deps)

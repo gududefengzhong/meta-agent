@@ -1,4 +1,4 @@
-# AGENT_SPEC.md - Code Agent 产品规格
+# AGENT_SPEC.md - Bug Fix CLI Agent 产品规格
 
 ## 文档定位
 本文件是产品规格的事实来源，定义目标、能力边界、非功能要求、交付形态和阶段优先级。
@@ -6,14 +6,15 @@
 本文件不定义具体协作流程；开发协作规则见仓库根目录 `CLAUDE.md`。
 
 ## 产品目标
-构建一个面向企业场景的生产姿态 Code Agent。它可以接收自然语言工程任务，完成规划、执行、验证，并在受控流程下产出代码变更、审查结果和 PR 级交付物。
+构建一个**生产姿态的 Bug Fix CLI Agent**：开发者通过 CLI 提交 bug 描述 + 仓库引用，agent 用 plan-act-observe 循环读代码、改文件、跑 verifier，最终产出 PR-ready patch。
 
-设计上贯彻多租户隔离、计费、审计、模型路由、可观测和成本治理；实现上以"production-shape reference 实现"为目标，证明工程能力，不以"已部署 SaaS"为前提。
+**架构可迁移性**：同样的 graph + tool registry shape 可承载 Test Generation Agent / CI Failure Triage Agent / Workflow Automation Agents 等同类自动化场景——交换 Tool 集合 + 调整 prompt，状态机引擎和 production scaffolding 不变。
+
+设计上贯彻多租户隔离、计费、审计、模型路由、可观测和成本治理；实现上以"production-shape reference 实现"为目标——证明这套架构能在企业部署所需的工程姿态下落地，**不以"已部署 SaaS"为前提**。
 
 ## 目标用户
-- 需要受控自动化修复、代码审查和 PR 生成能力的工程团队
-- 把 Agent 接入测试 / 流程执行 / 内部效率工具链的平台团队
-- 通过 API 集成 Agent 能力的上层客户端
+- 需要 bug fix / 代码修改自动化的工程团队（产品本身）
+- 需要把同形态 Agent 引擎扩展到 Testing / CI Triage / Workflow Automation 等场景的平台团队（架构可迁移）
 
 ## 优先级分层
 
@@ -45,7 +46,7 @@
 ### L3 - 评测与扩展能力
 - 离线 / 在线评估体系（audit_events + llm_usage_logs + trajectory API 已落地数据采集层；可插拔到 Langfuse 等观测平台）
 - 多模型路由实验（β+ `LLMRouter` 已落地按 `step_kind` 路由）
-- 多形态交付（VS Code 插件 v0 + CLI v0 已落地）
+- CLI v0 已落地（主交付形态）
 
 原则：评测和多端形态是扩张能力，不应替代核心闭环。
 
@@ -127,26 +128,25 @@
 
 客户端形态按优先级：
 
-1. **VS Code 插件**（首选，v0 已落地）：日常 inline 体验 —— diff review webview、inline approval、plan mode、trajectory viewer
-2. **CLI**（必须，v0 已落地）：power user / CI 集成 / 远程会话；以 streaming 形式呈现 agent 工作过程
-3. **独立服务（REST + SSE）**（已落地）：API 接入与异步任务管理
+1. **CLI**（主交付，v0 已落地）：`python -m meta_agent.cli {submit,tail,run}`；streaming 输出 + 退出码标准；适合 power user / CI 集成 / 远程会话
+2. **独立服务（REST + SSE）**（已落地）：API 接入与异步任务管理；CLI 在其上工作
 
 ### LLM 自带（BYO key）
 
-- 客户在 VS Code / CLI 配置面自行选择 LLM 提供方 + 自己的 key（设计就绪，UI 待补）
+- 客户端选择 LLM 提供方 + 自己的 key（设计就绪）
 - 服务端只做 LLM 路由、redaction、计量、缓存、限流，不持有客户的 LLM 凭据
 - 默认路由按 β+ 的 `step_kind` → 中国系开源模型（DeepSeek / Qwen / GLM）；客户可整体或按 step_kind 覆盖
 
 ### 设计原则
-- VS Code 插件 / CLI / Server 都必须能够脱离任一具体 LLM 提供方运行
-- 凡进入用户日常 IDE 的能力必须支持 streaming responses + inline permission protocol
+- CLI / Server 都必须能够脱离任一具体 LLM 提供方运行
+- 凡进入用户日常工作流的能力必须支持 streaming responses + inline permission protocol
 
 ## 部署
 
 ### 本地开发 / PoC
 - `docker compose up --build`：拉起 postgres + redis + 一次性 alembic 迁移 + api(:8000) + worker
 - `.env` 提供 `OPENROUTER_API_KEY` + `META_AGENT_API_KEYS=<token>:<tenant>:<principal>`
-- 客户端通过 VS Code 插件或 CLI 接入
+- 客户端通过 CLI 接入
 
 ### 生产部署（设计就绪，未实现）
 - 多副本 API + Worker；Postgres 高可用；Redis 高可用
@@ -208,8 +208,6 @@
   - `WebFetch`：URL → 文本 + 截断 + 域名 allow-list
   - `DocSearch`：基于可插拔检索 Port
   - 工具调用走 α 阶段的限流 + 熔断 + 计费链路，按 `tool` 维度计量
-- 任务类型扩展
-  - 新增 `task_type=feature_impl`：复用 `shell_agent` graph，差异收敛在 system prompt + verifier 组合
 - 多模型路由（intra-task）
   - LLM Port 增 `LLMRouter` 实现：按 `step_kind`（plan / edit / search / observe）选模型
   - 路由决策写入 `llm_usage_logs.step_kind` 字段
@@ -254,16 +252,14 @@
 【目标】把 code agent 从"server 跑得通"升级为"开发者每天能用"。
 
 关键交付项：
-- **Streaming responses**：LLM token + tool 输出按流推给客户端。`LLMClient.stream()` 端到端：OpenRouter SSE → 6 个 decorator 透传 → `BroadcastingLLMClient` Redis pub/sub → `GET /v1/tasks/{id}/llm-stream` SSE → CLI / VS Code 实时打印
+- **Streaming responses**：LLM token + tool 输出按流推给客户端。`LLMClient.stream()` 端到端：OpenRouter SSE → 6 个 decorator 透传 → Redis pub/sub broadcaster → `GET /v1/tasks/{id}/llm-stream` SSE → CLI 实时打印
 - **Inline permission protocol**：`PermissionGate` Port + `InMemoryPermissionGate` / `RedisPermissionGate`。worker 端 `gate.request()` 阻塞 120s；客户端从 `/permissions/stream` 收 prompt → 渲染 → `POST /decide`。和 γ-A 的 `AWAITING_APPROVAL` 共存
 - **Session 模型**：`POST /v1/tasks` 自动 upsert session；worker 加载同 session 历史 task 的 (user_prompt, assistant_message) 注入下一轮 graph state
-- **VS Code 插件 v0**：`metaAgent.run` / `metaAgent.tail` 两条命令；Edit prompts 进 side-by-side diff webview；trajectory webview 时间轴；三档 permission mode UI
-- **CLI v0**：`python -m meta_agent.cli {submit|tail|run}`；env-driven config；exit-code taxonomy；stdout = LLM 输出，stderr = 控制流；`--no-interactive` 绕过 prompt 处理
+- **CLI v0**：`python -m meta_agent.cli {submit|tail|run}`；env-driven config；exit-code taxonomy；stdout = LLM 输出，stderr = 控制流；`--no-interactive` 绕过 prompt 处理；支持 streaming + inline approval
 - **Plan mode**：`PermissionMode.PLAN` —— shell_agent 在 `tool_call` 节点对整个 planning step 只发 1 个 gate prompt；客户端一次 approve 整批执行，deny 则全数 skip 并把理由喂回 model 重规划
 
 退出条件：
-- ✅ VS Code 插件可实时看 agent 工作、能 inline approve
-- ✅ CLI 在终端内显示 streaming + 接受 inline prompt
+- ✅ CLI 在终端内显示 streaming + 接受 inline prompt（三档 permission mode 全覆盖）
 
 ### 节奏说明
 - 单段建议 2-3 周；单段内拆 3-5 个独立 PR

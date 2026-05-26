@@ -156,9 +156,9 @@ def _parse_review(raw: str) -> ReviewOutput:
 def _project_output(review: ReviewOutput, response: LLMResponse) -> dict[str, object]:
     """Build the public ``state.data['output']`` payload.
 
-    Mirrors ``simple_chat``: the review itself is the headline, but we
-    also surface the model / finish_reason / usage so callers can audit
-    cost and provider behaviour without joining ``llm_usage_logs``.
+    The review itself is the headline, but we also surface the model /
+    finish_reason / usage so callers can audit cost and provider
+    behaviour without joining ``llm_usage_logs``.
     """
 
     return {

@@ -3,17 +3,17 @@
 Verifies the full Phase β+ PR 2 chain:
 
 1. ``PgPromptRegistry`` is seeded via :func:`ensure_seeded`.
-2. A ``feature_impl`` graph instance fetches the
-   ``feature_impl.system`` prompt from the registry at plan time.
+2. A graph instance fetches the ``bug_fix_v2.system`` prompt from
+   the registry at plan time.
 3. The outgoing :class:`LLMRequest` carries
    ``prompt_id`` + ``prompt_version``.
 4. :class:`MeteredLLMClient` writes them onto the
    ``llm_usage_logs`` row.
 
 Kept deliberately narrow: no worker dispatch, no workspace
-provisioning. Those are exercised by the existing bug_fix_v2 / feature_impl
-docker smokes; here we want a fast assertion that prompt provenance
-survives the metering hop.
+provisioning. Those are exercised by the bug_fix_v2 docker smokes;
+here we want a fast assertion that prompt provenance survives the
+metering hop.
 """
 
 from __future__ import annotations
@@ -43,10 +43,10 @@ async def test_registered_prompt_id_lands_on_llm_usage_logs(db_pool: DatabasePoo
 
     prompt_registry = PgPromptRegistry(db_pool)
     materialised = await ensure_seeded(prompt_registry)
-    feature_impl_asset: PromptAsset | None = next(
-        (a for a in materialised if a.prompt_id == "feature_impl.system"), None
+    asset: PromptAsset | None = next(
+        (a for a in materialised if a.prompt_id == "bug_fix_v2.system"), None
     )
-    assert feature_impl_asset is not None
+    assert asset is not None
 
     # Fake inner LLM client returns a stable usage stub so the metered
     # row has known token counts to assert on.
@@ -56,8 +56,8 @@ async def test_registered_prompt_id_lands_on_llm_usage_logs(db_pool: DatabasePoo
 
     request = LLMRequest(
         messages=(ChatMessage(role=MessageRole.USER, content="hi"),),
-        prompt_id=feature_impl_asset.prompt_id,
-        prompt_version=feature_impl_asset.version,
+        prompt_id=asset.prompt_id,
+        prompt_version=asset.version,
     )
     ctx = RequestContext(
         tenant_id=tenant_id,
@@ -67,10 +67,6 @@ async def test_registered_prompt_id_lands_on_llm_usage_logs(db_pool: DatabasePoo
     )
     with bind_context(ctx):
         await metered.complete(request)
-        # Spot-check the row through the typed repo first (aggregates
-        # share the same indexed path as billing), then drop down to
-        # SQL for the column-level prompt_id / prompt_version
-        # assertions.
         aggregate = await usage_repo.aggregate_since(tenant_id, datetime(2020, 1, 1, tzinfo=UTC))
     assert aggregate.tokens_used >= 1
     async with db_pool.acquire() as conn:
@@ -80,5 +76,5 @@ async def test_registered_prompt_id_lands_on_llm_usage_logs(db_pool: DatabasePoo
             tenant_id,
         )
     assert row is not None
-    assert row["prompt_id"] == feature_impl_asset.prompt_id
-    assert row["prompt_version"] == feature_impl_asset.version
+    assert row["prompt_id"] == asset.prompt_id
+    assert row["prompt_version"] == asset.version

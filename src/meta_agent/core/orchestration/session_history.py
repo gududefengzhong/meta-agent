@@ -11,8 +11,8 @@ Messages are *derived* from the task table — we don't store them
 twice:
 
 * ``user`` content comes from each prior task's
-  ``input_payload["user_prompt"]`` (the same key shell_agent /
-  feature_impl / simple_chat already read)
+  ``input_payload["user_prompt"]`` (the same key ``shell_agent``
+  and ``bug_fix_v2`` already read)
 * ``assistant`` content comes from each prior task's
   :class:`TaskResult.output["assistant_message"]` (the same key
   the graphs already write)

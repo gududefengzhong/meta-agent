@@ -403,8 +403,8 @@ def build_shell_agent_graph(
 
     ``graph_id`` defaults to :data:`SHELL_AGENT_GRAPH_ID`. Callers that
     want to reuse the same plan→tool→observe loop under a distinct
-    audit / registry identity (e.g. ``builtin.feature_impl``) pass their
-    own id; the graph topology and node behavior are identical.
+    audit / registry identity pass their own id; the graph topology
+    and node behavior are identical.
 
     System-prompt resolution at plan time (first matching rule wins):
 

@@ -20,7 +20,6 @@ from meta_agent.core.orchestration.graphs import (
     ECHO_GRAPH_ID,
     GIT_INSPECT_GRAPH_ID,
     SHELL_AGENT_GRAPH_ID,
-    SIMPLE_CHAT_GRAPH_ID,
 )
 from meta_agent.infra.budget.llm_usage_aggregator import (
     LLMUsageAggregatorBudgetEnforcer,
@@ -234,17 +233,14 @@ def test_build_registry_registers_builtin_graphs_and_routes_defaults() -> None:
     registry = build_registry(GraphDeps(llm=FakeLLMClient()))
     assert registry.is_materialized
     assert registry.get(ECHO_GRAPH_ID).graph_id == ECHO_GRAPH_ID
-    assert registry.get(SIMPLE_CHAT_GRAPH_ID).graph_id == SIMPLE_CHAT_GRAPH_ID
     assert registry.get(GIT_INSPECT_GRAPH_ID).graph_id == GIT_INSPECT_GRAPH_ID
     assert registry.resolve(TaskType.BUG_FIX).graph_id == "builtin.bug_fix"
     assert registry.resolve(TaskType.SYSTEM_ECHO).graph_id == ECHO_GRAPH_ID
-    assert registry.resolve(TaskType.SYSTEM_CHAT).graph_id == SIMPLE_CHAT_GRAPH_ID
     assert registry.resolve(TaskType.SYSTEM_GIT_INSPECT).graph_id == GIT_INSPECT_GRAPH_ID
-    # Only the git-inspect graph requires a workspace; the other two
-    # built-ins must not pull the worker into provisioning a worktree.
+    # The git-inspect graph requires a workspace; the other built-in
+    # smoke graphs must not pull the worker into provisioning a worktree.
     assert registry.requires_workspace(GIT_INSPECT_GRAPH_ID) is True
     assert registry.requires_workspace(ECHO_GRAPH_ID) is False
-    assert registry.requires_workspace(SIMPLE_CHAT_GRAPH_ID) is False
     # Without a tool stack in deps, ``shell_agent`` must stay
     # unregistered so legacy callers (smoke harnesses, unit tests)
     # keep working without paying for the tool surface.

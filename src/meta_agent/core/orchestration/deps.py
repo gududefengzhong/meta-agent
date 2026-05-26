@@ -57,9 +57,9 @@ class GraphDeps:
     """Static catalogue of tools available to tool-use graphs.
 
     Populated at boot together with :attr:`tool_executor`. Graphs that
-    do not advertise tools to the LLM (e.g. ``simple_chat``) ignore
-    this field; tool-use graphs (``shell_agent``) raise
-    :class:`GraphError` when it is ``None``.
+    do not advertise tools to the LLM (e.g. pure-LLM ``code_review``)
+    ignore this field; tool-use graphs (``shell_agent`` /
+    ``bug_fix_v2``) raise :class:`GraphError` when it is ``None``.
     """
     tool_executor: ToolExecutor | None = None
     """Dispatch seam translating :class:`ToolCall` -> :class:`ToolResult`.
