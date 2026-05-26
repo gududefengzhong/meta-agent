@@ -66,6 +66,7 @@ def _success_body(
             "prompt_tokens": 5,
             "completion_tokens": 2,
             "total_tokens": 7,
+            "cost": 0.000123,
         },
     }
 
@@ -103,6 +104,7 @@ async def test_complete_success_path_parses_response() -> None:
     assert response.finish_reason == "stop"
     assert response.usage.prompt_tokens == 5
     assert response.usage.total_tokens == 7
+    assert response.usage.cost_usd_micros == 123
     assert response.provider_response_id == "resp-1"
 
     assert len(received) == 1
@@ -112,6 +114,7 @@ async def test_complete_success_path_parses_response() -> None:
     body = req.content.decode()
     assert '"model":"deepseek/deepseek-chat"' in body
     assert '"temperature":0.2' in body
+    assert '"reasoning":{"exclude":true}' in body
 
 
 async def test_complete_retries_on_5xx_then_succeeds() -> None:
@@ -286,12 +289,14 @@ def test_config_from_env_reads_overrides() -> None:
             "OPENROUTER_BASE_URL": "https://example.test/v1/",
             "OPENROUTER_DEFAULT_MODEL": "qwen/qwen3",
             "OPENROUTER_MAX_RETRIES": "5",
+            "OPENROUTER_EXCLUDE_REASONING": "false",
         }
     )
     assert cfg.api_key == "k"
     assert cfg.base_url == "https://example.test/v1"
     assert cfg.default_model == "qwen/qwen3"
     assert cfg.max_retries == 5
+    assert cfg.exclude_reasoning is False
 
 
 def test_construct_rejects_empty_api_key() -> None:
@@ -453,6 +458,37 @@ async def test_response_with_null_content_and_no_tool_calls_raises_transient() -
         await client.close()
 
 
+async def test_response_can_fallback_to_reasoning_when_content_is_null() -> None:
+    body = {
+        "id": "r",
+        "model": "deepseek/deepseek-v4-pro",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning": "final answer carried by a reasoning-model provider",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+    }
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    client = _client(handler, config=_config(max_retries=0))
+    try:
+        response = await client.complete(_request())
+    finally:
+        await client.close()
+
+    assert response.content == "final answer carried by a reasoning-model provider"
+    assert response.model == "deepseek/deepseek-v4-pro"
+
+
 # --------------------------------------------------------------------- streaming
 
 
@@ -480,7 +516,8 @@ async def test_stream_emits_content_deltas_then_terminal_chunk() -> None:
                 '"choices":[{"index":0,"delta":{"content":"hel"}}]}',
                 '{"choices":[{"index":0,"delta":{"content":"lo"}}]}',
                 '{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
-                '"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}',
+                '"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7,'
+                '"cost":0.000123}}',
                 "[DONE]",
             ),
             headers={"content-type": "text/event-stream"},
@@ -500,6 +537,7 @@ async def test_stream_emits_content_deltas_then_terminal_chunk() -> None:
     assert terminal.finish_reason == "stop"
     assert terminal.usage is not None
     assert terminal.usage.total_tokens == 7
+    assert terminal.usage.cost_usd_micros == 123
 
 
 async def test_stream_assembles_tool_call_deltas_with_partial_arguments() -> None:

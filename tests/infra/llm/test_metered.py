@@ -97,7 +97,12 @@ def _ok_response() -> LLMResponse:
         content="hello",
         model="openai/gpt-4o",
         finish_reason="stop",
-        usage=LLMUsage(prompt_tokens=3, completion_tokens=5, total_tokens=8),
+        usage=LLMUsage(
+            prompt_tokens=3,
+            completion_tokens=5,
+            total_tokens=8,
+            cost_usd_micros=42,
+        ),
         provider_response_id="gen_abc",
     )
 
@@ -138,6 +143,7 @@ async def test_ok_path_records_tokens_and_returns_response() -> None:
     assert r.prompt_tokens == 3
     assert r.completion_tokens == 5
     assert r.total_tokens == 8
+    assert r.cost_usd_micros == 42
     assert r.status is LLMUsageStatus.OK
     assert r.latency_ms == 50
 

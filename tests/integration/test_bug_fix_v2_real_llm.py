@@ -59,6 +59,7 @@ from meta_agent.core.orchestration import GraphRegistry
 from meta_agent.core.orchestration.graphs import BUG_FIX_V2_GRAPH_ID
 from meta_agent.core.ports.llm import LLMClient
 from meta_agent.infra.llm.config import OpenRouterConfig
+from meta_agent.infra.llm.metered import MeteredLLMClient
 from meta_agent.infra.llm.openrouter import OpenRouterClient
 from meta_agent.infra.llm.redacting import RedactingLLMClient
 from meta_agent.infra.persistence import (
@@ -66,6 +67,7 @@ from meta_agent.infra.persistence import (
     OutboxDispatcher,
     PgAuditRepository,
     PgCheckpointRepository,
+    PgLLMUsageRepository,
     PgOutboxRepository,
     PgTaskRepository,
 )
@@ -93,20 +95,7 @@ _WORKSPACE_IMAGE_ENV = "META_AGENT_WORKSPACE_IMAGE"
 _DEFAULT_WORKSPACE_IMAGE = "meta-agent:local"
 
 # Project-chosen baseline model. Override with OPENROUTER_MODEL env.
-#
-# NOTE: ``deepseek/deepseek-v4-pro`` (the documented baseline) is a
-# **reasoning model** — its OpenRouter response has ``content: null``
-# with the chain-of-thought in a separate ``reasoning`` field. Our
-# OpenRouter adapter currently raises ``LLMTransientError`` when
-# content is empty (correctly, for non-reasoning models). Supporting
-# reasoning models cleanly requires adapter changes (reasoning →
-# content fallback, larger max_tokens budget, separate token
-# accounting). Tracked as a future enhancement.
-#
-# Until then this test runs on ``deepseek/deepseek-chat-v3-0324`` —
-# proven stable through the current adapter, similar capability tier,
-# good cost.
-_DEFAULT_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-chat-v3-0324")
+_DEFAULT_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-pro")
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -283,6 +272,7 @@ async def _run_bug_fix_task(
     registry: GraphRegistry,
     workspaces: DockerWorkspaceManager,
     payload: dict[str, object],
+    llm_usage: PgLLMUsageRepository | None = None,
 ) -> tuple[Task, OutboxEvent, PgTaskRepository, PgOutboxRepository]:
     """Insert a task, enqueue via outbox, dispatch to redis, run worker once.
 
@@ -350,6 +340,7 @@ async def _run_bug_fix_task(
         audits=PgAuditRepository(db_pool),
         registry=registry,
         workspaces=workspaces,
+        llm_usage=llm_usage,
         config=WorkerConfig(max_attempts=1, block_ms=500),
     )
     assert await worker.run_once() == 1
@@ -377,13 +368,16 @@ async def test_bug_fix_v2_real_llm_discount_validation_bug(
     workspace_root = tmp_path / "workspaces"
     workspace_root.mkdir()
 
-    registry = _registry_for_docker_workspace(real_llm_client, workspace_root)
+    usage_repo = PgLLMUsageRepository(db_pool)
+    metered_llm = MeteredLLMClient(real_llm_client, usage_repo, provider="openrouter")
+    registry = _registry_for_docker_workspace(metered_llm, workspace_root)
 
     task, _event, task_repo, _outbox_repo = await _run_bug_fix_task(
         db_pool=db_pool,
         redis_client=redis_client,
         registry=registry,
         workspaces=_workspace_manager(workspace_root, workspace_image),
+        llm_usage=usage_repo,
         payload={
             "issue_description": (
                 "discount_price() in src/discount.py needs to validate its "
@@ -446,6 +440,7 @@ async def test_bug_fix_v2_real_llm_discount_validation_bug(
     )
     assert result is not None, "task produced no result row"
     assert result.graph_id == BUG_FIX_V2_GRAPH_ID
+    assert usage_rows, "real LLM call produced no llm_usage_logs rows"
 
     # ---- Agent quality observations (printed, not asserted) ----
     output = result.output or {}
@@ -454,8 +449,21 @@ async def test_bug_fix_v2_real_llm_discount_validation_bug(
     verifier_output = output.get("verifier_output", "")
     push_skip_reason = output.get("push_skip_reason")
 
-    # Re-run pytest on the post-patch tree from the host to get an
-    # independent verdict (the agent ran pytest inside a container).
+    # Re-run pytest on the patched tree from the host to get an independent
+    # verdict (the agent ran pytest inside a container, then cleaned the
+    # Docker worktree). The persisted unified diff is the stable artifact.
+    patch_text = str(output.get("patch") or "")
+    patch_apply_success = False
+    if patch_text:
+        patch_apply = subprocess.run(
+            ["git", "-C", str(repo), "apply", "--index", "-"],
+            input=patch_text,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        patch_apply_success = patch_apply.returncode == 0
     pytest_passed_count = 0
     pytest_failed_count = 0
     pytest_total = 5
@@ -497,6 +505,7 @@ async def test_bug_fix_v2_real_llm_discount_validation_bug(
     print(f"  Verifier passed:    {verifier_passed}")
     print(f"  Files changed:      {files_changed}")
     print(f"  Push skip reason:   {push_skip_reason}")
+    print(f"  Patch replayed:     {patch_apply_success}")
     print(
         f"  Pytest (post-fix):  {pytest_passed_count}/{pytest_total} passed, {pytest_failed_count} failed"
     )

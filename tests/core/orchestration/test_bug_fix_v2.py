@@ -45,6 +45,12 @@ def tiny_repo(tmp_path: Path) -> Path:
     _run("git", "-C", str(repo), "config", "user.email", "t@example.com")
     _run("git", "-C", str(repo), "config", "user.name", "test")
     (repo / "buggy.py").write_text('def greet(name):\n    return "hi " + name\n')
+    (repo / "test_buggy.py").write_text(
+        "from buggy import greet\n\n\n"
+        "def test_greet_adds_punctuation() -> None:\n"
+        "    assert greet('Ada') == 'hi Ada!'\n",
+        encoding="utf-8",
+    )
     _run("git", "-C", str(repo), "add", ".")
     _run("git", "-C", str(repo), "commit", "-m", "initial")
     _run("git", "-C", str(repo), "checkout", "-b", "agent/task-1")
@@ -137,7 +143,9 @@ async def test_happy_path_edits_file_and_verifies(tiny_repo: Path) -> None:
     assert output["files_changed"] == ["buggy.py"]
     assert output["pushed"] is False
     assert output["push_skip_reason"] == "no_repo_url"
-    assert "suite=python_lint" in output["verifier_output"]
+    assert "suite=python_test" in output["verifier_output"]
+    assert "diff --git a/buggy.py b/buggy.py" in output["patch"]
+    assert 'return f"hi {name}!"' in output["patch"]
     assert isinstance(output["commit_sha"], str) and len(output["commit_sha"]) >= 7
     assert output["head_commit_sha"] == output["commit_sha"]
     assert output["tool_invocations"] == 1
@@ -183,6 +191,7 @@ async def test_verify_failure_triggers_single_replan(tiny_repo: Path) -> None:
     assert output["verifier_passed"] is True
     assert output["attempts"] == 2
     assert output["assistant_message"] == "fixed after verifier"
+    assert "diff --git a/buggy.py b/buggy.py" in output["patch"]
     # The second inner shell_agent run should have seen verifier feedback.
     assert "Verifier output:" in client.calls[2].messages[1].content
 

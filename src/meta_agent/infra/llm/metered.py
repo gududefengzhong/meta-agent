@@ -210,6 +210,7 @@ def _build_record(
             prompt_tokens=response.usage.prompt_tokens,
             completion_tokens=response.usage.completion_tokens,
             total_tokens=response.usage.total_tokens,
+            cost_usd_micros=response.usage.cost_usd_micros,
             finish_reason=response.finish_reason,
             provider_response_id=response.provider_response_id,
             prompt_id=request.prompt_id,

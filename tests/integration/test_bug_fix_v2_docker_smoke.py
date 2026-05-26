@@ -105,6 +105,13 @@ def _make_python_repo(root: Path) -> Path:
         'def greet(name: str) -> str:\n    return f"hi {name}"\n',
         encoding="utf-8",
     )
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_greet.py").write_text(
+        "from src.greet import greet\n\n\n"
+        "def test_greet_adds_punctuation() -> None:\n"
+        "    assert greet('Ada') == 'hi Ada!'\n",
+        encoding="utf-8",
+    )
     _run("git", "-C", str(repo), "add", ".")
     _run("git", "-C", str(repo), "commit", "-m", "initial")
     return repo
@@ -303,7 +310,8 @@ async def test_bug_fix_v2_python_repo_end_to_end_in_docker_backend(
     assert output["verifier_passed"] is True
     assert output["files_changed"] == ["src/greet.py"]
     assert output["push_skip_reason"] == "no_token"
-    assert "suite=python_lint" in output["verifier_output"]
+    assert "suite=python_test" in output["verifier_output"]
+    assert "diff --git a/src/greet.py b/src/greet.py" in output["patch"]
     assert fetched is not None and fetched.state == TaskState.SUCCEEDED
     assert (repo / "src" / "greet.py").read_text(
         encoding="utf-8"
