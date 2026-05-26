@@ -62,7 +62,6 @@ async def test_builtin_seeds_have_stable_hashes() -> None:
     # the change deliberately. The fixture exists so silent prompt
     # drift is caught in code review rather than after a deploy.
     expected = {
-        "feature_impl.system": "5d65a7a0a4ed7e5cffaba93da1e1b1b62d5fd7c10cdef3c14b8569437bbb7d54",
         "bug_fix.plan.system": "3f6fde64e2e1de1303ba12c4d9f4dc6a7f4ed79d2c2b03e60aae33f6c0d6cdfd",
         "bug_fix.patch.system": "6cc34e9d28b87d04a36b3b9c0e8de2089e8a6ff8f9d9c4cfae73bc3b2c4ef0d8",
         "bug_fix_v2.system": "0d8e6d2c2b4d97f8a4b6f1f5e26c97e7ab12c4c3f9d1c3c0d4b6e9a48f1d3b54",

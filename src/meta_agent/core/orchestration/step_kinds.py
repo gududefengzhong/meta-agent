@@ -13,7 +13,7 @@ Buckets:
 * ``STEP_EDIT`` — code-modification step (write whole files / unified
   diff). ``bug_fix`` v1's patch node uses it.
 * ``STEP_REVIEW`` — code-review judgment (``code_review`` graph).
-* ``STEP_CHAT`` — generic short-form chat (``simple_chat`` smoke).
+* ``STEP_CHAT`` — generic short-form chat (reserved for smoke / probe).
 * ``STEP_OBSERVE`` — reserved for future observation-summary steps;
   no graph emits it today but it is part of the public vocabulary so
   router configs can pre-allocate a model slot.

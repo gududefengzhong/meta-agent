@@ -75,21 +75,24 @@
 ## 当前状态
 <!-- 阶段进度高层快照。详细 phase 段落见 docs/specs/AGENT_SPEC.md。 -->
 
-### 已完成阶段（已落地、已冻结）
+### 产品定位
+**Bug Fix CLI Agent** —— 输入 bug 描述 + 仓库，agent 用 plan-act-observe 循环读代码、改文件、跑 verifier、产 PR。CLI 是主交付形态；架构（graph + tool registry）可扩展到 Test Generation / CI Triage / Workflow Automation 等同形态自动化场景。
+
+### 已落地的能力栈
 - **α 安全生产线**：`RateLimiter` + `CircuitBreaker`（pybreaker + Redis 共享统计）+ 入口鉴权 + `Secrets` Port + 任务级 budget gate + 审计/计费查询 API
 - **β tool-use loop + 容器沙箱**：`shell_agent` plan → tool_call → observe loop（含 `max_steps` / `max_total_tokens`）；4 个 Tool Ports（FS / Edit / Shell / Test）+ local 与 docker 双实现；多语言 verifier（Python ruff+pytest / TypeScript tsc+vitest）
-- **β+ Agent 能力深度**：`CodeIndex`（tree-sitter + pgvector embeddings）+ `code_search` / `get_definition` / `get_references` / `outline` 4 个 retrieval tools；`WebFetch` / `DocSearch`；`LLMRouter` 按 `step_kind` 选模型；prompt 版本化（content hash → 注入 audit + usage logs）；`feature_impl` task type 复用 shell_agent
-- **γ 信任面 + 长程恢复**：Checkpoint 续跑；3 档 `PermissionMode` + 3 档 `BudgetPolicy` 正交组合；`human_gate` + `AWAITING_APPROVAL`；approve / abort API + 结构化反馈注入下一轮 plan；trajectory API（audit + checkpoints + usage 三表 JOIN 时间轴）；Outbox + webhook（HMAC + 退避 + 去重 + 死信）；per-task cost view by `step_kind` × `model`；prompt redaction layer；30 天 sweeper
-- **δ-1 客户端 scaffold**：`LLMClient.stream()` 端到端 SSE（OpenRouter → 6 个 decorator 透传 → `BroadcastingLLMClient` Redis pub/sub → `GET /v1/tasks/{id}/llm-stream`）；`PermissionGate` Port + Redis 实现 + `/permissions/stream` SSE；shell_agent 三档 inline permission（`approve_each_tool` / `plan` / `approve_before_push`）；Session 模型 + 历史消息线注入下一轮；CLI v0（submit / tail / run）；VS Code v0（diff-review webview + trajectory webview）
+- **β+ Agent 能力深度**：`CodeIndex`（tree-sitter + pgvector embeddings）+ `code_search` / `get_definition` / `get_references` / `outline` 4 个 retrieval tools；`WebFetch` / `DocSearch`；`LLMRouter` 按 `step_kind` 选模型；prompt 版本化（content hash → 注入 audit + usage logs）
+- **γ 信任面 + 长程恢复**：Checkpoint 续跑；4 档 `PermissionMode` + 3 档 `BudgetPolicy` 正交组合；`human_gate` + `AWAITING_APPROVAL`；approve / abort API + 结构化反馈注入下一轮 plan；trajectory API（audit + checkpoints + usage 三表 JOIN 时间轴）；Outbox + webhook（HMAC + 退避 + 去重 + 死信）；per-task cost view by `step_kind` × `model`；prompt redaction layer；30 天 sweeper
+- **δ-1 客户端 scaffold**：`LLMClient.stream()` 端到端 SSE（OpenRouter → 6 个 decorator 透传 → Redis pub/sub broadcaster → `GET /v1/tasks/{id}/llm-stream`）；`PermissionGate` Port + Redis 实现；Session 模型 + 历史消息线注入下一轮；CLI v0（submit / tail / run）
 
 ### 三条 L1 主链路
-- `builtin.bug_fix` / `bug_fix_v2`：plan / patch / verify / push / finalize；git worktree 内修改 + commit + push；replan；多语言 verifier
+- `builtin.bug_fix_v2` / `builtin.bug_fix`：plan / patch / verify / push / finalize；git worktree 内修改 + commit + push；replan；多语言 verifier
 - `builtin.code_review`：prepare / review / finalize，pure-LLM，Pydantic schema 严格校验输出
 - `builtin.auto_pr`：prepare / publish / finalize + `GitProvider` Port（FakeGitProvider + GitHubGitProvider）；`BUG_FIX → AUTO_PR` follow-up chain
 
-### Future work（不在当前交付范围）
-以下能力 spec 上有完整设计、但**不是当前项目的交付目标**。需要时按 phase 顺序展开：
-- δ-2 剩余：workspace browser / resume conversation IDE UI
-- δ-3 协作集成：AGENTS.md project memory / PR review feedback / BYO LLM 配置面 / MCP Server
-- ε 企业部署：K8s Helm / Prometheus + OTel exporter / SSO / RBAC / Web UI
-- ζ 沙箱深度：gVisor / Firecracker 替换 docker
+### 故意不做的事
+- VS Code 插件（曾做过，定位收窄到 CLI 后移除）
+- 跑分 / SWE-bench harness（外部 benchmark 与产品价值正交，不在交付范围）
+- 多 Agent 编排 / Hooks / 插件机制（L2 平台层，超出 focused agent 范围）
+- K8s Helm / SSO / Web UI（spec 上 ε 阶段；真实部署需求出现再做）
+- gVisor / Firecracker 沙箱（spec 上 ζ 阶段；强合规客户出现再做）

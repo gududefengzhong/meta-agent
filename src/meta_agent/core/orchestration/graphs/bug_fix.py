@@ -16,7 +16,7 @@ Scope (P1.x first cut):
   failure is reported as ``output.verifier_passed=False`` but does
   NOT mark the task as failed; the task succeeds with a patch the
   caller can choose to discard. ``state.error`` fail-fast routing
-  for business failures is deferred (see ``simple_chat`` docstring).
+  for business failures is deferred to a future iteration.
 * On a failed verify the graph routes back to ``plan`` once
   (``_MAX_REPLAN_ATTEMPTS``) with the prior plan, diff summary and
   verifier output fed back as context. The replan's new patch lands
