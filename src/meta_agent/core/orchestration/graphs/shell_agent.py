@@ -28,19 +28,25 @@ Scope (v0):
 from __future__ import annotations
 
 import json
+import logging
+import time
 import uuid
+from collections.abc import Awaitable
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from meta_agent.core.capabilities.executor import ToolExecutor
 from meta_agent.core.capabilities.registry import ToolRegistry
+from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.domain.permission import PermissionDecision, PermissionPrompt
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
 from meta_agent.core.orchestration.llm_streaming import aggregate_stream_to_response
 from meta_agent.core.orchestration.state import END, TaskRunState
 from meta_agent.core.orchestration.step_kinds import STEP_PLAN
+from meta_agent.core.ports.audit_sink import AuditSink
 from meta_agent.core.ports.llm import (
     ChatMessage,
     LLMClient,
@@ -57,6 +63,8 @@ from meta_agent.core.ports.tools import ToolCall, ToolContext, ToolResult, ToolS
 
 SHELL_AGENT_GRAPH_ID = "builtin.shell_agent"
 
+logger = logging.getLogger(__name__)
+
 _DEFAULT_MAX_STEPS = 8
 _DEFAULT_OUTPUT_BYTE_CAP = 65536
 _PERMISSION_DECISION_TIMEOUT_S = 120.0
@@ -68,6 +76,18 @@ The graph treats a timeout as a deny (same shape as an explicit
 ``allow=False``) so a silent client cannot accidentally green-light
 a sensitive action.
 """
+_AUDIT_ARGUMENT_PATH_KEYS = frozenset(
+    {
+        "path",
+        "repo_path",
+        "file",
+        "file_path",
+        "target",
+        "targets",
+        "path_globs",
+        "suite",
+    }
+)
 
 
 def _str_or_none(state: TaskRunState, key: str) -> str | None:
@@ -254,6 +274,136 @@ def _tool_message_content(result: ToolResult) -> str:
     return "\n".join(lines)
 
 
+async def _execute_with_audit(
+    call: ToolCall,
+    tool_ctx: ToolContext,
+    state: TaskRunState,
+    operation: Awaitable[ToolResult],
+    audit_sink: AuditSink | None,
+) -> ToolResult:
+    """Run one LLM-requested tool call and emit structured audit events."""
+
+    step = _int_or_default(state, "_step", 0)
+    await _audit_tool_event(
+        state,
+        action="tool.invoked",
+        audit_sink=audit_sink,
+        payload={
+            "call_id": call.id,
+            "tool_name": call.name,
+            "agent_step": step,
+            "arguments": _summarize_tool_arguments(call.arguments),
+            "workspace_path_present": tool_ctx.workspace_path is not None,
+        },
+    )
+    started = time.perf_counter()
+    try:
+        result = await operation
+    except Exception as exc:
+        await _audit_tool_event(
+            state,
+            action="tool.failed",
+            audit_sink=audit_sink,
+            payload={
+                "call_id": call.id,
+                "tool_name": call.name,
+                "agent_step": step,
+                "duration_ms": _elapsed_ms(started),
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise
+    payload: dict[str, object] = {
+        "call_id": result.call_id,
+        "tool_name": result.name,
+        "agent_step": step,
+        "duration_ms": _elapsed_ms(started),
+        "output_bytes": len(result.content.encode("utf-8")),
+        "truncated": result.truncated,
+        "metadata": dict(result.metadata),
+    }
+    action = "tool.failed" if result.is_error else "tool.completed"
+    await _audit_tool_event(state, action=action, audit_sink=audit_sink, payload=payload)
+    return result
+
+
+def _elapsed_ms(started: float) -> int:
+    delta = time.perf_counter() - started
+    if delta < 0:
+        return 0
+    return int(delta * 1000)
+
+
+async def _audit_tool_event(
+    state: TaskRunState,
+    *,
+    action: str,
+    audit_sink: AuditSink | None,
+    payload: dict[str, object],
+) -> None:
+    if audit_sink is None:
+        return
+    try:
+        await audit_sink.append(
+            AuditEvent(
+                event_id=f"aud-{uuid.uuid4()}",
+                tenant_id=state.tenant_id,
+                principal_id="system",
+                session_id=None,
+                task_id=state.task_id,
+                trace_id=state.trace_id,
+                action=action,
+                payload=payload,
+                occurred_at=datetime.now(UTC),
+            )
+        )
+    except Exception as exc:
+        logger.warning(
+            "shell_agent.tool_audit_failed",
+            extra={
+                "task_id": state.task_id,
+                "action": action,
+                "error_type": type(exc).__name__,
+            },
+        )
+
+
+def _summarize_tool_arguments(args: dict[str, Any]) -> dict[str, object]:
+    """Return a non-secret-bearing argument summary for audit payloads."""
+
+    return {key: _summarize_argument_value(key, value) for key, value in args.items()}
+
+
+def _summarize_argument_value(key: str, value: object) -> object:
+    lower = key.lower()
+    if lower in _AUDIT_ARGUMENT_PATH_KEYS:
+        return _summarize_path_like(value)
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return {
+            "type": "str",
+            "chars": len(value),
+            "sha256": sha256(value.encode("utf-8")).hexdigest()[:12],
+        }
+    if isinstance(value, list | tuple):
+        return {"type": "list", "items": len(value)}
+    if isinstance(value, dict):
+        return {"type": "object", "keys": sorted(str(k) for k in value)[:20]}
+    return {"type": type(value).__name__}
+
+
+def _summarize_path_like(value: object) -> object:
+    if isinstance(value, str):
+        return value[:200]
+    if isinstance(value, list | tuple):
+        out: list[object] = []
+        for item in value[:20]:
+            out.append(item[:200] if isinstance(item, str) else _summarize_argument_value("", item))
+        return out
+    return _summarize_argument_value("", value)
+
+
 async def _gated_execute(
     call: ToolCall,
     tool_ctx: ToolContext,
@@ -381,6 +531,21 @@ def _synthetic_deny_result(
             "permission_outcome": outcome,
             "prompt_id": prompt_id,
         },
+    )
+
+
+async def _synthetic_deny_result_async(
+    call: ToolCall,
+    *,
+    reason: str | None,
+    outcome: str,
+    prompt_id: str,
+) -> ToolResult:
+    return _synthetic_deny_result(
+        call,
+        reason=reason,
+        outcome=outcome,
+        prompt_id=prompt_id,
     )
 
 
@@ -572,14 +737,21 @@ def build_shell_agent_graph(
             for call in calls:
                 result: ToolResult
                 if plan_decision is None or plan_decision.allow:
-                    result = await executor.execute(call, ctx)
+                    operation = executor.execute(call, ctx)
                 else:
-                    result = _synthetic_deny_result(
+                    operation = _synthetic_deny_result_async(
                         call,
                         reason=plan_decision.reason if plan_decision else None,
                         outcome="timeout" if plan_decision is None else "denied",
                         prompt_id=_plan_prompt_id_from_state(state),
                     )
+                result = await _execute_with_audit(
+                    call,
+                    ctx,
+                    state,
+                    operation,
+                    deps.audit_sink,
+                )
                 invocations += 1
                 messages.append(
                     ChatMessage(
@@ -602,9 +774,29 @@ def build_shell_agent_graph(
             tool_result: ToolResult
             if requires_approval:
                 assert gate is not None  # narrowed by the guard above
-                tool_result = await _gated_execute(call, ctx, executor, gate=gate, state=state)
+                operation = _gated_execute(
+                    call,
+                    ctx,
+                    executor,
+                    gate=gate,
+                    state=state,
+                )
+                tool_result = await _execute_with_audit(
+                    call,
+                    ctx,
+                    state,
+                    operation,
+                    deps.audit_sink,
+                )
             else:
-                tool_result = await executor.execute(call, ctx)
+                operation = executor.execute(call, ctx)
+                tool_result = await _execute_with_audit(
+                    call,
+                    ctx,
+                    state,
+                    operation,
+                    deps.audit_sink,
+                )
             invocations += 1
             messages.append(
                 ChatMessage(

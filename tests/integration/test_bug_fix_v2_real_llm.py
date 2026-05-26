@@ -234,7 +234,12 @@ def test_discount_over_100_raises() -> None:
     return repo
 
 
-def _registry_for_docker_workspace(llm: LLMClient, workspace_root: Path) -> GraphRegistry:
+def _registry_for_docker_workspace(
+    llm: LLMClient,
+    workspace_root: Path,
+    *,
+    audit_repo: PgAuditRepository,
+) -> GraphRegistry:
     tool_registry, tool_executor = build_local_tool_stack(
         fs=DockerWorkspaceFileSystemTool(workspace_root=workspace_root),
         edit=DockerWorkspaceEditTool(workspace_root=workspace_root),
@@ -245,7 +250,12 @@ def _registry_for_docker_workspace(llm: LLMClient, workspace_root: Path) -> Grap
     # BUILTIN_PROMPT_SEEDS — bug_fix_v2 hard-requires deps.prompt_registry,
     # so we can't pass a raw GraphDeps here.
     registry = build_registry(
-        fake_deps(llm, tool_registry=tool_registry, tool_executor=tool_executor)
+        fake_deps(
+            llm,
+            tool_registry=tool_registry,
+            tool_executor=tool_executor,
+            audit_sink=audit_repo,
+        )
     )
     assert registry.resolve(TaskType.BUG_FIX).graph_id == BUG_FIX_V2_GRAPH_ID
     return registry
@@ -369,8 +379,13 @@ async def test_bug_fix_v2_real_llm_discount_validation_bug(
     workspace_root.mkdir()
 
     usage_repo = PgLLMUsageRepository(db_pool)
+    audit_repo = PgAuditRepository(db_pool)
     metered_llm = MeteredLLMClient(real_llm_client, usage_repo, provider="openrouter")
-    registry = _registry_for_docker_workspace(metered_llm, workspace_root)
+    registry = _registry_for_docker_workspace(
+        metered_llm,
+        workspace_root,
+        audit_repo=audit_repo,
+    )
 
     task, _event, task_repo, _outbox_repo = await _run_bug_fix_task(
         db_pool=db_pool,
@@ -426,7 +441,24 @@ async def test_bug_fix_v2_real_llm_discount_validation_bug(
     for r in audit_rows[:40]:
         print(f"    {r['occurred_at']:%H:%M:%S} {r['action']}")
         payload_str = str(r["payload"])
-        if "error" in payload_str.lower() or "fail" in payload_str.lower():
+        if str(r["action"]).startswith("tool."):
+            payload = r["payload"]
+            if isinstance(payload, dict):
+                detail = {
+                    key: payload.get(key)
+                    for key in (
+                        "tool_name",
+                        "agent_step",
+                        "duration_ms",
+                        "output_bytes",
+                        "truncated",
+                        "arguments",
+                        "metadata",
+                    )
+                    if key in payload
+                }
+                print(f"      payload: {detail}")
+        elif "error" in payload_str.lower() or "fail" in payload_str.lower():
             print(f"      payload: {payload_str[:500]}")
     print(f"  LLM usage logs ({len(usage_rows)}):")
     for r in usage_rows[:10]:

@@ -102,6 +102,16 @@ async def cmd_run(args: argparse.Namespace, client: TaskClient) -> int:
     )
 
 
+async def cmd_trace(args: argparse.Namespace, client: TaskClient) -> int:
+    """Fetch and print the merged audit/checkpoint/usage task timeline."""
+
+    page = await client.get_trajectory(args.task_id, limit_per_source=args.limit_per_source)
+    items_raw = page.get("items", [])
+    items = items_raw if isinstance(items_raw, list) else []
+    print(_render_trace_report(args.task_id, items, truncated=bool(page.get("truncated"))))
+    return EXIT_OK
+
+
 # --------------------------------------------------------------- helpers
 
 
@@ -262,3 +272,105 @@ def _render_json(value: Any) -> str:
         return json.dumps(value, indent=2, sort_keys=True)
     except (TypeError, ValueError):
         return repr(value)
+
+
+def _render_trace_report(task_id: str, items: list[Any], *, truncated: bool) -> str:
+    usage_items = [item for item in items if isinstance(item, dict) and item.get("kind") == "usage"]
+    audit_items = [item for item in items if isinstance(item, dict) and item.get("kind") == "audit"]
+    tool_items = [
+        item
+        for item in audit_items
+        if isinstance(item.get("action"), str) and item["action"].startswith("tool.")
+    ]
+    total_tokens = sum(_int_or_zero(item.get("total_tokens")) for item in usage_items)
+    total_cost = sum(_int_or_zero(item.get("cost_usd_micros")) for item in usage_items)
+    total_latency = sum(_int_or_zero(item.get("latency_ms")) for item in usage_items)
+    tool_failures = sum(1 for item in tool_items if item.get("action") == "tool.failed")
+
+    lines = [
+        f"task trace: {task_id}",
+        (
+            "summary: "
+            f"llm_calls={len(usage_items)} "
+            f"tool_events={len(tool_items)} "
+            f"tool_failures={tool_failures} "
+            f"total_tokens={total_tokens} "
+            f"cost_usd_micros={total_cost} "
+            f"llm_latency_ms={total_latency}"
+        ),
+    ]
+    if truncated:
+        lines.append("warning: trajectory truncated by limit_per_source")
+    lines.append("")
+    lines.append("timeline:")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        rendered = _render_trace_item(item)
+        if rendered:
+            lines.append(f"  {rendered}")
+    return "\n".join(lines)
+
+
+def _render_trace_item(item: dict[str, Any]) -> str:
+    occurred = str(item.get("occurred_at", "?"))
+    kind = item.get("kind")
+    if kind == "usage":
+        return (
+            f"{occurred} usage "
+            f"step={item.get('step_kind') or '-'} "
+            f"model={item.get('model') or item.get('requested_model') or '-'} "
+            f"tokens={item.get('total_tokens') or 0} "
+            f"cost_usd_micros={item.get('cost_usd_micros') or 0} "
+            f"latency_ms={item.get('latency_ms') or 0} "
+            f"status={item.get('status') or '-'}"
+        )
+    if kind == "checkpoint":
+        return (
+            f"{occurred} checkpoint "
+            f"node={item.get('node_name') or item.get('current_node') or '-'} "
+            f"seq={item.get('sequence') or '-'}"
+        )
+    if kind != "audit":
+        return ""
+    action = str(item.get("action") or "-")
+    raw_payload = item.get("payload")
+    payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+    if action.startswith("tool."):
+        return _render_tool_audit(occurred, action, payload)
+    return f"{occurred} audit {action}"
+
+
+def _render_tool_audit(occurred: str, action: str, payload: dict[str, Any]) -> str:
+    name = payload.get("tool_name") or "-"
+    step = payload.get("agent_step") or "-"
+    parts = [f"{occurred} {action} tool={name} step={step}"]
+    if "duration_ms" in payload:
+        parts.append(f"duration_ms={payload.get('duration_ms')}")
+    if "output_bytes" in payload:
+        parts.append(f"output_bytes={payload.get('output_bytes')}")
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and metadata:
+        if "exit_code" in metadata:
+            parts.append(f"exit_code={metadata['exit_code']}")
+        if "permission_outcome" in metadata:
+            parts.append(f"permission={metadata['permission_outcome']}")
+    args = payload.get("arguments")
+    if isinstance(args, dict) and args:
+        parts.append(f"args={_render_json_compact(args)}")
+    return " ".join(parts)
+
+
+def _render_json_compact(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def _int_or_zero(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    return 0

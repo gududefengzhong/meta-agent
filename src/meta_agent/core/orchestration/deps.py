@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from meta_agent.core.orchestration.graph import Graph
+from meta_agent.core.ports.audit_sink import AuditSink
 from meta_agent.core.ports.git_provider import GitProvider
 from meta_agent.core.ports.llm import LLMClient
 from meta_agent.core.ports.llm_usage import LLMUsageRepository
@@ -98,6 +99,14 @@ class GraphDeps:
     task's declared :class:`PermissionMode`. This is the right
     default for unit-test wiring; production wiring always passes
     a real gate.
+    """
+    audit_sink: AuditSink | None = None
+    """Best-effort structured audit stream for graph-internal events.
+
+    Worker-level lifecycle events are still written by
+    :class:`WorkerLoop`; this sink exists for events only the graph can
+    observe precisely, such as LLM-requested tool calls and their
+    bounded results.
     """
 
 

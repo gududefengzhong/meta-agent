@@ -53,11 +53,11 @@ def test_parser_requires_subcommand() -> None:
         parser.parse_args([])
 
 
-def test_parser_recognises_three_subcommands() -> None:
+def test_parser_recognises_subcommands() -> None:
     parser = build_parser()
-    for cmd in ("submit", "tail", "run"):
+    for cmd in ("submit", "tail", "run", "trace"):
         # Both forms accept either a positional prompt or args:
-        if cmd == "tail":
+        if cmd in {"tail", "trace"}:
             args = parser.parse_args([cmd, "t-1"])
         else:
             args = parser.parse_args([cmd, "do the thing"])
@@ -197,6 +197,64 @@ def test_main_propagates_4xx_from_submit_as_usage_error(
     out = capsys.readouterr()
     assert "HTTP 400" in out.err
     assert "bad task_type" in out.err
+
+
+def test_main_trace_prints_trajectory_report(
+    env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/tasks/t-1/trajectory":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "kind": "audit",
+                            "occurred_at": "2026-06-23T00:00:01Z",
+                            "event_id": "e-tool-1",
+                            "action": "tool.invoked",
+                            "payload": {
+                                "tool_name": "fs_read",
+                                "agent_step": 1,
+                                "arguments": {"path": "src/a.py"},
+                            },
+                        },
+                        {
+                            "kind": "usage",
+                            "occurred_at": "2026-06-23T00:00:02Z",
+                            "record_id": "u-1",
+                            "provider": "openrouter",
+                            "model": "deepseek/deepseek-v4-pro",
+                            "requested_model": None,
+                            "prompt_tokens": 10,
+                            "completion_tokens": 5,
+                            "total_tokens": 15,
+                            "cost_usd_micros": 20,
+                            "latency_ms": 30,
+                            "status": "ok",
+                            "error_category": None,
+                            "error_message": None,
+                            "prompt_id": "bug_fix_v2.system",
+                            "prompt_version": 1,
+                            "step_kind": "plan",
+                        },
+                    ],
+                    "truncated": False,
+                },
+            )
+        return httpx.Response(404, text="unexpected " + req.url.path)
+
+    _patch_task_client(monkeypatch, handler)
+    code = main(["trace", "t-1"])
+    assert code == EXIT_OK
+    out = capsys.readouterr()
+    assert "task trace: t-1" in out.out
+    assert "llm_calls=1" in out.out
+    assert "total_tokens=15" in out.out
+    assert "tool.invoked tool=fs_read" in out.out
+    assert "usage step=plan" in out.out
 
 
 # --------------------------------------------------------------- helpers

@@ -19,7 +19,7 @@ from meta_agent.cli.client import (
     CLIError,
     TaskClient,
 )
-from meta_agent.cli.commands import cmd_run, cmd_submit, cmd_tail
+from meta_agent.cli.commands import cmd_run, cmd_submit, cmd_tail, cmd_trace
 
 CommandFn = Callable[[argparse.Namespace, TaskClient], Awaitable[int]]
 
@@ -69,6 +69,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_tail.set_defaults(func=cmd_tail)
+
+    p_trace = sub.add_parser("trace", help="Print a task trajectory report")
+    p_trace.add_argument("task_id")
+    p_trace.add_argument(
+        "--limit-per-source",
+        type=int,
+        default=1000,
+        help="Maximum rows to fetch from each trajectory source (default 1000)",
+    )
+    p_trace.set_defaults(func=cmd_trace)
 
     p_run = sub.add_parser("run", help="Submit a task and stream until terminal")
     _add_task_args(p_run)

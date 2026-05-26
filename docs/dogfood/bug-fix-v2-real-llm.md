@@ -140,6 +140,54 @@ The resulting patch:
  return price - (price * discount_percent / 100)
 ```
 
+## Run D — `deepseek/deepseek-v4-pro` + structured tool-call audit
+
+Current baseline after adding graph-internal tool-call audit events and
+rerunning the real-LLM harness on 2026-05-27 Asia/Shanghai.
+
+| metric | value |
+|---|---|
+| Command | `OPENROUTER_MODEL=deepseek/deepseek-v4-pro pytest tests/integration/test_bug_fix_v2_real_llm.py -m "integration and real_llm" -v -s` |
+| Model requested | `deepseek/deepseek-v4-pro` |
+| Model served | `deepseek/deepseek-v4-pro-20260423` |
+| Task id | `real-llm-05042645` |
+| Trace id | `trace-327d2ca2` |
+| Task terminal state | `SUCCEEDED` |
+| Files changed | `src/discount.py` |
+| Verifier suite | `python_test` |
+| Verifier passed | ✅ true |
+| Host patch replay | ✅ true |
+| Host pytest after replay | `5/5 passed, 0 failed` |
+| Audit events | 22 total / 14 tool events |
+| Tool invocations | 7 |
+| Tool failures | 1 (`test_run` called with unsupported suite `pytest`; agent recovered with `shell_run`) |
+| LLM usage rows | 8 |
+| Total recorded tokens | 14,221 |
+| Total recorded cost | 11,743 micro-USD |
+| Total LLM latency | 27,721 ms |
+| Wall clock | ~33s |
+| Push | skipped (`no_token` — no git remote configured) |
+
+Tool trajectory from `audit_events`:
+
+| step | tool | outcome | signal |
+|---:|---|---|---|
+| 1 | `fs_read` | completed | read `src/discount.py` |
+| 2 | `fs_grep` | completed | searched tests for `"discount"`; returned 0 bytes |
+| 3 | `fs_list_dir` | completed | discovered `tests/test_discount.py` |
+| 4 | `fs_read` | completed | read failing test contract |
+| 5 | `edit_write` | completed | wrote validated `src/discount.py` |
+| 6 | `test_run` | failed | unsupported suite value from LLM, useful invalid-call signal |
+| 7 | `shell_run` | completed | ran pytest successfully, exit code 0 |
+
+This is the first dogfood run where one terminal task gives a complete
+debug story across:
+
+- `audit_events`: worker lifecycle + tool invocation/completion/failure
+- `llm_usage_logs`: per-call tokens, model, cost, latency, prompt provenance
+- `task_checkpoints`: resumable graph progress
+- `tasks.result_json`: final patch, verifier output, files changed, cost summary
+
 ---
 
 ## Findings (what the dogfood surfaced)
@@ -179,7 +227,8 @@ client in `MeteredLLMClient` and passes the same `PgLLMUsageRepository`
 to `WorkerLoop`, so terminal task output can include
 `cost_by_step_kind`. Run C produced 7 usage rows with model identity,
 prompt/completion/total tokens, OpenRouter `usage.cost` mapped to
-`cost_usd_micros`, latency, prompt provenance, and `step_kind`.
+`cost_usd_micros`, latency, prompt provenance, and `step_kind`; Run D
+reconfirmed the path with 8 usage rows.
 
 Original finding: direct integration wiring used
 `OpenRouterClient → RedactingLLMClient` and bypassed
@@ -204,6 +253,20 @@ Original finding: after `workspace.cleaned`, the agent's branch / commit
 / worktree are all destroyed (the workspace is a separate `git clone`).
 The task result row stored `diff_stat` and `commit_sha` but not the diff
 itself, so a subtly wrong fix was hard to inspect after cleanup.
+
+### F6. Tool calls were invisible in persisted trace
+**Status: fixed for `shell_agent`.** `GraphDeps` now exposes an optional
+`audit_sink`, production worker wiring passes `PgAuditRepository`, and
+`shell_agent` emits structured `tool.invoked`, `tool.completed`, and
+`tool.failed` events. Run D produced 14 tool events from 7 tool
+invocations.
+
+The payload intentionally stores bounded, non-secret-bearing summaries:
+path-like arguments are retained; arbitrary string arguments are stored
+as length + short hash; outputs are represented by byte count,
+truncation flag, and metadata. That is enough to identify wasteful or
+invalid calls without dumping source edits, prompts, or secrets into the
+audit table.
 
 ---
 
@@ -242,6 +305,8 @@ file, verifier output) reaches your terminal.
 
 ## Where this goes next
 
-The remaining dogfood follow-up is narrower now: persist
-provider-specific reasoning-token / cache-token breakdowns if we need
-finer cost attribution than total tokens + `usage.cost`.
+The remaining dogfood follow-up is narrower now:
+- persist provider-specific reasoning-token / cache-token breakdowns if
+  we need finer cost attribution than total tokens + `usage.cost`
+- expose the same merged trajectory through `meta-agent trace <task_id>`
+  in an app-backed run, not only through the integration harness dump

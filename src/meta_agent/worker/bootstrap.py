@@ -901,6 +901,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
             prompt_registry=prompt_registry,
             llm_usage=usage_repo,
             permission_gate=permission_gate,
+            audit_sink=audit_repo,
         )
     )
     workspaces = build_workspace_manager(settings)

@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 
 from meta_agent.core.capabilities.registry import ToolRegistry
+from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.orchestration import TaskRunState
 from meta_agent.core.orchestration.graphs.shell_agent import (
     SHELL_AGENT_GRAPH_ID,
     build_shell_agent_graph,
 )
+from meta_agent.core.ports.audit_sink import AuditSink
 from meta_agent.core.ports.llm import LLMUsage
 from meta_agent.core.ports.tools import (
     ToolCall,
@@ -23,6 +25,14 @@ from meta_agent.core.ports.tools import (
 from tests.core.orchestration._fakes import FakeLLMClient, fake_deps, make_response
 
 pytestmark = pytest.mark.asyncio
+
+
+class _AuditSpy(AuditSink):
+    def __init__(self) -> None:
+        self.events: list[AuditEvent] = []
+
+    async def append(self, event: AuditEvent) -> None:
+        self.events.append(event)
 
 
 def _state(**data: object) -> TaskRunState:
@@ -107,6 +117,38 @@ async def test_tool_call_executes_and_observation_feeds_next_plan(tmp_path: Path
     assert "tool" in roles
     tool_msg = second_request.messages[-1]
     assert "tool_metadata" not in tool_msg.content
+
+
+async def test_tool_call_emits_structured_audit_events(tmp_path: Path) -> None:
+    registry, _ = _registry_with("fs_read", content="hello")
+    audit = _AuditSpy()
+    client = FakeLLMClient(
+        responses=[
+            make_response(
+                content="",
+                tool_calls=(ToolCall(id="c1", name="fs_read", arguments={"path": "x"}),),
+                finish_reason="tool_call",
+            ),
+            make_response(content="all done", finish_reason="stop"),
+        ]
+    )
+    deps = fake_deps(client, tool_registry=registry, audit_sink=audit)
+    graph = build_shell_agent_graph(deps)
+
+    await graph.run(_state(user_prompt="hi", _workspace_path=str(tmp_path)))
+
+    actions = [event.action for event in audit.events]
+    assert actions == ["tool.invoked", "tool.completed"]
+    invoked = audit.events[0]
+    assert invoked.tenant_id == "tenant-1"
+    assert invoked.task_id == "task-1"
+    assert invoked.trace_id == "trace-1"
+    assert invoked.payload["tool_name"] == "fs_read"
+    assert invoked.payload["agent_step"] == 1
+    assert invoked.payload["arguments"] == {"path": "x"}
+    completed = audit.events[1]
+    assert completed.payload["output_bytes"] == 5
+    assert completed.payload["truncated"] is False
 
 
 async def test_tool_observation_preserves_metadata_and_truncation_signals(tmp_path: Path) -> None:
