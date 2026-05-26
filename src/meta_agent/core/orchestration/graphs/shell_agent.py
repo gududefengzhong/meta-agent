@@ -42,6 +42,7 @@ from meta_agent.core.capabilities.registry import ToolRegistry
 from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.domain.permission import PermissionDecision, PermissionPrompt
 from meta_agent.core.orchestration.deps import GraphDeps
+from meta_agent.core.orchestration.failure_explain import failure_explanation
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
 from meta_agent.core.orchestration.llm_streaming import aggregate_stream_to_response
 from meta_agent.core.orchestration.state import END, TaskRunState
@@ -228,6 +229,12 @@ def _output_summary(
     truncated_by_token_budget: bool,
     usage: LLMUsage,
 ) -> dict[str, object]:
+    failure = _shell_failure_explanation(
+        truncated_by_max_steps=truncated_by_max_steps,
+        truncated_by_token_budget=truncated_by_token_budget,
+        steps=steps,
+        tool_invocations=tool_invocations,
+    )
     return {
         "assistant_message": response.content if response else "",
         "model_used": response.model if response else "",
@@ -237,7 +244,40 @@ def _output_summary(
         "truncated_by_max_steps": truncated_by_max_steps,
         "truncated_by_token_budget": truncated_by_token_budget,
         "usage": usage.model_dump(mode="json"),
+        "failure_explanation": failure,
     }
+
+
+def _shell_failure_explanation(
+    *,
+    truncated_by_max_steps: bool,
+    truncated_by_token_budget: bool,
+    steps: int,
+    tool_invocations: int,
+) -> dict[str, Any] | None:
+    if truncated_by_token_budget:
+        return failure_explanation(
+            category="budget_exceeded",
+            summary="Agent stopped before another LLM planning step because max_total_tokens was reached.",
+            retryable=True,
+            hints=[
+                "Increase max_total_tokens for this task.",
+                "Narrow the prompt or allowed files so fewer tokens are consumed.",
+            ],
+            details={"steps": steps, "tool_invocations": tool_invocations},
+        )
+    if truncated_by_max_steps:
+        return failure_explanation(
+            category="max_steps_truncated",
+            summary="Agent stopped while the model was still requesting tools because max_steps was reached.",
+            retryable=True,
+            hints=[
+                "Increase max_steps if the task is expected to require more tool turns.",
+                "Inspect tool events for repeated or low-value calls before retrying.",
+            ],
+            details={"steps": steps, "tool_invocations": tool_invocations},
+        )
+    return None
 
 
 def _merge_usage(prior: object, current: LLMUsage) -> dict[str, Any]:

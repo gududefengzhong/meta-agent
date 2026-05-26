@@ -34,6 +34,7 @@ from string import Template
 
 from meta_agent.core.capabilities.executor import ToolExecutor
 from meta_agent.core.orchestration.deps import GraphDeps
+from meta_agent.core.orchestration.failure_explain import failure_explanation
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
 from meta_agent.core.orchestration.graphs.shell_agent import (
     SHELL_AGENT_GRAPH_ID,
@@ -354,6 +355,68 @@ def _push_skip(
     }
 
 
+def _bug_fix_failure_explanation(
+    *,
+    verifier_passed: bool,
+    verifier_output: str,
+    verify_suite: str | None,
+    attempts: int,
+    files_changed: list[str],
+    agent_output: dict[str, object],
+) -> dict[str, object] | None:
+    if not verifier_passed:
+        suite = verify_suite or "unknown"
+        if not files_changed:
+            summary = (
+                "Verifier did not run successfully because the agent produced no workspace diff."
+            )
+            hints = [
+                "Inspect the assistant message and tool events to see why no edit was made.",
+                "Check target_files and the prompt allow-list.",
+            ]
+        else:
+            summary = f"Verifier suite {suite!r} failed after {attempts} attempt(s)."
+            hints = [
+                "Inspect verifier_output for the concrete failing command/test.",
+                "Inspect tool events immediately before verification for the edit that produced the failure.",
+            ]
+        return failure_explanation(
+            category="verifier_failed",
+            summary=summary,
+            retryable=True,
+            hints=hints,
+            details={
+                "verify_suite": suite,
+                "attempts": attempts,
+                "files_changed": files_changed,
+                "verifier_output_excerpt": verifier_output[:1000],
+            },
+        )
+    if bool(agent_output.get("truncated_by_token_budget")):
+        return failure_explanation(
+            category="budget_exceeded",
+            summary="Bug-fix agent stopped because the inner tool-use loop reached max_total_tokens.",
+            retryable=True,
+            hints=[
+                "Increase max_total_tokens for this task.",
+                "Narrow target_files or issue context before retrying.",
+            ],
+            details={"attempts": attempts, "files_changed": files_changed},
+        )
+    if bool(agent_output.get("truncated_by_max_steps")):
+        return failure_explanation(
+            category="max_steps_truncated",
+            summary="Bug-fix agent stopped because the inner tool-use loop reached max_steps.",
+            retryable=True,
+            hints=[
+                "Increase max_steps if this task requires more tool turns.",
+                "Inspect tool-call audit events for repeated or ineffective actions.",
+            ],
+            details={"attempts": attempts, "files_changed": files_changed},
+        )
+    return None
+
+
 def build_bug_fix_v2_graph(deps: GraphDeps) -> Graph:
     """Build the compiled :data:`BUG_FIX_V2_GRAPH_ID` graph."""
 
@@ -580,6 +643,19 @@ def build_bug_fix_v2_graph(deps: GraphDeps) -> Graph:
         commit_sha = push.get("commit_sha")
         commit_sha_str = commit_sha if isinstance(commit_sha, str) else None
         push_skip_reason = push.get("skip_reason")
+        verify_suite_raw = verify.get("suite")
+        verify_suite = verify_suite_raw if isinstance(verify_suite_raw, str) else None
+        verifier_output = str(verify.get("output", ""))
+        verifier_passed = bool(verify.get("passed", False))
+        attempts = _replan_attempts(state) + 1
+        failure = _bug_fix_failure_explanation(
+            verifier_passed=verifier_passed,
+            verifier_output=verifier_output,
+            verify_suite=verify_suite,
+            attempts=attempts,
+            files_changed=changed,
+            agent_output=agent_output,
+        )
         return NodeResult(
             data_update={
                 "output": {
@@ -596,9 +672,10 @@ def build_bug_fix_v2_graph(deps: GraphDeps) -> Graph:
                     "files_changed": changed,
                     "patch": str(state.data.get("_patch", "")),
                     "diff_stat": str(push.get("diff_stat") or state.data.get("_diff_stat", "")),
-                    "verifier_passed": bool(verify.get("passed", False)),
-                    "verifier_output": str(verify.get("output", "")),
-                    "attempts": _replan_attempts(state) + 1,
+                    "verifier_passed": verifier_passed,
+                    "verifier_output": verifier_output,
+                    "failure_explanation": failure,
+                    "attempts": attempts,
                     "branch": _optional_str(state, "_workspace_branch"),
                     "commit_sha": commit_sha_str,
                     "repo_url": _optional_str(state, "repo_url"),

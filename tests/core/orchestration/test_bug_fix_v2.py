@@ -196,6 +196,51 @@ async def test_verify_failure_triggers_single_replan(tiny_repo: Path) -> None:
     assert "Verifier output:" in client.calls[2].messages[1].content
 
 
+async def test_persistent_verify_failure_adds_failure_explanation(tiny_repo: Path) -> None:
+    bad = 'def greet(name)\n    return "hi"\n'
+    client = FakeLLMClient(
+        responses=[
+            make_response(
+                content="",
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="edit_write",
+                        arguments={"path": "buggy.py", "content": bad},
+                    ),
+                ),
+                finish_reason="tool_call",
+            ),
+            make_response(content="first try complete"),
+            make_response(
+                content="",
+                tool_calls=(
+                    ToolCall(
+                        id="c2",
+                        name="edit_write",
+                        arguments={"path": "buggy.py", "content": bad},
+                    ),
+                ),
+                finish_reason="tool_call",
+            ),
+            make_response(content="still broken"),
+        ]
+    )
+    graph = build_bug_fix_v2_graph(fake_deps(client, tool_registry=_tool_registry()))
+
+    final = await graph.run(_state(tiny_repo))
+
+    output = _output(final)
+    assert output["verifier_passed"] is False
+    assert output["push_skip_reason"] == "verifier_failed"
+    failure = output["failure_explanation"]
+    assert failure["category"] == "verifier_failed"
+    assert failure["retryable"] is True
+    assert failure["details"]["verify_suite"] == "python_test"
+    assert failure["details"]["attempts"] == 2
+    assert "exit_code=2" in failure["details"]["verifier_output_excerpt"]
+
+
 async def test_push_skips_when_no_token(tiny_repo_with_remote: tuple[Path, Path]) -> None:
     repo, remote = tiny_repo_with_remote
     patched = 'def greet(name: str) -> str:\n    return f"hi {name}!"\n'

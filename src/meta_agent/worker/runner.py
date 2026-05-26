@@ -541,7 +541,15 @@ class WorkerLoop:
         terminal: TaskState
         if state.error is not None:
             terminal = TaskState.FAILED
-            err = TaskError(code=TaskErrorCode.GRAPH_ERROR, message=state.error)
+            err = TaskError(
+                code=TaskErrorCode.GRAPH_ERROR,
+                message=state.error,
+                details={
+                    "failure_category": "infra_error",
+                    "current_node": state.current_node,
+                    "sequence": state.sequence,
+                },
+            )
             status = "failed"
         else:
             terminal = TaskState.SUCCEEDED
