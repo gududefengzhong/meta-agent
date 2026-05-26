@@ -85,7 +85,6 @@ from meta_agent.infra.workspace import (
 )
 from meta_agent.worker.bootstrap import build_local_tool_stack, build_registry
 from meta_agent.worker.runner import WorkerConfig, WorkerLoop
-
 from tests.core.orchestration._fakes import fake_deps
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_llm]
@@ -381,7 +380,7 @@ async def test_bug_fix_v2_real_llm_discount_validation_bug(
 
     registry = _registry_for_docker_workspace(real_llm_client, workspace_root)
 
-    task, event, task_repo, _outbox_repo = await _run_bug_fix_task(
+    task, _event, task_repo, _outbox_repo = await _run_bug_fix_task(
         db_pool=db_pool,
         redis_client=redis_client,
         registry=registry,
