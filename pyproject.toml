@@ -93,4 +93,5 @@ asyncio_mode = "auto"
 addopts = "-ra --strict-markers --strict-config -m 'not integration'"
 markers = [
     "integration: requires external services (postgres, redis); skipped in unit-only CI",
+    "real_llm: hits a real LLM provider — burns tokens; skipped unless OPENROUTER_API_KEY is set",
 ]
