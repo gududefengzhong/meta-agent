@@ -38,6 +38,8 @@ class OpenRouterConfig:
     """Optional ``X-Title`` header value; appears in OpenRouter dashboards."""
     extra_headers: dict[str, str] = field(default_factory=dict)
     """Static headers merged into every request. Adapter rejects auth-like keys."""
+    exclude_reasoning: bool = True
+    """Ask OpenRouter not to return reasoning text in chat-completion messages."""
 
     @classmethod
     def from_env(
@@ -67,4 +69,6 @@ class OpenRouterConfig:
             max_backoff_seconds=float(source.get("OPENROUTER_MAX_BACKOFF_SECONDS", "8")),
             referer=source.get("OPENROUTER_REFERER") or None,
             title=source.get("OPENROUTER_TITLE") or None,
+            exclude_reasoning=source.get("OPENROUTER_EXCLUDE_REASONING", "true").lower()
+            not in {"0", "false", "no"},
         )

@@ -10,8 +10,9 @@ Current scope:
   `test_run`) and works with both ``local_git`` and ``docker``
   workspace backends.
 * Verification is deterministic via ``test_run``. The default suite is
-  ``python_lint``; callers may override with suites such as
-  ``typescript_typecheck`` or ``typescript_test``.
+  ``python_test`` so bug-fix success is gated by tests rather than
+  lint alone; callers may override with suites such as
+  ``python_lint``, ``typescript_typecheck`` or ``typescript_test``.
 * A failed verify triggers at most one replan. The worktree is *not*
   reset between attempts, matching the transparent-history semantics of
   the existing v1 graph.
@@ -59,7 +60,7 @@ _TOOL_EDIT_WRITE = "edit_write"
 _TOOL_EDIT_PATCH_APPLY = "edit_patch_apply"
 _TOOL_SHELL_RUN = "shell_run"
 _TOOL_TEST_RUN = "test_run"
-_DEFAULT_VERIFY_SUITE = "python_lint"
+_DEFAULT_VERIFY_SUITE = "python_test"
 _DEFAULT_TOOL_NAMES = [
     _TOOL_FS_READ,
     _TOOL_FS_LIST_DIR,
@@ -210,6 +211,11 @@ async def _diff_stat(workspace: Path) -> str:
         ["git", "diff", "--stat"], workspace, timeout=30.0
     )
     return stdout.strip()
+
+
+async def _diff_patch(workspace: Path) -> str:
+    _code, stdout, _stderr = await _run_subprocess(["git", "diff"], workspace, timeout=30.0)
+    return stdout
 
 
 def _verify_suite(state: TaskRunState) -> str:
@@ -480,6 +486,7 @@ def build_bug_fix_v2_graph(deps: GraphDeps) -> Graph:
                 "_files_changed": changed,
                 "_verify": report,
                 "_diff_stat": await _diff_stat(workspace),
+                "_patch": await _diff_patch(workspace),
             }
         )
 
@@ -587,6 +594,7 @@ def build_bug_fix_v2_graph(deps: GraphDeps) -> Graph:
                     ),
                     "usage": agent_output.get("usage", {}),
                     "files_changed": changed,
+                    "patch": str(state.data.get("_patch", "")),
                     "diff_stat": str(push.get("diff_stat") or state.data.get("_diff_stat", "")),
                     "verifier_passed": bool(verify.get("passed", False)),
                     "verifier_output": str(verify.get("output", "")),

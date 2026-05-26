@@ -40,18 +40,15 @@ The agent has to add validation without breaking the three normal cases.
 | key | value |
 |---|---|
 | Routing provider | OpenRouter (`infra/llm/openrouter.py`) |
-| Default model | `deepseek/deepseek-chat-v3-0324` |
-| Stack | `OpenRouterClient` → `RedactingLLMClient` (PII/secret scrub on prompts) |
+| Default model | `deepseek/deepseek-v4-pro` |
+| Stack | `OpenRouterClient` → `RedactingLLMClient` → `MeteredLLMClient` in this dogfood harness |
 | Configurable via | `OPENROUTER_MODEL` env var |
 
-> **Why not `deepseek/deepseek-v4-pro`?** v4-pro is a reasoning model — its
-> OpenRouter response has `content: null` with the chain-of-thought in a
-> separate `reasoning` field. Our adapter currently treats empty content
-> as `LLMTransientError`. Supporting reasoning models cleanly needs
-> adapter changes (reasoning→content fallback, larger max_tokens budget,
-> separate token accounting for reasoning vs answer). Tracked as a
-> follow-up; for now we stay on v3-0324 which is the same vendor at a
-> similar capability tier and works through the existing pipeline.
+`OpenRouterClient` sends `reasoning: {"exclude": true}` by default so
+reasoning-model prompts do not return private reasoning text in normal
+chat-completion responses. If a provider still returns `content: null`
+with a plaintext `message.reasoning`, the adapter falls back to that
+field rather than treating the response as transiently empty.
 
 ## Run A — default verifier (`python_lint`)
 
@@ -79,6 +76,11 @@ fix is correct — it only proves the agent edited a file and didn't
 break lint. To get a true red→green signal, we need Run B.
 
 ## Run B — strict verifier (`python_test`)
+
+> Historical run: this captured the pre-fix infrastructure failure where
+> the workspace image lacked `pytest`. After the verifier/runtime fix,
+> `python_test` is the default suite and the rebuilt `meta-agent:local`
+> image includes `pytest`.
 
 Override the payload with `"verify_suite": "python_test"` so the verifier
 actually invokes pytest.
@@ -109,6 +111,35 @@ applied, the lint-step worked, replan triggered on the failed verifier
 — but the verdict it received was an infrastructure error, not a
 correctness signal.
 
+## Run C — `deepseek/deepseek-v4-pro` + metered harness
+
+Current baseline after fixing the verifier/runtime/metering gaps.
+
+| metric | value |
+|---|---|
+| Command | `pytest tests/integration/test_bug_fix_v2_real_llm.py -m "integration and real_llm" -v -s` |
+| Model requested | `deepseek/deepseek-v4-pro` |
+| Model served | `deepseek/deepseek-v4-pro-20260423` |
+| Task terminal state | `SUCCEEDED` |
+| Files changed | `src/discount.py` |
+| Verifier suite | `python_test` |
+| Verifier passed | ✅ true |
+| Host patch replay | ✅ true |
+| Host pytest after replay | `5/5 passed, 0 failed` |
+| LLM usage rows | 7 |
+| Total recorded tokens | 14,082 |
+| Total recorded cost | 17,082 micro-USD |
+| Wall clock | ~81s |
+| Push | skipped (`no_token` — no git remote configured) |
+
+The resulting patch:
+
+```diff
+ if discount_percent < 0 or discount_percent > 100:
++    raise ValueError(f"discount_percent must be between 0 and 100, got {discount_percent}")
+ return price - (price * discount_percent / 100)
+```
+
 ---
 
 ## Findings (what the dogfood surfaced)
@@ -116,67 +147,63 @@ correctness signal.
 These are concrete and would not have come out of unit tests.
 
 ### F1. Default verifier is too weak for the "bug fix" framing
-`bug_fix_v2` defaults to `python_lint`. A lint-clean change that doesn't
-fix the failing test will still return `verifier_passed=True`. For a
-product called "Bug Fix CLI Agent" the natural default should be: **run
-the failing tests, accept only on green**. Lint should be an additional
-gate, not the gate.
+**Status: fixed.** `bug_fix_v2` now defaults to `python_test`, so bug-fix
+success is gated by pytest rather than lint alone. Callers can still
+override with `"verify_suite": "python_lint"` for lint-only smoke checks.
 
-**Implication**: change the default suite to `python_test` (or compose
-`python_lint && python_test`), and accept the cost of needing pytest in
-the workspace.
+Original finding: `bug_fix_v2` defaulted to `python_lint`, so a
+lint-clean change that didn't fix the failing test could still return
+`verifier_passed=True`. For a product called "Bug Fix CLI Agent", the
+natural default is to run the failing tests and accept only on green.
+Lint remains useful as an optional additional gate, not as the default
+correctness signal.
 
 ### F2. Workspace image lacks test runners
-The runtime stage of `Dockerfile` excludes dev deps, so pytest /
-typescript test runner are not available inside the workspace where the
-agent's verifier executes. The current default (`python_lint`) is a
-silent workaround.
+**Status: fixed.** `pytest` is now a runtime dependency, so the
+`meta-agent:local` image built from `Dockerfile` includes the Python test
+runner used by the `python_test` verifier. Rebuild the image before
+rerunning this dogfood:
 
-**Implication**: either ship a dedicated workspace image with
-`pytest + ruff + tsc + vitest` (the cross-product the verifier suites
-declare in [`local_workspace.py`](../../src/meta_agent/infra/tools/local_workspace.py)
-and [`docker_workspace.py`](../../src/meta_agent/infra/tools/docker_workspace.py)),
-or document explicitly that `python_test` only works when the workspace
-image extends the base.
+```bash
+docker build -t meta-agent:local .
+```
+
+Original finding: the runtime stage of `Dockerfile` excluded dev deps,
+so `pytest` was unavailable inside the workspace where the agent's
+verifier executes. That made `python_test` fail for infrastructure
+reasons regardless of the patch quality.
 
 ### F3. LLM cost is never written to `llm_usage_logs`
-Both runs left the table empty. The dogfood wires
-`OpenRouterClient → RedactingLLMClient` directly; `MeteredLLMClient`
-(which writes the row) is not in the chain. Same is true of the smoke
-test
-([`test_bug_fix_v2_docker_smoke.py`](../../tests/integration/test_bug_fix_v2_docker_smoke.py)) —
-it relies on the audit-event payload for cost visibility, not on the
-usage table.
+**Status: fixed for real dogfood.** The real-LLM harness now wraps the
+client in `MeteredLLMClient` and passes the same `PgLLMUsageRepository`
+to `WorkerLoop`, so terminal task output can include
+`cost_by_step_kind`. Run C produced 7 usage rows with model identity,
+prompt/completion/total tokens, OpenRouter `usage.cost` mapped to
+`cost_usd_micros`, latency, prompt provenance, and `step_kind`.
 
-**Implication**: either compose `MeteredLLMClient` in
-`worker.bootstrap.build_llm_client` (so all real runs are metered by
-construction) or document that the usage table only fills via the
-top-level worker boot path and is empty under direct unit/integration
-wiring. We currently rely on parser-on-audit-events, which works but is
-implicit.
+Original finding: direct integration wiring used
+`OpenRouterClient → RedactingLLMClient` and bypassed
+`MeteredLLMClient`, leaving the usage table empty even though production
+worker bootstrap already wires metering.
 
 ### F4. Reasoning models can't yet round-trip through the adapter
-Setting `OPENROUTER_MODEL=deepseek/deepseek-v4-pro` raises
-`LLMTransientError("empty content from provider")` because the response
-content is `null` and the answer lives in `reasoning`. The adapter
-needs to: (a) prefer `content` if present, else fall back to
-`reasoning`, (b) account for reasoning tokens separately in
-`LLMUsage`, (c) raise larger default `max_tokens` budgets since
-reasoning consumes them.
+**Status: fixed for the current v4-pro dogfood path.** The OpenRouter
+adapter now requests `reasoning.exclude=true` and falls back to
+`message.reasoning` only when `content` is `null` and no tool call is
+present. Run C completed against `deepseek/deepseek-v4-pro`.
 
-**Implication**: a small adapter change unlocks the entire reasoning-model
-tier; until then we are confined to non-reasoning chat models.
+Remaining limitation: `LLMUsage` records total cost and normal token
+counts, but does not yet persist provider-specific reasoning-token and
+cache-token subfields separately.
 
 ### F5. Agent's actual patch isn't retained for inspection
-After `workspace.cleaned`, the agent's branch / commit / worktree are
-all destroyed (the workspace is a separate `git clone`). The task
-result row stores `diff_stat` and `commit_sha` but **not the diff
-itself**. So if the agent succeeds but its fix is subtly wrong, we have
-no record of what it actually wrote.
+**Status: fixed.** `bug_fix_v2` now stores the pre-commit unified diff in
+`result.output["patch"]`, alongside `diff_stat` and `files_changed`.
 
-**Implication**: add the unified diff (`git diff base..HEAD`) into the
-`result.output` so the agent's work is auditable after cleanup. Cheap
-fix, big eval-loop dividend.
+Original finding: after `workspace.cleaned`, the agent's branch / commit
+/ worktree are all destroyed (the workspace is a separate `git clone`).
+The task result row stored `diff_stat` and `commit_sha` but not the diff
+itself, so a subtly wrong fix was hard to inspect after cleanup.
 
 ---
 
@@ -215,12 +242,6 @@ file, verifier output) reaches your terminal.
 
 ## Where this goes next
 
-The five findings above prioritise as follows:
-
-1. **F5** (capture the diff) — 1-line fix, highest signal-per-byte
-2. **F1 + F2** (real verifier) — change the default + extend workspace image
-3. **F3** (metering) — wire `MeteredLLMClient` in bootstrap so all real runs are costed
-4. **F4** (reasoning models) — small adapter PR, unlocks v4-pro tier
-
-None of these are needed for the existing bug_fix_v2 surface to keep
-working — they are the next iteration's evaluation infrastructure.
+The remaining dogfood follow-up is narrower now: persist
+provider-specific reasoning-token / cache-token breakdowns if we need
+finer cost attribution than total tokens + `usage.cost`.

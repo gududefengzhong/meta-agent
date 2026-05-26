@@ -226,6 +226,7 @@ def _merge_usage(prior: object, current: LLMUsage) -> dict[str, Any]:
         prompt_tokens=_sum_optional_int(base.prompt_tokens, current.prompt_tokens),
         completion_tokens=_sum_optional_int(base.completion_tokens, current.completion_tokens),
         total_tokens=_sum_optional_int(base.total_tokens, current.total_tokens),
+        cost_usd_micros=_sum_optional_int(base.cost_usd_micros, current.cost_usd_micros),
     ).model_dump(mode="json")
 
 

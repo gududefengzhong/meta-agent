@@ -49,7 +49,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     libstdc++6 \
-    
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node_runtime /usr/local /usr/local

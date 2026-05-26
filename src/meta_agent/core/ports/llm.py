@@ -69,6 +69,13 @@ class LLMUsage(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    cost_usd_micros: int | None = None
+    """Provider-reported request cost in USD micro-units when available.
+
+    ``None`` means the provider did not report a monetary cost. This
+    is intentionally optional because some adapters only expose token
+    accounting; persistence can still write a useful usage row.
+    """
 
 
 class LLMRequest(BaseModel):

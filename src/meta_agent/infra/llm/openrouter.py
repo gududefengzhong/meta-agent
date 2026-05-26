@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -101,7 +102,8 @@ def _decode_success(response: httpx.Response) -> LLMResponse:
         raise LLMTransientError("openrouter choice missing message")
     raw_content = message.get("content")
     if raw_content is None:
-        content = ""
+        reasoning_content = message.get("reasoning")
+        content = reasoning_content if isinstance(reasoning_content, str) else ""
     elif isinstance(raw_content, str):
         content = raw_content
     else:
@@ -115,6 +117,7 @@ def _decode_success(response: httpx.Response) -> LLMResponse:
         prompt_tokens=_maybe_int(usage_raw.get("prompt_tokens")),
         completion_tokens=_maybe_int(usage_raw.get("completion_tokens")),
         total_tokens=_maybe_int(usage_raw.get("total_tokens")),
+        cost_usd_micros=_maybe_cost_usd_micros(usage_raw.get("cost")),
     )
     model_id = body.get("model")
     return LLMResponse(
@@ -205,6 +208,7 @@ def _decode_stream_event(event: dict[str, Any]) -> LLMStreamChunk | None:
             prompt_tokens=_maybe_int(usage_value.get("prompt_tokens")),
             completion_tokens=_maybe_int(usage_value.get("completion_tokens")),
             total_tokens=_maybe_int(usage_value.get("total_tokens")),
+            cost_usd_micros=_maybe_cost_usd_micros(usage_value.get("cost")),
         )
 
     model_value = event.get("model")
@@ -289,6 +293,28 @@ def _maybe_int(value: object) -> int | None:
         return None
     if isinstance(value, int):
         return value
+    return None
+
+
+def _maybe_cost_usd_micros(value: object) -> int | None:
+    """Return a provider cost value as integer USD micro-units.
+
+    OpenRouter reports ``usage.cost`` as account credits. The project
+    stores monetary usage in micro-USD integers; OpenRouter credits are
+    treated as USD-equivalent for this raw provider log.
+    """
+
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int | float | str):
+        try:
+            cost = Decimal(str(value))
+        except InvalidOperation:
+            return None
+        if cost < 0:
+            return None
+        micros = (cost * Decimal("1000000")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return int(micros)
     return None
 
 
@@ -486,6 +512,8 @@ class OpenRouterClient(LLMClient):
             body["stop"] = list(request.stop)
         if request.tools:
             body["tools"] = [_encode_tool_spec(spec) for spec in request.tools]
+        if self._config.exclude_reasoning:
+            body["reasoning"] = {"exclude": True}
         return body
 
     def _parse(self, response: httpx.Response) -> LLMResponse:
