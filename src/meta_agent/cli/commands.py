@@ -286,6 +286,9 @@ def _render_trace_report(task_id: str, items: list[Any], *, truncated: bool) -> 
     total_cost = sum(_int_or_zero(item.get("cost_usd_micros")) for item in usage_items)
     total_latency = sum(_int_or_zero(item.get("latency_ms")) for item in usage_items)
     tool_failures = sum(1 for item in tool_items if item.get("action") == "tool.failed")
+    llm_failures = sum(
+        1 for item in usage_items if str(item.get("status") or "").lower() not in {"ok", ""}
+    )
 
     lines = [
         f"task trace: {task_id}",
@@ -299,6 +302,13 @@ def _render_trace_report(task_id: str, items: list[Any], *, truncated: bool) -> 
             f"llm_latency_ms={total_latency}"
         ),
     ]
+    diagnostics = _trace_failure_diagnostics(
+        tool_failures=tool_failures,
+        llm_failures=llm_failures,
+    )
+    if diagnostics:
+        lines.append("diagnostics:")
+        lines.extend(f"  {line}" for line in diagnostics)
     if truncated:
         lines.append("warning: trajectory truncated by limit_per_source")
     lines.append("")
@@ -310,6 +320,23 @@ def _render_trace_report(task_id: str, items: list[Any], *, truncated: bool) -> 
         if rendered:
             lines.append(f"  {rendered}")
     return "\n".join(lines)
+
+
+def _trace_failure_diagnostics(*, tool_failures: int, llm_failures: int) -> list[str]:
+    diagnostics: list[str] = []
+    if tool_failures:
+        diagnostics.append(
+            "category=tool_failed "
+            f"summary={tool_failures} tool call(s) returned an error; "
+            "inspect tool.failed events around the failing step."
+        )
+    if llm_failures:
+        diagnostics.append(
+            "category=llm_failed "
+            f"summary={llm_failures} LLM call(s) failed; "
+            "inspect usage rows with status != ok."
+        )
+    return diagnostics
 
 
 def _render_trace_item(item: dict[str, Any]) -> str:

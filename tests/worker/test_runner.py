@@ -26,7 +26,7 @@ from meta_agent.core.orchestration import (
 )
 from meta_agent.core.orchestration.graphs.echo import ECHO_GRAPH_ID, build_echo_graph
 from meta_agent.core.orchestration.result import TaskErrorCode
-from meta_agent.core.orchestration.state import END
+from meta_agent.core.orchestration.state import END, START
 from meta_agent.core.ports.message import MessageEnvelope
 from meta_agent.core.ports.repository import IllegalTaskTransitionError
 from meta_agent.core.ports.task_submitter import FollowUpSpec, TaskSubmitter
@@ -354,6 +354,11 @@ async def test_build_result_projects_graph_error_to_failed_status() -> None:
     assert result.error is not None
     assert result.error.code == TaskErrorCode.GRAPH_ERROR
     assert result.error.message == "boom"
+    assert result.error.details == {
+        "failure_category": "infra_error",
+        "current_node": START,
+        "sequence": 2,
+    }
     assert result.output is None
     assert result.node_sequence == 2
 

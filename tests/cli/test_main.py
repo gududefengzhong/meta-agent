@@ -240,6 +240,17 @@ def test_main_trace_prints_trajectory_report(
                             "prompt_version": 1,
                             "step_kind": "plan",
                         },
+                        {
+                            "kind": "audit",
+                            "occurred_at": "2026-06-23T00:00:03Z",
+                            "event_id": "e-tool-2",
+                            "action": "tool.failed",
+                            "payload": {
+                                "tool_name": "test_run",
+                                "agent_step": 2,
+                                "metadata": {"exit_code": "1"},
+                            },
+                        },
                     ],
                     "truncated": False,
                 },
@@ -253,7 +264,9 @@ def test_main_trace_prints_trajectory_report(
     assert "task trace: t-1" in out.out
     assert "llm_calls=1" in out.out
     assert "total_tokens=15" in out.out
+    assert "category=tool_failed" in out.out
     assert "tool.invoked tool=fs_read" in out.out
+    assert "tool.failed tool=test_run" in out.out
     assert "usage step=plan" in out.out
 
 

@@ -232,6 +232,8 @@ async def test_max_steps_cap_short_circuits_loop() -> None:
     output = final.data["output"]
     assert output["steps"] == 2  # type: ignore[index]
     assert output["truncated_by_max_steps"] is True  # type: ignore[index]
+    failure = output["failure_explanation"]  # type: ignore[index]
+    assert failure["category"] == "max_steps_truncated"
     # plan was called exactly max_steps times
     assert len(client.calls) == 2
 
@@ -284,6 +286,8 @@ async def test_max_total_tokens_cap_short_circuits_next_plan() -> None:
     assert output["steps"] == 1  # type: ignore[index]
     assert output["tool_invocations"] == 1  # type: ignore[index]
     assert output["truncated_by_token_budget"] is True  # type: ignore[index]
+    failure = output["failure_explanation"]  # type: ignore[index]
+    assert failure["category"] == "budget_exceeded"
     assert len(client.calls) == 1
 
 
