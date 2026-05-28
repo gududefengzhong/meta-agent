@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Mapping
+
 from meta_agent.evals.smoke_catalog import (
     build_payload,
     default_catalog_source,
@@ -10,6 +12,8 @@ from meta_agent.evals.smoke_catalog import (
     select_cases,
 )
 
+SmokeCase = Mapping[str, object]
+
 
 def test_default_catalog_source_points_to_remote_baseline() -> None:
     assert default_catalog_source().startswith(
@@ -18,7 +22,7 @@ def test_default_catalog_source_points_to_remote_baseline() -> None:
 
 
 def test_select_cases_filters_by_batch_and_category() -> None:
-    cases = [
+    cases: list[SmokeCase] = [
         {
             "case": "case/a",
             "batch": "second",
@@ -46,7 +50,7 @@ def test_select_cases_filters_by_batch_and_category() -> None:
 
 
 def test_build_payload_uses_case_branch_as_base_ref() -> None:
-    case = {
+    case: SmokeCase = {
         "case": "case/py-safe-join-traversal",
         "issue_description": "fix traversal",
         "target_files": ["paths.py", "tests/test_paths.py"],

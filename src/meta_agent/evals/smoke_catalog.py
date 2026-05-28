@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Mapping
 from urllib.parse import urlparse
 
 import httpx
@@ -16,6 +17,8 @@ DEFAULT_REMOTE_CATALOG_URL = (
 DEFAULT_REPO_URL = "https://github.com/gududefengzhong/meta-agent-smoke.git"
 DEFAULT_VERIFY_SUITE = "python_test"
 DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
+
+SmokeCase = Mapping[str, object]
 
 
 def default_catalog_source() -> str:
@@ -95,23 +98,27 @@ def validate_cases(raw: object, *, source: str) -> list[dict[str, object]]:
     return cases
 
 
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
 def select_cases(
-    cases: list[dict[str, object]],
+    cases: list[SmokeCase],
     *,
     case_names: list[str],
     batches: list[str],
     categories: list[str],
-) -> list[dict[str, object]]:
+) -> list[SmokeCase]:
     selected_names = set(case_names)
     selected_batches = {value.lower() for value in batches}
     selected_categories = {value.lower() for value in categories}
-    filtered: list[dict[str, object]] = []
+    filtered: list[SmokeCase] = []
     for case in cases:
         name = str(case.get("case", ""))
         batch = str(case.get("batch", "")).lower()
-        case_categories = {
-            str(value).lower() for value in case.get("categories", []) if isinstance(value, str)
-        }
+        case_categories = {value.lower() for value in _string_list(case.get("categories"))}
         if selected_names and name not in selected_names:
             continue
         if selected_batches and batch not in selected_batches:
@@ -123,7 +130,7 @@ def select_cases(
 
 
 def build_payload(
-    case: dict[str, object],
+    case: SmokeCase,
     *,
     repo_url: str,
     verify_suite: str,
@@ -133,14 +140,12 @@ def build_payload(
         "issue_description": case["issue_description"],
         "repo_url": repo_url,
         "base_ref": case["case"],
-        "target_files": list(case["target_files"]),
+        "target_files": _string_list(case.get("target_files")),
         "verify_suite": verify_suite,
         "model": model,
     }
 
 
-def render_case_summary(case: dict[str, object]) -> str:
-    categories = ", ".join(
-        str(value) for value in case.get("categories", []) if isinstance(value, str)
-    )
+def render_case_summary(case: SmokeCase) -> str:
+    categories = ", ".join(_string_list(case.get("categories")))
     return f"{case['case']} | batch={case.get('batch', '-')} | categories={categories}"
