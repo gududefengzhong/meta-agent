@@ -87,6 +87,7 @@ class TrajectoryUsageItem(BaseModel):
     error_message: str | None = None
     prompt_id: str | None = None
     prompt_version: int | None = None
+    prompt_excerpt: str | None = None
     step_kind: str | None = None
 
 

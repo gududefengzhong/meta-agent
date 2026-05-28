@@ -44,11 +44,25 @@
 - MCP Server / 互操作（设计就绪，未实现）
 
 ### L3 - 评测与扩展能力
-- 离线 / 在线评估体系（audit_events + llm_usage_logs + trajectory API 已落地数据采集层；可插拔到 Langfuse 等观测平台）
+- 离线 / 在线评估体系（audit_events + llm_usage_logs + task_checkpoints + trajectory API 已落地数据采集层；5-case repo-local real-LLM eval baseline 已落地；终态 task 自动 best-effort 导出到 Langfuse，CLI 仍可按需重导出）
 - 多模型路由实验（β+ `LLMRouter` 已落地按 `step_kind` 路由）
-- CLI v0 已落地（主交付形态）
+- CLI v0 已落地（主交付形态），包含 `submit` / `tail` / `run` / `trace`
 
 原则：评测和多端形态是扩张能力，不应替代核心闭环。
+
+## 当前实现快照（2026-05-27）
+
+当前仓库已经完成的是一个**生产姿态 reference implementation**，不是 SaaS 部署：
+
+- **主链路**：API submit → PG outbox → Redis Streams → worker consumer group → graph runtime → tool-use loop → deterministic verifier → task result；`BUG_FIX → AUTO_PR` follow-up chain 已有，真实 GitHub PR 能力通过 `GitProvider` Port 接入。
+- **执行隔离**：per-task git workspace / feature branch；Docker workspace backend；tool allow-list、超时、输出截断。
+- **可观测事实来源**：`audit_events`、`llm_usage_logs`、`task_checkpoints`、`tasks.result_json` 全部落 PostgreSQL；`GET /v1/tasks/{id}/trajectory` 和 `meta-agent trace <task_id>` 能按时间线复盘任务。
+- **成本与失败解释**：LLM token / latency / cost 写入 usage；终态 output 聚合 `cost_by_step_kind`；`failure_explanation` 对 verifier failure、budget/max-step truncation 等给出稳定分类。
+- **真实 dogfood**：`deepseek/deepseek-v4-pro` 单 case real-LLM dogfood 通过，记录 patch、tool trajectory、usage/cost。
+- **小型评测**：5-case repo-local real-LLM eval baseline 已落地，覆盖 3 个 Python + 2 个 TypeScript bug-fix case；Run A 为 5/5 verifier passed，31,744 tokens，29,315 micro-USD，并输出 JD 友好指标（success rate、avg tokens/cost、tool failures、verifier failures、human interventions）。
+- **明确边界**：SWE-bench、MCP、VS Code、K8s 不是当前面试项目交付范围；它们只作为后续扩展或面试中说明取舍。
+
+当前最明显的产品缺口是**可视化还不是 task-centric ops console**：数据已经结构化落库，worker 会在任务终态后 best-effort 导出 Langfuse trace，并提供 `meta-agent export-langfuse <task_id>` 手动重导出。短期保留 DB 作为 source of truth；中期用 Langfuse 做 LLM trace / eval 分析视图；长期再做 task-centric ops console。
 
 ## 核心能力说明
 
@@ -69,7 +83,7 @@
 
 ### Evaluation / Monitoring
 - 数据采集层（已落地）：`audit_events` 记录每步 graph 决策；`llm_usage_logs` 记录每次 LLM 调用的 model / step_kind / tokens / cost / latency；`task_checkpoints` 持久化状态机；trajectory API 按时间轴 JOIN 三表
-- 分析层（可插拔）：可对接 Langfuse 等开源 LLM observability 平台做 trace / drift / dataset eval / LLM-as-judge；audit + usage 作为合规与计费的 source of truth，Langfuse 作为开发期 / 上线后分析视图
+- 分析层（可插拔）：可对接 Langfuse 等开源 LLM observability 平台做 trace / drift / dataset eval / LLM-as-judge；audit + usage 作为合规与计费的 source of truth，Langfuse 作为开发期 / 上线后分析视图。当前 `.env` 可准备 `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`；worker 会在终态后自动导出单个 task trajectory，CLI 可通过 `meta-agent export-langfuse <task_id>` 手动补导
 - 要求：监控指标至少覆盖任务成功率、工具调用成功率、端到端时延、token 消耗、成本分布、失败原因
 
 ## 企业级非功能要求
@@ -91,8 +105,9 @@
 - 异步调度：Redis Streams 队列 + 多 worker consumer group
 
 ### 审计与可观测性
-- 关键链路具备日志、指标、追踪
-- 能复盘任务执行路径、模型决策和人工确认点（trajectory API）
+- 关键链路具备结构化日志、审计事件、LLM usage、checkpoint 和 trajectory
+- 能复盘任务执行路径、模型调用、工具调用、人工确认点和失败解释（trajectory API + CLI trace）
+- 当前不依赖 Langfuse 作为事实来源；Langfuse 只作为可插拔分析层，worker 终态自动导出 + CLI 手动补导共同覆盖可视化分析
 
 ### 人机协同
 - 高风险动作支持人工确认（PermissionMode = `approve_each_tool` / `plan` / `approve_before_push`）

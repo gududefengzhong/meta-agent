@@ -442,32 +442,48 @@ async def test_bug_fix_v2_real_llm_eval_baseline(
         assert result is not None
         output = result.output or {}
         usage = await _usage_summary(db_pool, task.tenant_id, task.task_id)
-        tools = await _tool_summary(db_pool, task.tenant_id, task.task_id)
+        audit = await _audit_summary(db_pool, task.tenant_id, task.task_id)
         failure = output.get("failure_explanation")
         failure_category = failure.get("category") if isinstance(failure, dict) else None
+        verifier_passed = bool(output.get("verifier_passed", False))
         rows.append(
             {
                 "case_id": case.case_id,
                 "language": case.language,
                 "task_state": fetched.state.value,
                 "result_status": result.status,
-                "verifier_passed": bool(output.get("verifier_passed", False)),
+                "verifier_passed": verifier_passed,
+                "verifier_failed": not verifier_passed,
                 "failure_category": failure_category,
                 "files_changed": output.get("files_changed", []),
                 "attempts": _int_or_zero(output.get("attempts")),
                 "tool_invocations": _int_or_zero(output.get("tool_invocations")),
                 "patch_present": bool(output.get("patch")),
                 **usage,
-                **tools,
+                **audit,
             }
         )
 
+    total_tokens = sum(_int_or_zero(row["tokens"]) for row in rows)
+    total_cost = sum(_int_or_zero(row["cost_usd_micros"]) for row in rows)
+    passed = sum(1 for row in rows if row["verifier_passed"])
+    cases = len(rows)
     summary = {
-        "cases": len(rows),
-        "passed": sum(1 for row in rows if row["verifier_passed"]),
-        "failed": sum(1 for row in rows if not row["verifier_passed"]),
-        "total_tokens": sum(_int_or_zero(row["tokens"]) for row in rows),
-        "total_cost_usd_micros": sum(_int_or_zero(row["cost_usd_micros"]) for row in rows),
+        "cases": cases,
+        "passed": passed,
+        "failed": cases - passed,
+        "total_tokens": total_tokens,
+        "total_cost_usd_micros": total_cost,
+        "jd_metrics": {
+            "success_rate": passed / cases if cases else 0.0,
+            "average_tokens_per_case": total_tokens / cases if cases else 0.0,
+            "average_cost_usd_micros_per_case": total_cost / cases if cases else 0.0,
+            "tool_failures": sum(_int_or_zero(row["tool_failures"]) for row in rows),
+            "verifier_failures": sum(1 for row in rows if row["verifier_failed"]),
+            "human_interventions": sum(
+                _int_or_zero(row["human_interventions"]) for row in rows
+            ),
+        },
         "rows": rows,
     }
     print("\nBUG_FIX_V2_EVAL_BASELINE_JSON")
@@ -502,21 +518,26 @@ async def _usage_summary(
     }
 
 
-async def _tool_summary(
+async def _audit_summary(
     db_pool: DatabasePool,
     tenant_id: str,
     task_id: str,
 ) -> dict[str, int]:
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT action FROM audit_events WHERE tenant_id=$1 AND task_id=$2 "
-            "AND action LIKE 'tool.%'",
+            "SELECT action FROM audit_events WHERE tenant_id=$1 AND task_id=$2",
             tenant_id,
             task_id,
         )
+    tool_rows = [row for row in rows if str(row["action"]).startswith("tool.")]
     return {
-        "tool_events": len(rows),
-        "tool_failures": sum(1 for row in rows if row["action"] == "tool.failed"),
+        "tool_events": len(tool_rows),
+        "tool_failures": sum(1 for row in tool_rows if row["action"] == "tool.failed"),
+        "human_interventions": sum(
+            1
+            for row in rows
+            if row["action"] in {"task.awaiting_approval", "permission.prompted"}
+        ),
     }
 
 

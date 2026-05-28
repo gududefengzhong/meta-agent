@@ -24,6 +24,7 @@ from meta_agent.core.ports.llm_usage import (
     UsageAggregate,
     UsageGroupBy,
 )
+from meta_agent.core.ports.tools import ToolCall
 from meta_agent.infra.llm.metered import MeteredLLMClient
 from meta_agent.infra.security.context import RequestContext, bind_context
 from tests.core.orchestration._fakes import FakeLLMClient
@@ -206,6 +207,31 @@ async def test_ok_path_records_step_kind_from_request() -> None:
     assert r.step_kind == "plan"
     assert r.prompt_id == "x.y"
     assert r.prompt_version == 1
+    assert r.prompt_excerpt == "USER: hi"
+
+
+async def test_prompt_excerpt_is_bounded_and_summarises_tool_only_assistant_turns() -> None:
+    client, recorder, _ = _make_client()
+    request = LLMRequest(
+        messages=(
+            ChatMessage(role=MessageRole.SYSTEM, content="s" * 800),
+            ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content="",
+                tool_calls=(ToolCall(id="c1", name="fs_read", arguments={"path": "x"}),),
+            ),
+            ChatMessage(role=MessageRole.USER, content="u" * 5000),
+        ),
+        model="openai/gpt-4o",
+    )
+    with bind_context(_ctx()):
+        await client.complete(request)
+    excerpt = recorder.records[0].prompt_excerpt
+    assert isinstance(excerpt, str)
+    assert excerpt.startswith("SYSTEM: ")
+    assert "ASSISTANT_TOOL_CALLS: fs_read" in excerpt
+    assert "USER: " in excerpt
+    assert len(excerpt) <= 4000
 
 
 async def test_error_path_records_step_kind_from_request() -> None:

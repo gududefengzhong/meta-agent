@@ -29,6 +29,7 @@ import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from redis.asyncio import Redis
 
@@ -93,6 +94,7 @@ from meta_agent.infra.llm import (
     RoutingLLMClient,
     StaticLLMRouter,
 )
+from meta_agent.infra.observability import LangfuseConfig, LangfuseTrajectoryExporter
 from meta_agent.infra.permission import RedisPermissionGate
 from meta_agent.infra.persistence import (
     PgAuditRepository,
@@ -101,6 +103,7 @@ from meta_agent.infra.persistence import (
     PgOutboxRepository,
     PgTaskRepository,
     PgTaskSubmitter,
+    PgTrajectoryRepository,
     build_pool,
 )
 from meta_agent.infra.persistence.pool import PoolConfig
@@ -142,7 +145,7 @@ from meta_agent.infra.workspace import (
     LocalGitConfig,
     LocalGitWorkspaceManager,
 )
-from meta_agent.worker.runner import WorkerConfig, WorkerLoop
+from meta_agent.worker.runner import TaskTrajectoryExporter, WorkerConfig, WorkerLoop
 
 _DB_URL_ENV = "META_AGENT_DB_URL"
 _REDIS_URL_ENV = "META_AGENT_REDIS_URL"
@@ -802,6 +805,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     audit_repo = PgAuditRepository(pool)
     outbox_repo = PgOutboxRepository(pool)
     usage_repo = PgLLMUsageRepository(pool)
+    trajectory_repo = PgTrajectoryRepository(pool)
     inner_llm = OpenRouterClient(settings.openrouter)
     breaker = build_circuit_breaker_from_env(redis_client=redis_client)
     breaking_llm = build_circuit_breaking_llm(inner_llm, breaker, audit_sink=audit_repo)
@@ -902,6 +906,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
             llm_usage=usage_repo,
             permission_gate=permission_gate,
             audit_sink=audit_repo,
+            redact_text=redactor.scrub_str,
         )
     )
     workspaces = build_workspace_manager(settings)
@@ -920,6 +925,12 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         deliveries=webhook_delivery_repo,
         watched_actions=frozenset({"task.awaiting_approval"}),
     )
+    langfuse_config = LangfuseConfig.from_env()
+    trajectory_exporter: TaskTrajectoryExporter | None = (
+        cast(TaskTrajectoryExporter, LangfuseTrajectoryExporter(langfuse_config))
+        if langfuse_config is not None
+        else None
+    )
     worker = WorkerLoop(
         stream=consumer,
         tasks=task_repo,
@@ -933,6 +944,8 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         task_topic=settings.task_topic,
         webhook_fanout=webhook_fanout,
         llm_usage=usage_repo,
+        trajectory=trajectory_repo,
+        trajectory_exporter=trajectory_exporter,
         config=WorkerConfig(max_attempts=settings.max_attempts, block_ms=settings.block_ms),
     )
     # Phase γ-A startup recovery: re-enqueue any task left in RUNNING

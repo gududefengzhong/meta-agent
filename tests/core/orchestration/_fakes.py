@@ -124,6 +124,7 @@ def fake_deps(
     prompt_registry: PromptRegistry | None = None,
     permission_gate: PermissionGate | None = None,
     audit_sink: AuditSink | None = None,
+    redact_text: Callable[[object], str] | None = None,
 ) -> GraphDeps:
     """Build a :class:`GraphDeps` with an opinionated :class:`FakeLLMClient`.
 
@@ -154,4 +155,5 @@ def fake_deps(
         prompt_registry=prompt_registry,
         permission_gate=permission_gate,
         audit_sink=audit_sink,
+        redact_text=redact_text,
     )

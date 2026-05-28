@@ -16,6 +16,7 @@ import pytest
 
 from meta_agent.core.domain.checkpoint import TaskCheckpoint
 from meta_agent.core.domain.task import Task, TaskState, TaskType
+from meta_agent.core.domain.trajectory import TrajectoryPage
 from meta_agent.core.orchestration import (
     Graph,
     GraphDeps,
@@ -129,6 +130,8 @@ def _build_loop(
     registry: GraphRegistry | None = None,
     submitter: TaskSubmitter | None = None,
     chain_registry: TaskChainRegistry | None = None,
+    trajectory: object | None = None,
+    trajectory_exporter: object | None = None,
     config: WorkerConfig | None = None,
 ) -> tuple[WorkerLoop, FakeTaskRepo, FakeCheckpointRepo, FakeAuditRepo, FakeStream]:
     tasks = tasks or FakeTaskRepo()
@@ -143,11 +146,52 @@ def _build_loop(
         registry=registry or _registry_with_echo(),
         submitter=submitter,
         chain_registry=chain_registry,
+        trajectory=trajectory,  # type: ignore[arg-type]
+        trajectory_exporter=trajectory_exporter,  # type: ignore[arg-type]
         clock=_fixed_clock(),
         id_factory=_id_factory(),
         config=config,
     )
     return loop, tasks, checkpoints, audits, stream
+
+
+class _FakeTrajectoryRepo:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def list_for_task(
+        self,
+        tenant_id: str,
+        task_id: str,
+        *,
+        since: datetime | None = None,
+        limit_per_source: int = 1000,
+    ) -> TrajectoryPage:
+        self.calls.append((tenant_id, task_id))
+        return TrajectoryPage(items=(), truncated=False)
+
+
+class _FakeExportResult:
+    trace_id = "0" * 32
+    observation_count = 1
+
+
+class _FakeTrajectoryExporter:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[dict[str, object]] = []
+
+    async def export_task(
+        self,
+        *,
+        task_id: str,
+        task: dict[str, object],
+        trajectory: dict[str, object],
+    ) -> _FakeExportResult:
+        self.calls.append({"task_id": task_id, "task": task, "trajectory": trajectory})
+        if self.fail:
+            raise RuntimeError("langfuse down")
+        return _FakeExportResult()
 
 
 async def test_run_once_executes_echo_graph_end_to_end() -> None:
@@ -182,6 +226,51 @@ async def test_run_once_executes_echo_graph_end_to_end() -> None:
     assert result.graph_id == ECHO_GRAPH_ID
     assert result.node_sequence == 3
     assert result.finished_at >= result.started_at
+
+
+async def test_terminal_task_exports_trajectory_when_configured() -> None:
+    trajectory = _FakeTrajectoryRepo()
+    exporter = _FakeTrajectoryExporter()
+    loop, tasks, _checkpoints, audits, stream = _build_loop(
+        trajectory=trajectory,
+        trajectory_exporter=exporter,
+    )
+    await tasks.upsert(_make_task())
+    stream.push([_delivered()])
+
+    await loop.run_once()
+
+    assert trajectory.calls == [(TENANT, "task-1")]
+    assert len(exporter.calls) == 1
+    call = exporter.calls[0]
+    assert call["task_id"] == "task-1"
+    exported_task = call["task"]
+    assert isinstance(exported_task, dict)
+    assert exported_task["state"] == "succeeded"
+    assert exported_task["result_status"] == "succeeded"
+    assert exported_task["failure_category"] is None
+    assert "observability.langfuse_exported" in audits.actions()
+    exported_audit = next(e for e in audits.rows if e.action == "observability.langfuse_exported")
+    assert exported_audit.payload["langfuse_trace_id"] == "0" * 32
+    assert stream.acked == ["1-0"]
+
+
+async def test_langfuse_export_failure_is_best_effort() -> None:
+    trajectory = _FakeTrajectoryRepo()
+    exporter = _FakeTrajectoryExporter(fail=True)
+    loop, tasks, _checkpoints, audits, stream = _build_loop(
+        trajectory=trajectory,
+        trajectory_exporter=exporter,
+    )
+    await tasks.upsert(_make_task())
+    stream.push([_delivered()])
+
+    await loop.run_once()
+
+    task = await tasks.get(TENANT, "task-1")
+    assert task is not None and task.state == TaskState.SUCCEEDED
+    assert stream.acked == ["1-0"]
+    assert "observability.langfuse_export_failed" in audits.actions()
 
 
 async def test_run_once_resumes_from_checkpoint() -> None:

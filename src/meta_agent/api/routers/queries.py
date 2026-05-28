@@ -176,6 +176,7 @@ async def list_usages(
             status=r.status,
             error_category=r.error_category,
             error_message=r.error_message,
+            prompt_excerpt=r.prompt_excerpt,
             created_at=r.created_at,
         )
         for r in records

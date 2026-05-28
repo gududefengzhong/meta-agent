@@ -150,6 +150,7 @@ def _usage(at: datetime, record_id: str = "rec-1") -> TrajectoryUsageItem:
         status="ok",
         prompt_id="bug_fix_v2.system",
         prompt_version=1,
+        prompt_excerpt="SYSTEM: fix bug\n\nUSER: hi",
         step_kind="plan",
     )
 
@@ -193,6 +194,7 @@ async def test_returns_merged_items_when_task_exists(task_repo: FakeTaskRepo) ->
     assert body["truncated"] is False
     kinds = [item["kind"] for item in body["items"]]
     assert kinds == ["audit", "checkpoint", "usage"]
+    assert body["items"][2]["prompt_excerpt"] == "SYSTEM: fix bug\n\nUSER: hi"
     # Repo received the bound tenant + the task id from the URL path.
     assert trajectory_repo.calls == [(_TENANT, "task-1", 1000)]
 

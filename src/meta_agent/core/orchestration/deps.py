@@ -108,6 +108,14 @@ class GraphDeps:
     observe precisely, such as LLM-requested tool calls and their
     bounded results.
     """
+    redact_text: Callable[[object], str] | None = None
+    """Best-effort text scrubber for audit-safe excerpts.
+
+    Phase γ-D wires this to :meth:`Redactor.scrub_str` so graphs can
+    persist short diagnostic summaries (for example ``tool.failed``
+    excerpts) without duplicating regex policy in the core layer.
+    ``None`` means "store the excerpt verbatim".
+    """
 
 
 GraphFactory = Callable[[GraphDeps], Graph]

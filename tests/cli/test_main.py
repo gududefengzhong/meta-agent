@@ -55,13 +55,33 @@ def test_parser_requires_subcommand() -> None:
 
 def test_parser_recognises_subcommands() -> None:
     parser = build_parser()
-    for cmd in ("submit", "tail", "run", "trace"):
+    for cmd in ("submit", "tail", "run", "trace", "export-langfuse"):
         # Both forms accept either a positional prompt or args:
-        if cmd in {"tail", "trace"}:
+        if cmd in {"tail", "trace", "export-langfuse"}:
             args = parser.parse_args([cmd, "t-1"])
         else:
             args = parser.parse_args([cmd, "do the thing"])
         assert args.command == cmd
+
+
+def test_parser_accepts_global_flags_before_subcommand() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        ["--api-url", "http://example.test", "--token", "tok-1", "submit", "fix the typo"]
+    )
+    assert args.command == "submit"
+    assert args.api_url == "http://example.test"
+    assert args.token == "tok-1"
+
+
+def test_parser_accepts_global_flags_after_subcommand() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        ["submit", "--api-url", "http://example.test", "--token", "tok-1", "fix the typo"]
+    )
+    assert args.command == "submit"
+    assert args.api_url == "http://example.test"
+    assert args.token == "tok-1"
 
 
 def test_build_payload_prefers_payload_json() -> None:
@@ -268,6 +288,54 @@ def test_main_trace_prints_trajectory_report(
     assert "tool.invoked tool=fs_read" in out.out
     assert "tool.failed tool=test_run" in out.out
     assert "usage step=plan" in out.out
+
+
+def test_main_export_langfuse_uses_task_and_trajectory(
+    env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("LANGFUSE_HOST", "http://langfuse")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    exported: list[tuple[str, dict[str, object], dict[str, object]]] = []
+
+    class _FakeResult:
+        trace_id = "0" * 32
+        observation_count = 3
+
+    class _FakeExporter:
+        def __init__(self, _config: object) -> None:
+            pass
+
+        async def export_task(
+            self,
+            *,
+            task_id: str,
+            task: dict[str, object],
+            trajectory: dict[str, object],
+        ) -> _FakeResult:
+            exported.append((task_id, task, trajectory))
+            return _FakeResult()
+
+    from meta_agent.cli import commands
+
+    monkeypatch.setattr(commands, "LangfuseTrajectoryExporter", _FakeExporter)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/tasks/t-1":
+            return httpx.Response(200, json={**_TASK_BODY, "state": "succeeded"})
+        if req.url.path == "/v1/tasks/t-1/trajectory":
+            return httpx.Response(200, json={"items": [], "truncated": False})
+        return httpx.Response(404, text="unexpected " + req.url.path)
+
+    _patch_task_client(monkeypatch, handler)
+    code = main(["export-langfuse", "t-1"])
+
+    assert code == EXIT_OK
+    out = capsys.readouterr()
+    assert "langfuse export: trace_id=00000000000000000000000000000000 observations=3" in out.out
+    assert exported == [("t-1", {**_TASK_BODY, "state": "succeeded"}, {"items": [], "truncated": False})]
 
 
 # --------------------------------------------------------------- helpers
