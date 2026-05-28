@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from meta_agent.cli.client import CLIError, EXIT_NETWORK, EXIT_USAGE
+from meta_agent.cli.client import EXIT_NETWORK, EXIT_USAGE, CLIError
 
 DEFAULT_REMOTE_CATALOG_URL = (
     "https://raw.githubusercontent.com/"

@@ -7,7 +7,7 @@ import asyncio
 import json
 import sys
 
-from meta_agent.cli.client import CLIConfig, CLIError, EXIT_OK, TaskClient
+from meta_agent.cli.client import EXIT_OK, CLIConfig, CLIError, TaskClient
 from meta_agent.cli.commands import _prompt_user_for_decision, _tail_until_terminal
 from meta_agent.evals.smoke_catalog import (
     build_payload,
