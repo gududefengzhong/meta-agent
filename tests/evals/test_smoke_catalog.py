@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping
 
 from meta_agent.evals.smoke_catalog import (
     build_payload,
