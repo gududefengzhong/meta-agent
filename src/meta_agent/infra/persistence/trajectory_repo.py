@@ -64,7 +64,7 @@ class PgTrajectoryRepository(TrajectoryRepository):
                prompt_tokens, completion_tokens, total_tokens,
                cost_usd_micros, latency_ms, status,
                error_category, error_message,
-               prompt_id, prompt_version, step_kind,
+               prompt_id, prompt_version, prompt_excerpt, step_kind,
                created_at
         FROM llm_usage_logs
         WHERE tenant_id = $1 AND task_id = $2
@@ -154,5 +154,6 @@ def _usage_to_item(row: dict[str, Any]) -> TrajectoryUsageItem:
         error_message=row["error_message"],
         prompt_id=row["prompt_id"],
         prompt_version=row["prompt_version"],
+        prompt_excerpt=row.get("prompt_excerpt"),
         step_kind=row["step_kind"],
     )

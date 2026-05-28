@@ -29,6 +29,7 @@ def test_llm_usage_record_minimum_required_fields() -> None:
     assert record.prompt_tokens is None
     assert record.cost_usd_micros is None
     assert record.error_category is None
+    assert record.prompt_excerpt is None
 
 
 def test_llm_usage_record_full_ok_path() -> None:
@@ -48,6 +49,7 @@ def test_llm_usage_record_full_ok_path() -> None:
         total_tokens=46,
         finish_reason="stop",
         provider_response_id="gen_abc",
+        prompt_excerpt="USER: hi",
         cost_usd_micros=1500,
         latency_ms=210,
         status=LLMUsageStatus.OK,
@@ -55,6 +57,7 @@ def test_llm_usage_record_full_ok_path() -> None:
     )
     assert record.total_tokens == 46
     assert record.cost_usd_micros == 1500
+    assert record.prompt_excerpt == "USER: hi"
 
 
 def test_llm_usage_record_error_path_keeps_category() -> None:

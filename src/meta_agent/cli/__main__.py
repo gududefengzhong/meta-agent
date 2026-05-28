@@ -19,40 +19,33 @@ from meta_agent.cli.client import (
     CLIError,
     TaskClient,
 )
-from meta_agent.cli.commands import cmd_run, cmd_submit, cmd_tail, cmd_trace
+from meta_agent.cli.commands import (
+    cmd_export_langfuse,
+    cmd_run,
+    cmd_submit,
+    cmd_tail,
+    cmd_trace,
+)
 
 CommandFn = Callable[[argparse.Namespace, TaskClient], Awaitable[int]]
 
 
 def build_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    _add_global_args(common, suppress_default=True)
     parser = argparse.ArgumentParser(
         prog="meta-agent",
         description="meta-agent code agent CLI (v0)",
     )
-    parser.add_argument(
-        "--api-url",
-        default=None,
-        help="Override $META_AGENT_API_URL (default http://localhost:8000)",
-    )
-    parser.add_argument(
-        "--token",
-        default=None,
-        help="Override $META_AGENT_TOKEN (bearer token for /v1/* calls)",
-    )
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Emit extra status lines to stderr",
-    )
+    _add_global_args(parser)
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_submit = sub.add_parser("submit", help="Submit a task; print task_id")
+    p_submit = sub.add_parser("submit", help="Submit a task; print task_id", parents=[common])
     _add_task_args(p_submit)
     p_submit.set_defaults(func=cmd_submit)
 
-    p_tail = sub.add_parser("tail", help="Stream chunks + events for a task")
+    p_tail = sub.add_parser("tail", help="Stream chunks + events for a task", parents=[common])
     p_tail.add_argument("task_id")
     p_tail.add_argument(
         "--quiet-events",
@@ -70,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_tail.set_defaults(func=cmd_tail)
 
-    p_trace = sub.add_parser("trace", help="Print a task trajectory report")
+    p_trace = sub.add_parser("trace", help="Print a task trajectory report", parents=[common])
     p_trace.add_argument("task_id")
     p_trace.add_argument(
         "--limit-per-source",
@@ -80,7 +73,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_trace.set_defaults(func=cmd_trace)
 
-    p_run = sub.add_parser("run", help="Submit a task and stream until terminal")
+    p_export_langfuse = sub.add_parser(
+        "export-langfuse",
+        help="Export a task trajectory to Langfuse using LANGFUSE_* env vars",
+        parents=[common],
+    )
+    p_export_langfuse.add_argument("task_id")
+    p_export_langfuse.add_argument(
+        "--limit-per-source",
+        type=int,
+        default=1000,
+        help="Maximum rows to fetch from each trajectory source (default 1000)",
+    )
+    p_export_langfuse.set_defaults(func=cmd_export_langfuse)
+
+    p_run = sub.add_parser("run", help="Submit a task and stream until terminal", parents=[common])
     _add_task_args(p_run)
     p_run.add_argument(
         "--quiet-events",
@@ -95,6 +102,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.set_defaults(func=cmd_run)
 
     return parser
+
+
+def _add_global_args(parser: argparse.ArgumentParser, *, suppress_default: bool = False) -> None:
+    default = argparse.SUPPRESS if suppress_default else None
+    parser.add_argument(
+        "--api-url",
+        default=default,
+        help="Override $META_AGENT_API_URL (default http://localhost:8000)",
+    )
+    parser.add_argument(
+        "--token",
+        default=default,
+        help="Override $META_AGENT_TOKEN (bearer token for /v1/* calls)",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        default=argparse.SUPPRESS if suppress_default else False,
+        help="Emit extra status lines to stderr",
+    )
 
 
 def _add_task_args(parser: argparse.ArgumentParser) -> None:

@@ -228,6 +228,7 @@ class LLMUsageResponse(BaseModel):
     status: LLMUsageStatus
     error_category: ErrorCategory | None
     error_message: str | None
+    prompt_excerpt: str | None = None
     created_at: datetime
 
 

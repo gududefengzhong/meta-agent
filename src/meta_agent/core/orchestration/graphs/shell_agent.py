@@ -31,7 +31,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_STEPS = 8
 _DEFAULT_OUTPUT_BYTE_CAP = 65536
+_ERROR_EXCERPT_CHAR_LIMIT = 200
 _PERMISSION_DECISION_TIMEOUT_S = 120.0
 """How long the agent waits for a user to decide on an inline permission prompt.
 
@@ -314,12 +315,30 @@ def _tool_message_content(result: ToolResult) -> str:
     return "\n".join(lines)
 
 
+def _error_excerpt(
+    value: object,
+    *,
+    redact_text: Callable[[object], str] | None,
+) -> str | None:
+    text = "" if value is None else str(value)
+    if not text:
+        return None
+    try:
+        scrubbed = redact_text(text) if redact_text is not None else text
+    except Exception:
+        scrubbed = text
+    if not scrubbed:
+        return None
+    return scrubbed[:_ERROR_EXCERPT_CHAR_LIMIT]
+
+
 async def _execute_with_audit(
     call: ToolCall,
     tool_ctx: ToolContext,
     state: TaskRunState,
     operation: Awaitable[ToolResult],
     audit_sink: AuditSink | None,
+    redact_text: Callable[[object], str] | None,
 ) -> ToolResult:
     """Run one LLM-requested tool call and emit structured audit events."""
 
@@ -350,6 +369,7 @@ async def _execute_with_audit(
                 "agent_step": step,
                 "duration_ms": _elapsed_ms(started),
                 "error_type": type(exc).__name__,
+                "error_excerpt": _error_excerpt(str(exc), redact_text=redact_text),
             },
         )
         raise
@@ -362,6 +382,8 @@ async def _execute_with_audit(
         "truncated": result.truncated,
         "metadata": dict(result.metadata),
     }
+    if result.is_error:
+        payload["error_excerpt"] = _error_excerpt(result.content, redact_text=redact_text)
     action = "tool.failed" if result.is_error else "tool.completed"
     await _audit_tool_event(state, action=action, audit_sink=audit_sink, payload=payload)
     return result
@@ -791,6 +813,7 @@ def build_shell_agent_graph(
                     state,
                     operation,
                     deps.audit_sink,
+                    deps.redact_text,
                 )
                 invocations += 1
                 messages.append(
@@ -827,6 +850,7 @@ def build_shell_agent_graph(
                     state,
                     operation,
                     deps.audit_sink,
+                    deps.redact_text,
                 )
             else:
                 operation = executor.execute(call, ctx)
@@ -836,6 +860,7 @@ def build_shell_agent_graph(
                     state,
                     operation,
                     deps.audit_sink,
+                    deps.redact_text,
                 )
             invocations += 1
             messages.append(

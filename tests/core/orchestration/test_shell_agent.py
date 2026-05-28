@@ -151,6 +151,52 @@ async def test_tool_call_emits_structured_audit_events(tmp_path: Path) -> None:
     assert completed.payload["truncated"] is False
 
 
+async def test_tool_failed_audit_includes_redacted_error_excerpt(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    audit = _AuditSpy()
+    secret = "Authorization: Bearer abc123xyzdef.tokenpart"
+
+    async def handler(call: ToolCall, ctx: ToolContext) -> ToolResult:
+        return ToolResult(
+            call_id=call.id,
+            name=call.name,
+            content=(secret + " failure details ") * 20,
+            is_error=True,
+        )
+
+    registry.register(_spec("edit_patch_apply"), handler)
+    client = FakeLLMClient(
+        responses=[
+            make_response(
+                content="",
+                tool_calls=(ToolCall(id="c1", name="edit_patch_apply", arguments={}),),
+                finish_reason="tool_call",
+            ),
+            make_response(content="fallback to write", finish_reason="stop"),
+        ]
+    )
+    deps = fake_deps(
+        client,
+        tool_registry=registry,
+        audit_sink=audit,
+        redact_text=lambda value: str(value).replace(
+            secret,
+            "[REDACTED:authorization_header]",
+        ),
+    )
+    graph = build_shell_agent_graph(deps)
+
+    await graph.run(_state(user_prompt="hi", _workspace_path=str(tmp_path)))
+
+    failed = audit.events[1]
+    assert failed.action == "tool.failed"
+    excerpt = failed.payload["error_excerpt"]
+    assert isinstance(excerpt, str)
+    assert len(excerpt) == 200
+    assert secret not in excerpt
+    assert "[REDACTED:authorization_header]" in excerpt
+
+
 async def test_tool_observation_preserves_metadata_and_truncation_signals(tmp_path: Path) -> None:
     registry = ToolRegistry()
 

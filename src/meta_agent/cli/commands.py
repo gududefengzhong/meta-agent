@@ -23,6 +23,11 @@ from meta_agent.cli.client import (
     CLIError,
     TaskClient,
 )
+from meta_agent.infra.observability import (
+    LangfuseConfig,
+    LangfuseExporterError,
+    LangfuseTrajectoryExporter,
+)
 
 PromptDecider = Callable[[dict[str, Any]], Awaitable[tuple[bool, str | None]]]
 """Coroutine that turns a permission prompt into ``(allow, reason)``.
@@ -109,6 +114,34 @@ async def cmd_trace(args: argparse.Namespace, client: TaskClient) -> int:
     items_raw = page.get("items", [])
     items = items_raw if isinstance(items_raw, list) else []
     print(_render_trace_report(args.task_id, items, truncated=bool(page.get("truncated"))))
+    return EXIT_OK
+
+
+async def cmd_export_langfuse(args: argparse.Namespace, client: TaskClient) -> int:
+    """Export a persisted task trajectory to Langfuse.
+
+    The command reads Langfuse configuration from process environment
+    variables only. It never opens ``.env`` directly; shell tooling
+    such as direnv is responsible for loading that file into the
+    environment before this command starts.
+    """
+
+    try:
+        config = LangfuseConfig.require_from_env()
+        exporter = LangfuseTrajectoryExporter(config)
+        task = await client.get_task(args.task_id)
+        trajectory = await client.get_trajectory(
+            args.task_id,
+            limit_per_source=args.limit_per_source,
+        )
+        result = await exporter.export_task(
+            task_id=args.task_id,
+            task=task,
+            trajectory=trajectory,
+        )
+    except LangfuseExporterError as exc:
+        raise CLIError(2, str(exc)) from exc
+    print(f"langfuse export: trace_id={result.trace_id} observations={result.observation_count}")
     return EXIT_OK
 
 

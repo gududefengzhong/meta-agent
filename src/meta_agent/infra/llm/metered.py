@@ -48,6 +48,8 @@ from meta_agent.infra.security.context import RequestContext, get_current
 logger = logging.getLogger(__name__)
 
 _MAX_ERROR_MESSAGE_LEN = 500
+_MAX_PROMPT_EXCERPT_CHARS = 4000
+_MAX_PROMPT_MESSAGE_CHARS = 500
 
 
 class MeteredLLMClient(LLMClient):
@@ -215,6 +217,7 @@ def _build_record(
             provider_response_id=response.provider_response_id,
             prompt_id=request.prompt_id,
             prompt_version=request.prompt_version,
+            prompt_excerpt=_request_excerpt(request),
             step_kind=request.step_kind,
             latency_ms=elapsed_ms,
             status=LLMUsageStatus.OK,
@@ -234,6 +237,7 @@ def _build_record(
         requested_model=request.model,
         prompt_id=request.prompt_id,
         prompt_version=request.prompt_version,
+        prompt_excerpt=_request_excerpt(request),
         step_kind=request.step_kind,
         latency_ms=elapsed_ms,
         status=LLMUsageStatus.ERROR,
@@ -251,6 +255,26 @@ def _truncate(value: str) -> str:
     if len(value) <= _MAX_ERROR_MESSAGE_LEN:
         return value
     return value[: _MAX_ERROR_MESSAGE_LEN - 1] + "…"
+
+
+def _request_excerpt(request: LLMRequest) -> str | None:
+    parts: list[str] = []
+    for message in request.messages:
+        content = message.content.strip()
+        if len(content) > _MAX_PROMPT_MESSAGE_CHARS:
+            content = content[: _MAX_PROMPT_MESSAGE_CHARS - 1] + "…"
+        if content:
+            parts.append(f"{message.role.value.upper()}: {content}")
+        elif message.tool_calls:
+            names = ", ".join(call.name for call in message.tool_calls if call.name)
+            if names:
+                parts.append(f"{message.role.value.upper()}_TOOL_CALLS: {names}")
+    if not parts:
+        return None
+    merged = "\n\n".join(parts)
+    if len(merged) <= _MAX_PROMPT_EXCERPT_CHARS:
+        return merged
+    return merged[: _MAX_PROMPT_EXCERPT_CHARS - 1] + "…"
 
 
 def _elapsed_ms(started: float, ended: float) -> int:

@@ -57,6 +57,7 @@ def _row_to_record(row: dict[str, Any]) -> LLMUsageRecord:
         provider_response_id=row["provider_response_id"],
         prompt_id=row.get("prompt_id"),
         prompt_version=row.get("prompt_version"),
+        prompt_excerpt=row.get("prompt_excerpt"),
         step_kind=row.get("step_kind"),
         cost_usd_micros=row["cost_usd_micros"],
         latency_ms=row["latency_ms"],
@@ -76,7 +77,7 @@ class PgLLMUsageRepository(LLMUsageRepository):
             session_id, task_id, provider, model, requested_model,
             prompt_tokens, completion_tokens, total_tokens,
             finish_reason, provider_response_id,
-            prompt_id, prompt_version, step_kind,
+            prompt_id, prompt_version, prompt_excerpt, step_kind,
             cost_usd_micros, latency_ms,
             status, error_category, error_message, created_at
         )
@@ -85,9 +86,9 @@ class PgLLMUsageRepository(LLMUsageRepository):
             $6, $7, $8, $9, $10,
             $11, $12, $13,
             $14, $15,
-            $16, $17, $18,
-            $19, $20,
-            $21, $22, $23, $24
+            $16, $17, $18, $19,
+            $20, $21,
+            $22, $23, $24, $25
         )
         ON CONFLICT (record_id) DO NOTHING
     """
@@ -134,6 +135,7 @@ class PgLLMUsageRepository(LLMUsageRepository):
                 record.provider_response_id,
                 record.prompt_id,
                 record.prompt_version,
+                record.prompt_excerpt,
                 record.step_kind,
                 record.cost_usd_micros,
                 record.latency_ms,

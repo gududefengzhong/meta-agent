@@ -6,10 +6,10 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from meta_agent.core.domain.audit import AuditEvent
 from meta_agent.core.domain.checkpoint import TaskCheckpoint
@@ -40,6 +40,7 @@ from meta_agent.core.ports.repository import (
     TaskRepository,
 )
 from meta_agent.core.ports.task_submitter import TaskSubmitter
+from meta_agent.core.ports.trajectory import TrajectoryRepository
 from meta_agent.core.ports.workspace import WorkspaceError, WorkspaceManager
 from meta_agent.infra.queue.redis_consumer import DeliveredMessage
 from meta_agent.infra.security.context import RequestContext, bind_context
@@ -62,6 +63,23 @@ class DeliveryStream(Protocol):
     ) -> list[DeliveredMessage]: ...
 
     async def ack(self, entry_id: str) -> None: ...
+
+
+class TrajectoryExportResult(Protocol):
+    trace_id: str
+    observation_count: int
+
+
+class TaskTrajectoryExporter(Protocol):
+    """Best-effort sink for copying a completed task timeline to an external UI."""
+
+    async def export_task(
+        self,
+        *,
+        task_id: str,
+        task: Mapping[str, Any],
+        trajectory: Mapping[str, Any],
+    ) -> TrajectoryExportResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +113,8 @@ class WorkerLoop:
         task_topic: str = "task.commands",
         webhook_fanout: WebhookFanout | None = None,
         llm_usage: LLMUsageRepository | None = None,
+        trajectory: TrajectoryRepository | None = None,
+        trajectory_exporter: TaskTrajectoryExporter | None = None,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], str] | None = None,
         config: WorkerConfig | None = None,
@@ -124,6 +144,11 @@ class WorkerLoop:
         # :class:`TaskResult`. ``None`` skips augmentation (unit tests
         # that don't wire the metered LLM stack).
         self._llm_usage = llm_usage
+        # Optional observability copy path: PostgreSQL remains the
+        # source of truth; this pair lets production workers export the
+        # merged trajectory to Langfuse after terminal writes.
+        self._trajectory = trajectory
+        self._trajectory_exporter = trajectory_exporter
         self._clock = clock or (lambda: datetime.now(UTC))
         self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
         self._config = config or WorkerConfig()
@@ -377,6 +402,7 @@ class WorkerLoop:
             f"task.{terminal_state.value}",
             payload={"sequence": state.sequence, "output": result.output},
         )
+        await self._export_trajectory(ctx, task, terminal_state, result=result)
         # Chain hook lives between the terminal audit and the ack so a
         # crash mid-chain results in a redelivery that re-enters this
         # path: the parent ``complete()`` is a no-op (already terminal,
@@ -689,6 +715,7 @@ class WorkerLoop:
                 terminal_state=TaskState.FAILED,
                 updated_at=finished_at,
             )
+            await self._export_trajectory(ctx, task, TaskState.FAILED, result=result)
         await self._stream.ack(msg.entry_id)
 
     async def _audit(
@@ -715,6 +742,77 @@ class WorkerLoop:
         # the audit row is already committed and is the recovery anchor.
         if self._webhook_fanout is not None:
             await self._webhook_fanout.fanout(event)
+
+    async def _export_trajectory(
+        self,
+        ctx: RequestContext,
+        task: Task,
+        terminal_state: TaskState,
+        *,
+        result: TaskResult,
+    ) -> None:
+        """Best-effort copy of one terminal task trajectory to Langfuse.
+
+        The export runs after terminal task state and terminal audit are
+        committed. A Langfuse outage must not prevent ack, chaining, or
+        task completion; failures are surfaced back into local audit.
+        """
+
+        if self._trajectory is None or self._trajectory_exporter is None:
+            return
+        try:
+            page = await self._trajectory.list_for_task(task.tenant_id, task.task_id)
+            exported_task = task.model_copy(
+                update={"state": terminal_state, "updated_at": self._clock()}
+            )
+            task_payload = exported_task.model_dump(mode="json")
+            task_payload.update(_result_observability_metadata(result))
+            export = await self._trajectory_exporter.export_task(
+                task_id=task.task_id,
+                task=task_payload,
+                trajectory=page.model_dump(mode="json"),
+            )
+        except Exception as exc:
+            logger.exception(
+                "worker.langfuse_export_failed",
+                extra={"task_id": task.task_id, "tenant_id": task.tenant_id},
+            )
+            with contextlib.suppress(Exception):
+                await self._audit(
+                    ctx,
+                    "observability.langfuse_export_failed",
+                    payload={
+                        "task_id": task.task_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            return
+        await self._audit(
+            ctx,
+            "observability.langfuse_exported",
+            payload={
+                "task_id": task.task_id,
+                "langfuse_trace_id": export.trace_id,
+                "observation_count": export.observation_count,
+            },
+        )
+
+
+def _result_observability_metadata(result: TaskResult) -> dict[str, object]:
+    output = result.output if isinstance(result.output, dict) else {}
+    failure = output.get("failure_explanation")
+    failure_category = failure.get("category") if isinstance(failure, dict) else None
+    if failure_category is None and result.error is not None:
+        details = result.error.details if isinstance(result.error.details, dict) else {}
+        failure_category = details.get("failure_category")
+    payload: dict[str, object] = {
+        "result_status": result.status,
+        "failure_category": failure_category,
+        "node_sequence": result.node_sequence,
+    }
+    if result.error is not None:
+        payload["error_code"] = result.error.code.value
+    return payload
 
 
 def _envelope_to_context(envelope: MessageEnvelope) -> RequestContext:

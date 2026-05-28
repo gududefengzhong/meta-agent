@@ -38,6 +38,17 @@ The test prints one `BUG_FIX_V2_EVAL_BASELINE_JSON` block containing:
 - `cost_usd_micros`
 - `tool_events`
 - `tool_failures`
+- `human_interventions`
+
+It also prints a `jd_metrics` aggregate block designed for interview /
+business review:
+
+- `success_rate`
+- `average_tokens_per_case`
+- `average_cost_usd_micros_per_case`
+- `tool_failures`
+- `verifier_failures`
+- `human_interventions`
 
 The test asserts only the harness contract:
 
@@ -90,6 +101,11 @@ First full 5-case run on 2026-05-27 Asia/Shanghai.
 | Verifier failed | 0 |
 | Total tokens | 31,744 |
 | Total cost | 29,315 micro-USD |
+| Success rate | 100% |
+| Average tokens / case | 6,348.8 |
+| Average cost / case | 5,863 micro-USD |
+| Tool failures | 7 |
+| Human interventions | 0 |
 
 Per-case summary:
 
@@ -111,3 +127,6 @@ Observations:
 - All rows had `failure_category=null`; future regressions should show
   `verifier_failed`, `tool_failed` diagnostics in trace, or truncation
   categories from `failure_explanation`.
+- The JD-facing aggregate turns the same raw telemetry into business
+  interview metrics: task success rate, average token/cost, tool
+  failures, verifier failures, and manual intervention count.
