@@ -335,7 +335,9 @@ def test_main_export_langfuse_uses_task_and_trajectory(
     assert code == EXIT_OK
     out = capsys.readouterr()
     assert "langfuse export: trace_id=00000000000000000000000000000000 observations=3" in out.out
-    assert exported == [("t-1", {**_TASK_BODY, "state": "succeeded"}, {"items": [], "truncated": False})]
+    assert exported == [
+        ("t-1", {**_TASK_BODY, "state": "succeeded"}, {"items": [], "truncated": False})
+    ]
 
 
 # --------------------------------------------------------------- helpers

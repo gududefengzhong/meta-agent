@@ -104,9 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_global_args(
-    parser: argparse.ArgumentParser, *, suppress_default: bool = False
-) -> None:
+def _add_global_args(parser: argparse.ArgumentParser, *, suppress_default: bool = False) -> None:
     default = argparse.SUPPRESS if suppress_default else None
     parser.add_argument(
         "--api-url",

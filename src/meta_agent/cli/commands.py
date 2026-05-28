@@ -141,10 +141,7 @@ async def cmd_export_langfuse(args: argparse.Namespace, client: TaskClient) -> i
         )
     except LangfuseExporterError as exc:
         raise CLIError(2, str(exc)) from exc
-    print(
-        "langfuse export: "
-        f"trace_id={result.trace_id} observations={result.observation_count}"
-    )
+    print(f"langfuse export: trace_id={result.trace_id} observations={result.observation_count}")
     return EXIT_OK
 
 

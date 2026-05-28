@@ -154,7 +154,9 @@ class LangfuseTrajectoryExporter:
                 else:
                     continue
                 observation_count += 1
-            root.update(output={"observations": observation_count, "truncated": trajectory.get("truncated")})
+            root.update(
+                output={"observations": observation_count, "truncated": trajectory.get("truncated")}
+            )
 
         client.flush()
         return LangfuseExportResult(

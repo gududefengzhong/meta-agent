@@ -480,9 +480,7 @@ async def test_bug_fix_v2_real_llm_eval_baseline(
             "average_cost_usd_micros_per_case": total_cost / cases if cases else 0.0,
             "tool_failures": sum(_int_or_zero(row["tool_failures"]) for row in rows),
             "verifier_failures": sum(1 for row in rows if row["verifier_failed"]),
-            "human_interventions": sum(
-                _int_or_zero(row["human_interventions"]) for row in rows
-            ),
+            "human_interventions": sum(_int_or_zero(row["human_interventions"]) for row in rows),
         },
         "rows": rows,
     }
@@ -534,9 +532,7 @@ async def _audit_summary(
         "tool_events": len(tool_rows),
         "tool_failures": sum(1 for row in tool_rows if row["action"] == "tool.failed"),
         "human_interventions": sum(
-            1
-            for row in rows
-            if row["action"] in {"task.awaiting_approval", "permission.prompted"}
+            1 for row in rows if row["action"] in {"task.awaiting_approval", "permission.prompted"}
         ),
     }
 

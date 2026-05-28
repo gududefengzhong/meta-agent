@@ -79,6 +79,5 @@ def test_render_case_summary_includes_batch_and_categories() -> None:
     )
 
     assert summary == (
-        "case/py-safe-join-traversal | batch=second | "
-        "categories=security, path-traversal"
+        "case/py-safe-join-traversal | batch=second | categories=security, path-traversal"
     )

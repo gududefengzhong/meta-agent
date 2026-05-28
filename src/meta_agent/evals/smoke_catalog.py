@@ -11,8 +11,7 @@ import httpx
 from meta_agent.cli.client import EXIT_NETWORK, EXIT_USAGE, CLIError
 
 DEFAULT_REMOTE_CATALOG_URL = (
-    "https://raw.githubusercontent.com/"
-    "gududefengzhong/meta-agent-smoke/master/catalog/cases.json"
+    "https://raw.githubusercontent.com/gududefengzhong/meta-agent-smoke/master/catalog/cases.json"
 )
 DEFAULT_REPO_URL = "https://github.com/gududefengzhong/meta-agent-smoke.git"
 DEFAULT_VERIFY_SUITE = "python_test"
@@ -46,9 +45,13 @@ async def load_cases(source: str) -> list[dict[str, object]]:
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
                 response = await client.get(source)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise CLIError(EXIT_NETWORK, f"failed to fetch smoke catalog {source}: {exc!s}") from exc
+            raise CLIError(
+                EXIT_NETWORK, f"failed to fetch smoke catalog {source}: {exc!s}"
+            ) from exc
         if response.status_code != 200:
-            raise CLIError(EXIT_USAGE, f"failed to fetch smoke catalog {source}: HTTP {response.status_code}")
+            raise CLIError(
+                EXIT_USAGE, f"failed to fetch smoke catalog {source}: HTTP {response.status_code}"
+            )
         try:
             decoded = response.json()
         except ValueError as exc:
@@ -77,13 +80,17 @@ def validate_cases(raw: object, *, source: str) -> list[dict[str, object]]:
         if not isinstance(name, str) or not name:
             raise CLIError(EXIT_USAGE, f"smoke catalog {source} entry #{idx} missing case")
         if not isinstance(issue_description, str) or not issue_description:
-            raise CLIError(EXIT_USAGE, f"smoke catalog {source} entry {name!r} missing issue_description")
+            raise CLIError(
+                EXIT_USAGE, f"smoke catalog {source} entry {name!r} missing issue_description"
+            )
         if (
             not isinstance(target_files, list)
             or not target_files
             or not all(isinstance(value, str) and value for value in target_files)
         ):
-            raise CLIError(EXIT_USAGE, f"smoke catalog {source} entry {name!r} missing target_files")
+            raise CLIError(
+                EXIT_USAGE, f"smoke catalog {source} entry {name!r} missing target_files"
+            )
         cases.append(item)
     return cases
 
@@ -103,9 +110,7 @@ def select_cases(
         name = str(case.get("case", ""))
         batch = str(case.get("batch", "")).lower()
         case_categories = {
-            str(value).lower()
-            for value in case.get("categories", [])
-            if isinstance(value, str)
+            str(value).lower() for value in case.get("categories", []) if isinstance(value, str)
         }
         if selected_names and name not in selected_names:
             continue
