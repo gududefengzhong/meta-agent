@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -42,7 +42,7 @@ def is_http_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-async def load_cases(source: str) -> list[dict[str, object]]:
+async def load_cases(source: str) -> list[SmokeCase]:
     if is_http_url(source):
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
@@ -70,10 +70,10 @@ async def load_cases(source: str) -> list[dict[str, object]]:
     return validate_cases(decoded, source=source)
 
 
-def validate_cases(raw: object, *, source: str) -> list[dict[str, object]]:
+def validate_cases(raw: object, *, source: str) -> list[SmokeCase]:
     if not isinstance(raw, list):
         raise CLIError(EXIT_USAGE, f"smoke catalog {source} must be a JSON array")
-    cases: list[dict[str, object]] = []
+    cases: list[SmokeCase] = []
     for idx, item in enumerate(raw):
         if not isinstance(item, dict):
             raise CLIError(EXIT_USAGE, f"smoke catalog {source} entry #{idx} must be a JSON object")
@@ -105,7 +105,7 @@ def _string_list(value: object) -> list[str]:
 
 
 def select_cases(
-    cases: list[SmokeCase],
+    cases: Sequence[SmokeCase],
     *,
     case_names: list[str],
     batches: list[str],
