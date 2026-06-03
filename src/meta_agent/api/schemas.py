@@ -8,15 +8,17 @@ evolve independently of internal storage layout.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from meta_agent.core.domain.errors import ErrorCategory
 from meta_agent.core.domain.llm_usage import LLMUsageStatus
 from meta_agent.core.domain.task import BudgetPolicy, PermissionMode, TaskState, TaskType
 from meta_agent.core.orchestration.result import TaskError, TaskResultStatus
 from meta_agent.core.ports.llm_usage import UsageGroupBy
+
+_BUG_FIX_GRAPH_ID = "builtin.bug_fix"
 
 
 class SubmitTaskRequest(BaseModel):
@@ -38,6 +40,64 @@ class SubmitTaskRequest(BaseModel):
     # gates by setting ``permission_mode``.
     permission_mode: PermissionMode = PermissionMode.AUTO
     budget_policy: BudgetPolicy = BudgetPolicy.NONE
+    budget_threshold_micros: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_bug_fix_payload(self) -> SubmitTaskRequest:
+        """Enforce a typed payload for the bug-fix product path."""
+
+        if self.task_type is TaskType.BUG_FIX:
+            payload = BugFixInputPayload.model_validate(self.input_payload)
+            self.input_payload = payload.model_dump(mode="json", exclude_none=True)
+            if self.graph_id is not None and self.graph_id != _BUG_FIX_GRAPH_ID:
+                raise ValueError(f"bug_fix tasks may only target graph_id={_BUG_FIX_GRAPH_ID!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_permission_and_budget_policy(self) -> SubmitTaskRequest:
+        """Keep the public REST contract aligned with the product surface."""
+
+        if self.permission_mode not in (
+            PermissionMode.AUTO,
+            PermissionMode.APPROVE_BEFORE_PUSH,
+        ):
+            raise ValueError(
+                "REST task submission supports only permission_mode=auto or approve_before_push"
+            )
+        if self.budget_policy is BudgetPolicy.NONE:
+            if self.budget_threshold_micros is not None:
+                raise ValueError("budget_threshold_micros requires a non-none budget_policy")
+        elif self.budget_threshold_micros is None:
+            raise ValueError(
+                "budget_threshold_micros is required when budget_policy is gate_on_threshold "
+                "or abort_on_threshold"
+            )
+        return self
+
+
+class BugFixInputPayload(BaseModel):
+    """Typed input contract for the API-first bug-fix agent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    issue_description: str = Field(..., min_length=1)
+    repo_url: str = Field(..., min_length=1)
+    base_ref: str | None = Field(default=None, min_length=1)
+    target_files: list[str] = Field(..., min_length=1)
+    verify_suite: Literal[
+        "python_test",
+        "python_lint",
+        "typescript_typecheck",
+        "typescript_test",
+    ] = "python_test"
+    model: str | None = Field(default=None, min_length=1)
+    max_steps: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_target_files(self) -> BugFixInputPayload:
+        if not all(path.strip() for path in self.target_files):
+            raise ValueError("target_files must contain non-empty paths only")
+        return self
 
 
 class TaskResponse(BaseModel):
@@ -53,6 +113,7 @@ class TaskResponse(BaseModel):
     session_id: str | None
     permission_mode: PermissionMode
     budget_policy: BudgetPolicy
+    budget_threshold_micros: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -79,30 +140,6 @@ class AbortRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = Field(default=None, max_length=1_000)
-
-
-class PermissionDecisionRequest(BaseModel):
-    """Body of ``POST /v1/tasks/{task_id}/permissions/{prompt_id}/decide``.
-
-    The client renders a :class:`PermissionPrompt` from the
-    lifecycle / permission stream, asks the user, then POSTs this
-    decision. ``reason`` flows into the agent loop on deny so the
-    model can plan an alternative.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    allow: bool
-    reason: str | None = Field(default=None, max_length=1_000)
-
-
-class PermissionDecisionResponse(BaseModel):
-    """Confirms the decision was accepted and routed to the waiting worker."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    prompt_id: str
-    allow: bool
 
 
 class SessionResponse(BaseModel):
@@ -169,6 +206,34 @@ class TaskResultResponse(BaseModel):
     node_sequence: int
     started_at: datetime
     finished_at: datetime
+
+
+class TaskObservabilitySummaryResponse(BaseModel):
+    """Shape returned by ``GET /v1/tasks/{task_id}/observability``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+    state: TaskState
+    result_status: TaskResultStatus | None
+    verifier_passed: bool | None
+    failure_category: str | None
+    failure_kind: str | None
+    attempts: int | None
+    files_changed: list[str]
+    patch_present: bool
+    llm_calls: int = Field(..., ge=0)
+    llm_failures: int = Field(..., ge=0)
+    total_tokens: int = Field(..., ge=0)
+    total_cost_usd_micros: int = Field(..., ge=0)
+    total_latency_ms: int = Field(..., ge=0)
+    tool_events: int = Field(..., ge=0)
+    tool_failures: int = Field(..., ge=0)
+    human_interventions: int = Field(..., ge=0)
+    budget_outcome: str
+    auto_pr_child_status: str
+    cost_by_step_kind: dict[str, int]
+    models: list[str]
 
 
 # ── Query API responses ──────────────────────────────────────────────────────

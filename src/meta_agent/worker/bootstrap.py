@@ -44,14 +44,12 @@ from meta_agent.core.orchestration import (
 from meta_agent.core.orchestration.graphs import (
     AUTO_PR_GRAPH_ID,
     BUG_FIX_GRAPH_ID,
-    BUG_FIX_V2_GRAPH_ID,
     CODE_REVIEW_GRAPH_ID,
     ECHO_GRAPH_ID,
     GIT_INSPECT_GRAPH_ID,
     SHELL_AGENT_GRAPH_ID,
     build_auto_pr_graph,
     build_bug_fix_graph,
-    build_bug_fix_v2_graph,
     build_code_review_graph,
     build_echo_graph,
     build_git_inspect_graph,
@@ -83,7 +81,6 @@ from meta_agent.infra.git_provider import (
     RateLimitedGitProvider,
 )
 from meta_agent.infra.llm import (
-    BroadcastingLLMClient,
     BudgetEnforcingLLMClient,
     CircuitBreakingLLMClient,
     MeteredLLMClient,
@@ -124,7 +121,6 @@ from meta_agent.infra.ratelimit import (
 )
 from meta_agent.infra.redaction import Redactor
 from meta_agent.infra.secrets import build_secrets_from_env, resolve_secret_env
-from meta_agent.infra.streaming import RedisChunkBroadcaster
 from meta_agent.infra.tools import (
     DockerWorkspaceEditTool,
     DockerWorkspaceFileSystemTool,
@@ -475,14 +471,16 @@ def build_workspace_manager(
 def build_registry(deps: GraphDeps) -> GraphRegistry:
     """Register every built-in graph and materialize against ``deps``.
 
-    ``shell_agent`` is registered only when ``deps`` carries both
-    ``tool_registry`` and ``tool_executor``; callers without a tool
-    stack (legacy unit tests, smoke harnesses) still get a working
-    registry with the L0/L1 graphs.
+    ``bug_fix`` and ``shell_agent`` require the tool stack to be
+    present in ``deps``. Production boot always wires these
+    capabilities, so missing tools are treated as a bootstrap error
+    rather than a fallback mode.
     """
 
+    if deps.tool_registry is None or deps.tool_executor is None:
+        raise ValueError("build_registry requires deps.tool_registry and deps.tool_executor")
+
     registry = GraphRegistry()
-    has_tool_caps = deps.tool_registry is not None and deps.tool_executor is not None
     registry.register(
         ECHO_GRAPH_ID,
         lambda _deps: build_echo_graph(),
@@ -495,12 +493,6 @@ def build_registry(deps: GraphDeps) -> GraphRegistry:
         requires_workspace=True,
     )
     registry.register(
-        BUG_FIX_GRAPH_ID,
-        build_bug_fix_graph,
-        default_for=None if has_tool_caps else TaskType.BUG_FIX,
-        requires_workspace=True,
-    )
-    registry.register(
         CODE_REVIEW_GRAPH_ID,
         build_code_review_graph,
         default_for=TaskType.CODE_REVIEW,
@@ -510,19 +502,18 @@ def build_registry(deps: GraphDeps) -> GraphRegistry:
         build_auto_pr_graph,
         default_for=TaskType.AUTO_PR,
     )
-    if has_tool_caps:
-        registry.register(
-            BUG_FIX_V2_GRAPH_ID,
-            build_bug_fix_v2_graph,
-            default_for=TaskType.BUG_FIX,
-            requires_workspace=True,
-        )
-        registry.register(
-            SHELL_AGENT_GRAPH_ID,
-            build_shell_agent_graph,
-            default_for=TaskType.SYSTEM_SHELL_AGENT,
-            requires_workspace=True,
-        )
+    registry.register(
+        BUG_FIX_GRAPH_ID,
+        build_bug_fix_graph,
+        default_for=TaskType.BUG_FIX,
+        requires_workspace=True,
+    )
+    registry.register(
+        SHELL_AGENT_GRAPH_ID,
+        build_shell_agent_graph,
+        default_for=TaskType.SYSTEM_SHELL_AGENT,
+        requires_workspace=True,
+    )
     registry.materialize(deps)
     return registry
 
@@ -704,7 +695,7 @@ def build_budget_enforcing_llm(
 def build_chain_registry() -> TaskChainRegistry:
     """Register every built-in task-chain policy.
 
-    v1 ships a single edge: a successful ``BUG_FIX`` run that pushes
+    The current product surface ships a single edge: a successful ``BUG_FIX`` run that pushes
     its commit triggers an ``AUTO_PR`` follow-up. The submitter and
     runner only fire the chain when both halves of the hook are
     wired, so leaving the registry empty (or omitting either side in
@@ -806,6 +797,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     outbox_repo = PgOutboxRepository(pool)
     usage_repo = PgLLMUsageRepository(pool)
     trajectory_repo = PgTrajectoryRepository(pool)
+
     inner_llm = OpenRouterClient(settings.openrouter)
     breaker = build_circuit_breaker_from_env(redis_client=redis_client)
     breaking_llm = build_circuit_breaking_llm(inner_llm, breaker, audit_sink=audit_repo)
@@ -835,13 +827,6 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     # task output.
     redactor = Redactor()
     redacting_llm = RedactingLLMClient(routed_llm, redactor=redactor, audit_sink=audit_repo)
-    # Phase δ-1: broadcaster sits **outside** redaction so subscribers
-    # see redacted bytes only — the SSE wire to the client must never
-    # leak secrets the redactor would otherwise scrub. Publish failures
-    # are best-effort (logged, swallowed) so a Redis blip cannot stall
-    # the agent loop.
-    chunk_broadcaster = RedisChunkBroadcaster(redis_client)
-    broadcasting_llm = BroadcastingLLMClient(redacting_llm, chunk_broadcaster)
     permission_gate = RedisPermissionGate(redis_client)
     raw_git_provider = build_git_provider(settings)
     # Mirror the LLM safety stack: breaker innermost (counts real
@@ -897,7 +882,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     await ensure_seeded(prompt_registry)
     registry = build_registry(
         GraphDeps(
-            llm=broadcasting_llm,
+            llm=redacting_llm,
             git_provider=git_provider,
             git_push_token=push_token,
             tool_registry=tool_registry,
@@ -915,9 +900,9 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
     # Phase γ-B-2: webhook fanout sits on every audit emission. The
     # subscription + delivery rows live in Postgres, so the fanout is
     # always wired in production; unit tests construct WorkerLoop
-    # without it. The watched actions list is intentionally narrow at
-    # v1 — only ``task.awaiting_approval`` needs the operator push, the
-    # rest of the audit trail is already queryable via Trajectory API.
+    # without it. The watched actions list is intentionally narrow:
+    # only ``task.awaiting_approval`` needs the operator push, the rest
+    # of the audit trail is already queryable via Trajectory API.
     webhook_subscription_repo = PgWebhookSubscriptionRepository(pool)
     webhook_delivery_repo = PgWebhookDeliveryRepository(pool)
     webhook_fanout = WebhookFanout(
@@ -955,8 +940,7 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
 
     async def _aclose() -> None:
         await git_provider.close()
-        await broadcasting_llm.close()
-        await chunk_broadcaster.close()
+        await redacting_llm.close()
         await permission_gate.close()
         await budget_enforcer.close()
         await rate_limiter.close()
@@ -972,12 +956,11 @@ async def build_worker(settings: WorkerSettings) -> WorkerRuntime:
         resources={
             "pool": pool,
             "redis": redis_client,
-            "llm": broadcasting_llm,
+            "llm": redacting_llm,
             "rate_limiter": rate_limiter,
             "circuit_breaker": breaker,
             "budget_enforcer": budget_enforcer,
             "git_provider": git_provider,
-            "chunk_broadcaster": chunk_broadcaster,
             "permission_gate": permission_gate,
         },
     )

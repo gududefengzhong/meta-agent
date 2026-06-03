@@ -64,7 +64,7 @@ async def test_builtin_seeds_have_stable_hashes() -> None:
     expected = {
         "bug_fix.plan.system": "3f6fde64e2e1de1303ba12c4d9f4dc6a7f4ed79d2c2b03e60aae33f6c0d6cdfd",
         "bug_fix.patch.system": "6cc34e9d28b87d04a36b3b9c0e8de2089e8a6ff8f9d9c4cfae73bc3b2c4ef0d8",
-        "bug_fix_v2.system": "0d8e6d2c2b4d97f8a4b6f1f5e26c97e7ab12c4c3f9d1c3c0d4b6e9a48f1d3b54",
+        "bug_fix.system": "0d8e6d2c2b4d97f8a4b6f1f5e26c97e7ab12c4c3f9d1c3c0d4b6e9a48f1d3b54",
         "code_review.system": "ce8bf7c91b97b40c5cf9af1d2d5e2e7e8e98a7d6cda2db4d3c5f7c2bda1c0bce",
     }
     # We don't lock in the exact hashes — they will be wrong by design.

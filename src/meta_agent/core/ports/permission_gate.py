@@ -5,7 +5,7 @@ The worker (graph node) needs to ask "may I run this tool?" and
 proceed exactly as if the answer had been available locally. The
 API tier is what physically receives the client's HTTP POST.
 
-This port hides that worker↔API split behind a tiny two-method
+This port hides that worker↔API split behind a small rendezvous
 surface:
 
 * :meth:`request` — worker side. Publishes the prompt, waits for the
@@ -24,12 +24,6 @@ Backends
   production default (worker and API are separate processes that
   share a Redis pool).
 
-Why not reuse :class:`ChunkBroadcaster`
-=======================================
-The chunk broadcaster is one-way (worker → client). Permissions
-are two-way: producer waits for a specific consumer's response.
-Conflating them would muddy both interfaces and force the
-broadcaster to grow request-response semantics it doesn't need.
 """
 
 from __future__ import annotations
@@ -90,16 +84,15 @@ class PermissionGate(ABC):
         tenant_id: str,
         task_id: str,
     ) -> AsyncGenerator[PermissionPrompt, None]:
-        """API-side: stream prompts published for ``(tenant_id, task_id)``.
+        """Optional client-side prompt subscription for ``(tenant_id, task_id)``.
 
-        The API's SSE endpoint uses this to surface prompts to the
-        connected client (VS Code / CLI) in real time. Pub/sub
-        semantics: a subscriber receives only prompts published
-        while it is subscribed; prompts before / after are dropped.
+        Pub/sub semantics: a subscriber receives only prompts
+        published while it is subscribed; prompts before / after are
+        dropped.
 
         The returned iterator MUST be closeable via the standard
-        async-generator ``aclose`` protocol so the API can release
-        backend resources when the client disconnects.
+        async-generator ``aclose`` protocol so the caller can release
+        backend resources when the subscription ends.
 
         ``async def`` because the backend MUST register the
         subscriber before returning — a lazy generator could race

@@ -802,12 +802,20 @@ def _result_observability_metadata(result: TaskResult) -> dict[str, object]:
     output = result.output if isinstance(result.output, dict) else {}
     failure = output.get("failure_explanation")
     failure_category = failure.get("category") if isinstance(failure, dict) else None
+    failure_kind = None
+    if isinstance(failure, dict):
+        details = failure.get("details")
+        if isinstance(details, dict):
+            failure_kind = details.get("failure_kind")
     if failure_category is None and result.error is not None:
         details = result.error.details if isinstance(result.error.details, dict) else {}
         failure_category = details.get("failure_category")
+        if failure_kind is None:
+            failure_kind = details.get("failure_kind")
     payload: dict[str, object] = {
         "result_status": result.status,
         "failure_category": failure_category,
+        "failure_kind": failure_kind,
         "node_sequence": result.node_sequence,
     }
     if result.error is not None:

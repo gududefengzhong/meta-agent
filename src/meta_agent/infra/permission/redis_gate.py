@@ -9,16 +9,16 @@ Wire format
   pub/sub has no replay; a decision delivered before the subscribe
   call lands would be lost.
 * :meth:`request` also publishes the prompt itself on
-  ``permission:prompt:{tenant_id}:{task_id}`` so an SSE consumer
-  can surface it to the connected client. The prompt channel is
+  ``permission:prompt:{tenant_id}:{task_id}`` so an optional client
+  subscriber can surface it. The prompt channel is
   fire-and-forget — the gate itself does not subscribe to it; that
-  is the API tier's job.
+  is the caller's job.
 
 Connection lifecycle
 ====================
 The gate does not own the :class:`Redis` client. Construct it
-externally so the queue / rate-limiter / breaker / broadcaster /
-gate all share one connection pool.
+externally so the queue / rate-limiter / breaker / gate all share
+one connection pool.
 """
 
 from __future__ import annotations

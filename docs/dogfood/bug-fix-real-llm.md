@@ -1,12 +1,12 @@
-# Dogfood: `bug_fix_v2` against a real LLM
+# Dogfood: `bug_fix` against a real LLM
 
-> Goal: take `bug_fix_v2` (our agent loop) out of unit-test land where every
+> Goal: take `bug_fix` (our agent loop) out of unit-test land where every
 > LLM response is a hand-scripted `FakeLLMClient`, and point it at a real
 > OpenRouter model on a real bug we constructed. Surface concrete signals
 > (and concrete gaps) about agent quality and harness completeness.
 
 The integration test lives at
-[`tests/integration/test_bug_fix_v2_real_llm.py`](../../tests/integration/test_bug_fix_v2_real_llm.py)
+[`tests/integration/test_bug_fix_real_llm.py`](../../tests/integration/test_bug_fix_real_llm.py)
 (marker: `real_llm`). Skipped automatically when `OPENROUTER_API_KEY`
 is not set, so unit-CI does not burn tokens.
 
@@ -52,8 +52,8 @@ field rather than treating the response as transiently empty.
 
 ## Run A — default verifier (`python_lint`)
 
-The default `bug_fix_v2` verify suite is `python_lint`
-([bug_fix_v2.py:62](../../src/meta_agent/core/orchestration/graphs/bug_fix_v2.py#L62)).
+The default `bug_fix` verify suite is `python_lint`
+([bug_fix.py:62](../../src/meta_agent/core/orchestration/graphs/bug_fix.py#L62)).
 Run the test with no `verify_suite` override.
 
 | metric | value |
@@ -117,7 +117,7 @@ Current baseline after fixing the verifier/runtime/metering gaps.
 
 | metric | value |
 |---|---|
-| Command | `pytest tests/integration/test_bug_fix_v2_real_llm.py -m "integration and real_llm" -v -s` |
+| Command | `pytest tests/integration/test_bug_fix_real_llm.py -m "integration and real_llm" -v -s` |
 | Model requested | `deepseek/deepseek-v4-pro` |
 | Model served | `deepseek/deepseek-v4-pro-20260423` |
 | Task terminal state | `SUCCEEDED` |
@@ -147,7 +147,7 @@ rerunning the real-LLM harness on 2026-05-27 Asia/Shanghai.
 
 | metric | value |
 |---|---|
-| Command | `OPENROUTER_MODEL=deepseek/deepseek-v4-pro pytest tests/integration/test_bug_fix_v2_real_llm.py -m "integration and real_llm" -v -s` |
+| Command | `OPENROUTER_MODEL=deepseek/deepseek-v4-pro pytest tests/integration/test_bug_fix_real_llm.py -m "integration and real_llm" -v -s` |
 | Model requested | `deepseek/deepseek-v4-pro` |
 | Model served | `deepseek/deepseek-v4-pro-20260423` |
 | Task id | `real-llm-05042645` |
@@ -195,11 +195,11 @@ debug story across:
 These are concrete and would not have come out of unit tests.
 
 ### F1. Default verifier is too weak for the "bug fix" framing
-**Status: fixed.** `bug_fix_v2` now defaults to `python_test`, so bug-fix
+**Status: fixed.** `bug_fix` now defaults to `python_test`, so bug-fix
 success is gated by pytest rather than lint alone. Callers can still
 override with `"verify_suite": "python_lint"` for lint-only smoke checks.
 
-Original finding: `bug_fix_v2` defaulted to `python_lint`, so a
+Original finding: `bug_fix` defaulted to `python_lint`, so a
 lint-clean change that didn't fix the failing test could still return
 `verifier_passed=True`. For a product called "Bug Fix CLI Agent", the
 natural default is to run the failing tests and accept only on green.
@@ -246,7 +246,7 @@ counts, but does not yet persist provider-specific reasoning-token and
 cache-token subfields separately.
 
 ### F5. Agent's actual patch isn't retained for inspection
-**Status: fixed.** `bug_fix_v2` now stores the pre-commit unified diff in
+**Status: fixed.** `bug_fix` now stores the pre-commit unified diff in
 `result.output["patch"]`, alongside `diff_stat` and `files_changed`.
 
 Original finding: after `workspace.cleaned`, the agent's branch / commit
@@ -296,7 +296,7 @@ docker build -t meta-agent:local .
 export OPENROUTER_API_KEY=sk-or-...
 
 # Run
-pytest tests/integration/test_bug_fix_v2_real_llm.py \
+pytest tests/integration/test_bug_fix_real_llm.py \
        -m "integration and real_llm" -v -s
 ```
 

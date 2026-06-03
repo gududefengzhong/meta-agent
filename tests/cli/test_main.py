@@ -7,8 +7,6 @@ argparse → dispatch → output → exit-code chain.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 import httpx
 import pytest
 
@@ -21,11 +19,6 @@ from meta_agent.cli.client import (
     TaskClient,
 )
 from meta_agent.cli.commands import _build_payload
-
-
-def _sse(events: Iterable[str]) -> bytes:
-    return ("".join(f"data: {e}\n\n" for e in events)).encode("utf-8")
-
 
 _TASK_BODY = {
     "task_id": "t-1",
@@ -131,49 +124,37 @@ def test_main_submit_prints_task_id_on_stdout(
     assert out.out.strip() == "t-1"
 
 
-def test_main_run_streams_chunks_to_stdout_and_exits_0_on_success(
+def test_main_run_polls_task_state_and_exits_0_on_success(
     env: None,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    states = iter(["pending", "running", "succeeded"])
+
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/v1/tasks":
             return httpx.Response(201, json=_TASK_BODY)
-        if req.url.path == "/v1/tasks/t-1/llm-stream":
+        if req.url.path == "/v1/tasks/t-1":
             return httpx.Response(
                 200,
-                content=_sse(
-                    [
-                        '{"content_delta":"he"}',
-                        '{"content_delta":"llo"}',
-                        '{"finish_reason":"stop"}',
-                        "[DONE]",
-                    ]
-                ),
-                headers={"content-type": "text/event-stream"},
-            )
-        if req.url.path == "/v1/tasks/t-1/events":
-            return httpx.Response(
-                200,
-                content=_sse(
-                    [
-                        '{"event_id":"e-1","action":"task.started"}',
-                        '{"event_id":"e-2","action":"task.terminal","state":"succeeded"}',
-                    ]
-                ),
-                headers={"content-type": "text/event-stream"},
+                json={**_TASK_BODY, "state": next(states)},
             )
         return httpx.Response(404, text="unexpected " + req.url.path)
 
     _patch_task_client(monkeypatch, handler)
+    from meta_agent.cli import commands as cmd_module
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(cmd_module, "_sleep", no_sleep)
     code = main(["run", "fix the typo"])
     assert code == EXIT_OK
     out = capsys.readouterr()
-    # LLM chunks landed on stdout
-    assert "hello" in out.out
-    # Lifecycle events landed on stderr
-    assert "task.started" in out.err
-    assert "task.terminal" in out.err
+    assert out.out == ""
+    assert "[state=pending]" in out.err
+    assert "[state=running]" in out.err
+    assert "[state=succeeded]" in out.err
 
 
 def test_main_run_returns_task_failed_when_terminal_state_is_failed(
@@ -181,24 +162,25 @@ def test_main_run_returns_task_failed_when_terminal_state_is_failed(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    states = iter(["running", "failed"])
+
     def handler(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/v1/tasks":
             return httpx.Response(201, json=_TASK_BODY)
-        if req.url.path == "/v1/tasks/t-1/llm-stream":
+        if req.url.path == "/v1/tasks/t-1":
             return httpx.Response(
                 200,
-                content=_sse(['{"content_delta":"oops"}', "[DONE]"]),
-                headers={"content-type": "text/event-stream"},
-            )
-        if req.url.path == "/v1/tasks/t-1/events":
-            return httpx.Response(
-                200,
-                content=_sse(['{"event_id":"e-1","action":"task.terminal","state":"failed"}']),
-                headers={"content-type": "text/event-stream"},
+                json={**_TASK_BODY, "state": next(states)},
             )
         return httpx.Response(404)
 
     _patch_task_client(monkeypatch, handler)
+    from meta_agent.cli import commands as cmd_module
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(cmd_module, "_sleep", no_sleep)
     code = main(["run", "do the broken thing"])
     assert code == EXIT_TASK_FAILED
 
@@ -256,7 +238,7 @@ def test_main_trace_prints_trajectory_report(
                             "status": "ok",
                             "error_category": None,
                             "error_message": None,
-                            "prompt_id": "bug_fix_v2.system",
+                            "prompt_id": "bug_fix.system",
                             "prompt_version": 1,
                             "step_kind": "plan",
                         },

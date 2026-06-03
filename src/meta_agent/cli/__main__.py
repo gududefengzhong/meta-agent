@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_global_args(common, suppress_default=True)
     parser = argparse.ArgumentParser(
         prog="meta-agent",
-        description="meta-agent code agent CLI (v0)",
+        description="meta-agent bug-fix agent CLI helper",
     )
     _add_global_args(parser)
 
@@ -45,21 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_task_args(p_submit)
     p_submit.set_defaults(func=cmd_submit)
 
-    p_tail = sub.add_parser("tail", help="Stream chunks + events for a task", parents=[common])
+    p_tail = sub.add_parser("tail", help="Poll task state until terminal", parents=[common])
     p_tail.add_argument("task_id")
     p_tail.add_argument(
         "--quiet-events",
         action="store_true",
-        help="Suppress lifecycle event lines on stderr (chunks still print)",
-    )
-    p_tail.add_argument(
-        "--no-interactive",
-        action="store_true",
-        help=(
-            "Skip the interactive permission prompt handler. Inline "
-            "permission prompts emitted by the worker will be ignored "
-            "(and the agent will wait until its 120s timeout)."
-        ),
+        help="Suppress lifecycle event lines on stderr",
     )
     p_tail.set_defaults(func=cmd_tail)
 
@@ -87,17 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_export_langfuse.set_defaults(func=cmd_export_langfuse)
 
-    p_run = sub.add_parser("run", help="Submit a task and stream until terminal", parents=[common])
+    p_run = sub.add_parser("run", help="Submit a task and poll until terminal", parents=[common])
     _add_task_args(p_run)
     p_run.add_argument(
         "--quiet-events",
         action="store_true",
         help="Suppress lifecycle event lines on stderr",
-    )
-    p_run.add_argument(
-        "--no-interactive",
-        action="store_true",
-        help=("Skip the interactive permission prompt handler (same semantics as on ``tail``)."),
     )
     p_run.set_defaults(func=cmd_run)
 

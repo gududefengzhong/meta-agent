@@ -1,6 +1,6 @@
-"""Dogfood-style integration test: ``bug_fix_v2`` against a real LLM.
+"""Dogfood-style integration test: ``bug_fix`` against a real LLM.
 
-Sibling of :mod:`test_bug_fix_v2_docker_smoke` but swaps
+Sibling of :mod:`test_bug_fix_docker_smoke` but swaps
 :class:`FakeLLMClient` for a real :class:`OpenRouterClient`. Used to
 **evaluate** the agent on a non-trivial bug we constructed — does the
 agent actually read the failing test, understand the contract, and
@@ -56,7 +56,7 @@ from redis.asyncio import Redis
 from meta_agent.core.domain.outbox import OutboxEvent
 from meta_agent.core.domain.task import Task, TaskState, TaskType
 from meta_agent.core.orchestration import GraphRegistry
-from meta_agent.core.orchestration.graphs import BUG_FIX_V2_GRAPH_ID
+from meta_agent.core.orchestration.graphs import BUG_FIX_GRAPH_ID
 from meta_agent.core.ports.llm import LLMClient
 from meta_agent.infra.llm.config import OpenRouterConfig
 from meta_agent.infra.llm.metered import MeteredLLMClient
@@ -247,7 +247,7 @@ def _registry_for_docker_workspace(
         test=DockerWorkspaceTestTool(workspace_root=workspace_root),
     )
     # fake_deps wires in an InMemoryPromptRegistry seeded with
-    # BUILTIN_PROMPT_SEEDS — bug_fix_v2 hard-requires deps.prompt_registry,
+    # BUILTIN_PROMPT_SEEDS — bug_fix hard-requires deps.prompt_registry,
     # so we can't pass a raw GraphDeps here.
     registry = build_registry(
         fake_deps(
@@ -257,7 +257,7 @@ def _registry_for_docker_workspace(
             audit_sink=audit_repo,
         )
     )
-    assert registry.resolve(TaskType.BUG_FIX).graph_id == BUG_FIX_V2_GRAPH_ID
+    assert registry.resolve(TaskType.BUG_FIX).graph_id == BUG_FIX_GRAPH_ID
     return registry
 
 
@@ -286,7 +286,7 @@ async def _run_bug_fix_task(
 ) -> tuple[Task, OutboxEvent, PgTaskRepository, PgOutboxRepository]:
     """Insert a task, enqueue via outbox, dispatch to redis, run worker once.
 
-    Mirrors the pattern in :mod:`test_bug_fix_v2_docker_smoke` but with a
+    Mirrors the pattern in :mod:`test_bug_fix_docker_smoke` but with a
     longer block_ms so the real LLM has time to think; ``run_once`` consumes
     one task at most so the test stays single-shot.
     """
@@ -358,7 +358,7 @@ async def _run_bug_fix_task(
 
 
 @pytest.mark.asyncio
-async def test_bug_fix_v2_real_llm_discount_validation_bug(
+async def test_bug_fix_real_llm_discount_validation_bug(
     db_pool: DatabasePool,
     redis_client: Redis,
     tmp_path: Path,
@@ -471,7 +471,7 @@ async def test_bug_fix_v2_real_llm_discount_validation_bug(
         f"unexpected terminal state: {fetched.state}"
     )
     assert result is not None, "task produced no result row"
-    assert result.graph_id == BUG_FIX_V2_GRAPH_ID
+    assert result.graph_id == BUG_FIX_GRAPH_ID
     assert usage_rows, "real LLM call produced no llm_usage_logs rows"
 
     # ---- Agent quality observations (printed, not asserted) ----
@@ -530,7 +530,7 @@ async def test_bug_fix_v2_real_llm_discount_validation_bug(
 
     # Print everything for the human reading the test log.
     print("\n" + "=" * 72)
-    print("  Real-LLM bug_fix_v2 dogfood result")
+    print("  Real-LLM bug_fix dogfood result")
     print("=" * 72)
     print(f"  Model:              {_DEFAULT_MODEL}")
     print(f"  Task state:         {fetched.state}")

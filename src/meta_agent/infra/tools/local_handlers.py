@@ -648,6 +648,7 @@ def _test_run_handler(test: TestTool) -> ToolHandler:
             metadata={
                 "suite": outcome.suite,
                 "exit_code": str(outcome.exit_code),
+                "timed_out": "true" if outcome.timed_out else "false",
             },
         )
 

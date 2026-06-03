@@ -148,7 +148,7 @@ def _usage(at: datetime, record_id: str = "rec-1") -> TrajectoryUsageItem:
         cost_usd_micros=1234,
         latency_ms=420,
         status="ok",
-        prompt_id="bug_fix_v2.system",
+        prompt_id="bug_fix.system",
         prompt_version=1,
         prompt_excerpt="SYSTEM: fix bug\n\nUSER: hi",
         step_kind="plan",
@@ -257,7 +257,7 @@ async def test_usage_item_carries_prompt_provenance_and_step_kind(
     body = response.json()
     item = body["items"][0]
     assert item["kind"] == "usage"
-    assert item["prompt_id"] == "bug_fix_v2.system"
+    assert item["prompt_id"] == "bug_fix.system"
     assert item["prompt_version"] == 1
     assert item["step_kind"] == "plan"
     assert item["cost_usd_micros"] == 1234

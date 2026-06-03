@@ -108,9 +108,9 @@ BUILTIN_PROMPT_SEEDS: tuple[PromptSeed, ...] = (
         content=_BUG_FIX_PATCH_SYSTEM,
     ),
     PromptSeed(
-        prompt_id="bug_fix_v2.system",
+        prompt_id="bug_fix.system",
         description=(
-            "System framing for the bug_fix_v2 graph (tool-use loop). Placeholder: $allow_list."
+            "System framing for the bug_fix graph (tool-use loop). Placeholder: $allow_list."
         ),
         content=_BUG_FIX_V2_SYSTEM,
     ),

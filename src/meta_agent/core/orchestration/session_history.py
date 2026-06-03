@@ -12,7 +12,7 @@ twice:
 
 * ``user`` content comes from each prior task's
   ``input_payload["user_prompt"]`` (the same key ``shell_agent``
-  and ``bug_fix_v2`` already read)
+  and ``bug_fix`` already read)
 * ``assistant`` content comes from each prior task's
   :class:`TaskResult.output["assistant_message"]` (the same key
   the graphs already write)

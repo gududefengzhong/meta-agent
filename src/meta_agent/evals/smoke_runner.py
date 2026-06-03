@@ -8,7 +8,7 @@ import json
 import sys
 
 from meta_agent.cli.client import EXIT_OK, CLIConfig, CLIError, TaskClient
-from meta_agent.cli.commands import _prompt_user_for_decision, _tail_until_terminal
+from meta_agent.cli.commands import _tail_until_terminal
 from meta_agent.evals.smoke_catalog import (
     build_payload,
     default_catalog_source,
@@ -110,11 +110,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Suppress lifecycle event lines on stderr when --run is used",
     )
     parser.add_argument(
-        "--no-interactive",
-        action="store_true",
-        help="Skip interactive permission prompts when --run is used",
-    )
-    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -172,14 +167,11 @@ async def run_smoke(args: argparse.Namespace) -> int:
             print(task_id)
             return EXIT_OK
         print(f"task: {task_id}", file=sys.stderr)
-        decider = None if args.no_interactive else _prompt_user_for_decision
         return await _tail_until_terminal(
             client,
             task_id,
-            chunks_to=sys.stdout,
             events_to=sys.stderr,
             show_events=not args.quiet_events,
-            decider=decider,
         )
 
 

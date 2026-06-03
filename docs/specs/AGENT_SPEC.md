@@ -1,4 +1,4 @@
-# AGENT_SPEC.md - Bug Fix CLI Agent 产品规格
+# AGENT_SPEC.md - Bug Fix Agent 产品规格
 
 ## 文档定位
 本文件是产品规格的事实来源，定义目标、能力边界、非功能要求、交付形态和阶段优先级。
@@ -6,15 +6,12 @@
 本文件不定义具体协作流程；开发协作规则见仓库根目录 `CLAUDE.md`。
 
 ## 产品目标
-构建一个**生产姿态的 Bug Fix CLI Agent**：开发者通过 CLI 提交 bug 描述 + 仓库引用，agent 用 plan-act-observe 循环读代码、改文件、跑 verifier，最终产出 PR-ready patch。
-
-**架构可迁移性**：同样的 graph + tool registry shape 可承载 Test Generation Agent / CI Failure Triage Agent / Workflow Automation Agents 等同类自动化场景——交换 Tool 集合 + 调整 prompt，状态机引擎和 production scaffolding 不变。
+构建一个**生产姿态的 Bug Fix Agent**：调用方通过 REST API 提交 bug 描述 + 仓库引用，agent 用 plan-act-observe 循环读代码、改文件、跑 verifier，最终产出 PR-ready patch。
 
 设计上贯彻多租户隔离、计费、审计、模型路由、可观测和成本治理；实现上以"production-shape reference 实现"为目标——证明这套架构能在企业部署所需的工程姿态下落地，**不以"已部署 SaaS"为前提**。
 
 ## 目标用户
-- 需要 bug fix / 代码修改自动化的工程团队（产品本身）
-- 需要把同形态 Agent 引擎扩展到 Testing / CI Triage / Workflow Automation 等场景的平台团队（架构可迁移）
+- 需要 bug fix / 代码修改自动化的工程团队
 
 ## 优先级分层
 
@@ -27,9 +24,12 @@
 - 成本可见性：每次 LLM 调用和每个任务的 token 与费用必须可记录、可汇总
 
 ### L1 - 核心产品价值（已落地）
-1. **Bug Fix**：`builtin.bug_fix` / `bug_fix_v2` graph（plan/patch/verify/push/finalize），在 per-task git worktree 内修改文件、提交并可选 push；verify 失败时支持有限 replan；多语言 verifier（Python ruff+pytest / TypeScript tsc+vitest）；docker-backed integration smoke 双语跑通。
-2. **Code Review**：`builtin.code_review` graph（prepare/review/finalize），pure-LLM，Pydantic schema 严格校验输出（verdict / findings / confidence）；docker-compose smoke 已验证。
-3. **Auto PR**：`builtin.auto_pr` graph（prepare/publish/finalize）+ `GitProvider.open_or_reuse_pr` Port；FakeGitProvider 与 GitHubGitProvider 两条装配路径；`BUG_FIX → AUTO_PR` follow-up chain 已打通。
+1. **Bug Fix**：`bug_fix` graph（plan/patch/verify/push/finalize），在 per-task git worktree 内修改文件、提交并可选 push；verify 失败时支持有限 replan；多语言 verifier（Python ruff+pytest / TypeScript tsc+vitest）；docker-backed integration smoke 双语跑通。
+2. **Auto PR**：`builtin.auto_pr` graph（prepare/publish/finalize）+ `GitProvider.open_or_reuse_pr` Port；FakeGitProvider 与 GitHubGitProvider 两条装配路径；`BUG_FIX → AUTO_PR` follow-up chain 已打通。它是可选发布步骤，不反向决定父 `bug_fix` 任务是否成功。
+
+说明：
+- `code_review` 等其它 graph 仍存在于仓库中，但不属于当前主产品叙事
+- README、dogfood baseline、面试叙事统一围绕 `bug_fix` 主链路
 
 原则：
 - 优先把单条主链路打通，不铺大而全的平台外壳
@@ -46,9 +46,9 @@
 ### L3 - 评测与扩展能力
 - 离线 / 在线评估体系（audit_events + llm_usage_logs + task_checkpoints + trajectory API 已落地数据采集层；5-case repo-local real-LLM eval baseline 已落地；终态 task 自动 best-effort 导出到 Langfuse，CLI 仍可按需重导出）
 - 多模型路由实验（β+ `LLMRouter` 已落地按 `step_kind` 路由）
-- CLI v0 已落地（主交付形态），包含 `submit` / `tail` / `run` / `trace`
+- CLI v0 已落地（开发辅助形态），包含 `submit` / `tail` / `run` / `trace`
 
-原则：评测和多端形态是扩张能力，不应替代核心闭环。
+原则：评测和开发辅助能力不应替代核心闭环。
 
 ## 当前实现快照（2026-05-27）
 
@@ -71,11 +71,6 @@
 - 输出：可审查的代码修改、验证结果、必要时的修复说明
 - 要求：可回放、可审计、可人工接管
 
-### Code Review
-- 输入：代码 diff、PR 上下文、规则集
-- 输出：结构化审查结论、风险点、建议动作
-- 要求：优先发现行为回归、风险和缺失验证，不生成泛泛总结
-
 ### Auto PR
 - 输入：任务目标、代码变更、验证结果
 - 输出：规范化 PR 标题、描述、变更摘要、验证摘要
@@ -96,7 +91,7 @@
 ### 计费与成本治理
 - 记录每次 LLM 调用的模型、token、费用、租户归属、step_kind
 - 任务级和租户级成本聚合
-- 任务级预算硬上限（已落地 BudgetPolicy gate / abort）
+- 任务级预算硬上限（已落地 `BudgetPolicy` + `budget_threshold_micros` 显式契约）
 
 ### 可靠性与性能
 - 限流：Redis 令牌桶 + `RateLimiter` Port，覆盖 tenant × model × tool
@@ -110,7 +105,7 @@
 - 当前不依赖 Langfuse 作为事实来源；Langfuse 只作为可插拔分析层，worker 终态自动导出 + CLI 手动补导共同覆盖可视化分析
 
 ### 人机协同
-- 高风险动作支持人工确认（PermissionMode = `approve_each_tool` / `plan` / `approve_before_push`）
+- 高风险动作支持人工确认（当前 REST 主产品面仅承诺 `PermissionMode = auto | approve_before_push`）
 - 系统显式表达当前执行模式，不隐藏自动化边界
 
 ## 架构原则
@@ -141,27 +136,25 @@
 
 ## 交付形态
 
-客户端形态按优先级：
-
-1. **CLI**（主交付，v0 已落地）：`python -m meta_agent.cli {submit,tail,run}`；streaming 输出 + 退出码标准；适合 power user / CI 集成 / 远程会话
-2. **独立服务（REST + SSE）**（已落地）：API 接入与异步任务管理；CLI 在其上工作
+1. **独立服务（REST API）**（主交付，已落地）：API 接入与异步任务管理；这是当前对外产品接口
+2. **CLI**（开发辅助，v0 已落地）：`python -m meta_agent.cli {submit,tail,run}`；适合本地调试 / smoke / 开发者自测
 
 ### LLM 自带（BYO key）
 
-- 客户端选择 LLM 提供方 + 自己的 key（设计就绪）
-- 服务端只做 LLM 路由、redaction、计量、缓存、限流，不持有客户的 LLM 凭据
+- 部署方选择 LLM 提供方 + 自己的 key
+- 服务端负责 LLM 路由、redaction、计量、缓存、限流，并持有部署环境里的 provider 凭据
 - 默认路由按 β+ 的 `step_kind` → 中国系开源模型（DeepSeek / Qwen / GLM）；客户可整体或按 step_kind 覆盖
 
 ### 设计原则
 - CLI / Server 都必须能够脱离任一具体 LLM 提供方运行
-- 凡进入用户日常工作流的能力必须支持 streaming responses + inline permission protocol
+- 主产品接口保持简单：提交任务、查询状态、读取结果、复盘轨迹
 
 ## 部署
 
 ### 本地开发 / PoC
 - `docker compose up --build`：拉起 postgres + redis + 一次性 alembic 迁移 + api(:8000) + worker
 - `.env` 提供 `OPENROUTER_API_KEY` + `META_AGENT_API_KEYS=<token>:<tenant>:<principal>`
-- 客户端通过 CLI 接入
+- 调用方通过 REST API 接入；CLI 仅作本地辅助
 
 ### 生产部署（设计就绪，未实现）
 - 多副本 API + Worker；Postgres 高可用；Redis 高可用
@@ -201,13 +194,13 @@
 - 工具层 Ports：`FileSystemTool`（read / list / grep）、`EditTool`（write / patch apply）、`ShellTool`（白名单 + 超时 + 输出截断）、`TestTool`（多语言 dispatch）
 - 通用 `shell_agent` graph：plan → tool_call → observe → loop，带 `max_steps` 与 `max_total_tokens` 上限
 - 容器化 `WorkspaceManager`：Docker 实现
-- `bug_fix_v2` 切换到 `shell_agent`，保留 replan 语义
+- `bug_fix` 通过 `shell_agent` 完成工具循环，保留 replan 语义
 - 多语言 verifier：Python（ruff + pytest）+ TypeScript（tsc + vitest）
 
 退出清单：
 - `shell_agent` 支持 `plan → tool_call → observe → loop`，覆盖 `max_steps` / `max_total_tokens` / 错误回灌
 - `ToolRegistry` / `ToolExecutor` 可执行：`fs_read` / `fs_list_dir` / `fs_grep` / `edit_write` / `edit_patch_apply` / `shell_run` / `test_run`
-- `bug_fix_v2` 通过 `test_run` 完成 deterministic verify，支持 Python + TypeScript
+- `bug_fix` 通过 `test_run` 完成 deterministic verify，支持 Python + TypeScript
 - docker-backed integration smoke：Python repo + TypeScript repo 均跑通
 
 ### Phase β+ — Agent 能力深度补全
@@ -237,18 +230,19 @@
 
 等待状态刻意 ephemeral：进入 gate 时 worker 释放任务、container 关停、worktree 留在磁盘上等待续跑。这套设计与 Claude Code 客户端等待用户回复的成本量级一致。
 
-`Task.permission_mode` 与 `Task.budget_policy` 是两个独立组合的字段，不是包含关系。
+`Task.permission_mode` 与 `Task.budget_policy` 是两个独立组合的字段，不是包含关系。对外 REST 合约只暴露当前产品真正支持的子集。
 
 关键交付项：
 - **Checkpoint 恢复**：worker 启动扫 `RUNNING` 任务，从 `task_checkpoints` 续跑；跨实例迁移不丢状态
-- **PermissionMode**：`auto` / `approve_before_push` / `approve_each_tool` / `plan`
-- **BudgetPolicy**：`none` / `gate_on_threshold` / `abort_on_threshold`；与 PermissionMode 正交
+- **PermissionMode（公共 REST 合约）**：`auto` / `approve_before_push`
+- **PermissionMode（内部保留）**：`approve_each_tool` / `plan` 仍存在于 runtime，但不作为当前 bugfix 产品面的一部分
+- **BudgetPolicy**：`none` / `gate_on_threshold` / `abort_on_threshold`；与 PermissionMode 正交。`gate_on_threshold` / `abort_on_threshold` 必须显式提供 `budget_threshold_micros`
 - **`human_gate` 节点 + `AWAITING_APPROVAL` 状态**：graph 内置节点
 - **Approve / Reject API**：`POST /v1/tasks/{id}/approve`、`POST /v1/tasks/{id}/abort`
 - **结构化反馈通道**：approve 携带的 `feedback` 注入下一轮 plan
 - **Trajectory 查询 API**：`GET /v1/tasks/{id}/trajectory` 按时间轴合并 audit + checkpoints + usage
 - **Outbound webhook consumer**：HTTP POST + HMAC 签名 + 退避重试 + dedupe + 死信
-- **Per-task 成本视图 + budget gate**：cost breakdown by step_kind & model
+- **Per-task 成本视图 + budget gate**：cost breakdown by step_kind & model；预算门看的是单个 task 的累计花费，不是单次调用，也不是时间窗口
 - **Prompt redaction layer**：LLM 调用前后扫描 secret / PII
 - **超长尾 sweeper**：扫 `AWAITING_APPROVAL` > 30 天 → `EXPIRED` + webhook 通知
 
@@ -264,17 +258,16 @@
 ### Phase δ-1 — 日常体验客户端
 【状态】**已完成**。
 
-【目标】把 code agent 从"server 跑得通"升级为"开发者每天能用"。
+【目标】把 bug fix agent 从"server 跑得通"升级为"开发者每天能用"。
 
 关键交付项：
-- **Streaming responses**：LLM token + tool 输出按流推给客户端。`LLMClient.stream()` 端到端：OpenRouter SSE → 6 个 decorator 透传 → Redis pub/sub broadcaster → `GET /v1/tasks/{id}/llm-stream` SSE → CLI 实时打印
-- **Inline permission protocol**：`PermissionGate` Port + `InMemoryPermissionGate` / `RedisPermissionGate`。worker 端 `gate.request()` 阻塞 120s；客户端从 `/permissions/stream` 收 prompt → 渲染 → `POST /decide`。和 γ-A 的 `AWAITING_APPROVAL` 共存
+- **Inline permission protocol**：`PermissionGate` Port + `InMemoryPermissionGate` / `RedisPermissionGate`。worker 端 `gate.request()` 阻塞 120s；客户端接 prompt 后调用 `POST /decide`。和 γ-A 的 `AWAITING_APPROVAL` 共存
 - **Session 模型**：`POST /v1/tasks` 自动 upsert session；worker 加载同 session 历史 task 的 (user_prompt, assistant_message) 注入下一轮 graph state
-- **CLI v0**：`python -m meta_agent.cli {submit|tail|run}`；env-driven config；exit-code taxonomy；stdout = LLM 输出，stderr = 控制流；`--no-interactive` 绕过 prompt 处理；支持 streaming + inline approval
+- **CLI v0**：`python -m meta_agent.cli {submit|tail|run}`；env-driven config；exit-code taxonomy；`--no-interactive` 绕过 prompt 处理；支持本地调试与 inline approval
 - **Plan mode**：`PermissionMode.PLAN` —— shell_agent 在 `tool_call` 节点对整个 planning step 只发 1 个 gate prompt；客户端一次 approve 整批执行，deny 则全数 skip 并把理由喂回 model 重规划
 
 退出条件：
-- ✅ CLI 在终端内显示 streaming + 接受 inline prompt（三档 permission mode 全覆盖）
+- ✅ CLI 能提交 / 跟踪任务，并在需要时接住 inline permission prompt（三档 permission mode 全覆盖）
 
 ### 节奏说明
 - 单段建议 2-3 周；单段内拆 3-5 个独立 PR

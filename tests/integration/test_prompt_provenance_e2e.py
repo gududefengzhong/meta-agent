@@ -3,7 +3,7 @@
 Verifies the full Phase β+ PR 2 chain:
 
 1. ``PgPromptRegistry`` is seeded via :func:`ensure_seeded`.
-2. A graph instance fetches the ``bug_fix_v2.system`` prompt from
+2. A graph instance fetches the ``bug_fix.system`` prompt from
    the registry at plan time.
 3. The outgoing :class:`LLMRequest` carries
    ``prompt_id`` + ``prompt_version``.
@@ -11,7 +11,7 @@ Verifies the full Phase β+ PR 2 chain:
    ``llm_usage_logs`` row.
 
 Kept deliberately narrow: no worker dispatch, no workspace
-provisioning. Those are exercised by the bug_fix_v2 docker smokes;
+provisioning. Those are exercised by the bug_fix docker smokes;
 here we want a fast assertion that prompt provenance survives the
 metering hop.
 """
@@ -44,7 +44,7 @@ async def test_registered_prompt_id_lands_on_llm_usage_logs(db_pool: DatabasePoo
     prompt_registry = PgPromptRegistry(db_pool)
     materialised = await ensure_seeded(prompt_registry)
     asset: PromptAsset | None = next(
-        (a for a in materialised if a.prompt_id == "bug_fix_v2.system"), None
+        (a for a in materialised if a.prompt_id == "bug_fix.system"), None
     )
     assert asset is not None
 

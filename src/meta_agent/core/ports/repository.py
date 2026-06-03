@@ -298,9 +298,8 @@ class AuditRepository(AuditSink):
 
         ``after`` is the ``(occurred_at, event_id)`` of the last event
         the caller saw; passing ``None`` starts from the beginning of
-        the task. Events are returned in ascending order so an SSE
-        client can stream them in causal order. Powers the γ-D
-        ``GET /v1/tasks/{id}/events`` endpoint.
+        the task. Events are returned in ascending order so callers
+        can replay them in causal order.
         """
 
     @abstractmethod
