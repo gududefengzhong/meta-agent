@@ -44,7 +44,6 @@ from meta_agent.core.domain.permission import PermissionDecision, PermissionProm
 from meta_agent.core.orchestration.deps import GraphDeps
 from meta_agent.core.orchestration.failure_explain import failure_explanation
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
-from meta_agent.core.orchestration.llm_streaming import aggregate_stream_to_response
 from meta_agent.core.orchestration.state import END, TaskRunState
 from meta_agent.core.orchestration.step_kinds import STEP_PLAN
 from meta_agent.core.ports.audit_sink import AuditSink
@@ -675,7 +674,7 @@ def build_shell_agent_graph(
           text, and we pass through any caller-supplied
           ``system_prompt_id`` / ``system_prompt_version`` as
           provenance. This is the path used by graphs that compose
-          shell_agent (e.g. bug_fix_v2) and render templates themselves.
+          shell_agent (e.g. bug_fix) and render templates themselves.
         * Otherwise, if the builder was wired with
           ``default_system_prompt_id``, we fetch from the registry and
           return the asset's content and full provenance.
@@ -736,7 +735,7 @@ def build_shell_agent_graph(
             prompt_version=default_sp_ver,
             step_kind=STEP_PLAN,
         )
-        response = await aggregate_stream_to_response(llm, request)
+        response = await llm.complete(request)
         messages.append(
             ChatMessage(
                 role=MessageRole.ASSISTANT,

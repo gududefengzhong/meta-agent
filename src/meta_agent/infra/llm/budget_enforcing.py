@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from meta_agent.core.domain.audit import AuditEvent
@@ -42,7 +42,6 @@ from meta_agent.core.ports.llm import (
     LLMClient,
     LLMRequest,
     LLMResponse,
-    LLMStreamChunk,
 )
 from meta_agent.infra.security.context import RequestContext, get_current
 
@@ -150,43 +149,6 @@ class BudgetEnforcingLLMClient(LLMClient):
                 limit_tokens=decision.limit_tokens,
             )
         return await self._inner.complete(request)
-
-    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
-        """Same budget gate as :meth:`complete`, applied before any chunk flows."""
-
-        ctx = get_current()
-        tenant_id = ctx.tenant_id if ctx is not None else None
-        if not tenant_id:
-            logger.debug(
-                "llm.budget.skip_no_tenant",
-                extra={"provider": self._provider, "requested_model": request.model},
-            )
-            async for chunk in self._inner.stream(request):
-                yield chunk
-            return
-
-        decision = await self._check(tenant_id)
-        if decision is not None and not decision.allowed:
-            logger.info(
-                "llm.budget.denied",
-                extra={
-                    "tenant_id": tenant_id,
-                    "trace_id": ctx.trace_id if ctx is not None else None,
-                    "task_id": ctx.task_id if ctx is not None else None,
-                    "provider": self._provider,
-                    "requested_model": request.model,
-                    "tokens_used": decision.usage.tokens_used,
-                    "limit_tokens": decision.limit_tokens,
-                },
-            )
-            await self._audit_deny(ctx, request, decision)
-            raise LLMBudgetExceededError(
-                f"monthly token budget exceeded for tenant={tenant_id!r}",
-                tokens_used=decision.usage.tokens_used,
-                limit_tokens=decision.limit_tokens,
-            )
-        async for chunk in self._inner.stream(request):
-            yield chunk
 
     async def close(self) -> None:
         await self._inner.close()

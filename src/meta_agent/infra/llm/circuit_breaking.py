@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from meta_agent.core.domain.audit import AuditEvent
@@ -54,7 +54,6 @@ from meta_agent.core.ports.llm import (
     LLMInvalidRequestError,
     LLMRequest,
     LLMResponse,
-    LLMStreamChunk,
     LLMTransientError,
 )
 from meta_agent.infra.security.context import RequestContext, get_current
@@ -160,74 +159,6 @@ class CircuitBreakingLLMClient(LLMClient):
                 },
             )
             return await self._inner.complete(request)
-
-    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
-        """Run the inner stream under the breaker for the *first chunk only*.
-
-        Streaming semantics under a circuit breaker are awkward: the
-        breaker's contract is a one-shot success / failure signal, but
-        a stream produces many events. We compromise by gating only
-        the *open of the stream + emission of the first chunk* with
-        ``breaker.call``: that is where transport errors and 4xx/5xx
-        responses surface in practice. Subsequent chunks iterate
-        outside the breaker — a mid-stream provider hiccup will not
-        trip the breaker (acceptable, since the connection was already
-        approved).
-
-        When the breaker is open we never advance the inner iterator,
-        so no HTTP connection is opened. When the breaker errors and
-        ``fail_open`` is true, we fall through to iterating the inner
-        stream unchecked.
-        """
-
-        ctx = get_current()
-        key = self._key_factory(ctx, request)
-        iterator = self._inner.stream(request).__aiter__()
-
-        async def _open() -> LLMStreamChunk | None:
-            try:
-                return await iterator.__anext__()
-            except StopAsyncIteration:
-                return None
-
-        first: LLMStreamChunk | None
-        try:
-            first = await self._breaker.call(key, _open, should_count=self._should_count)
-        except CircuitBreakerOpenError as exc:
-            logger.info(
-                "llm.circuit_breaker.open",
-                extra={
-                    "tenant_id": ctx.tenant_id if ctx is not None else None,
-                    "trace_id": ctx.trace_id if ctx is not None else None,
-                    "task_id": ctx.task_id if ctx is not None else None,
-                    "provider": self._provider,
-                    "requested_model": request.model,
-                    "key": exc.key,
-                    "retry_after_ms": exc.retry_after_ms,
-                },
-            )
-            await self._audit_open(ctx, request, exc.key, exc.retry_after_ms)
-            raise LLMTransientError(f"upstream circuit breaker open for {self._provider}") from exc
-        except CircuitBreakerBackendError as exc:
-            if not self._fail_open:
-                raise
-            logger.warning(
-                "llm.circuit_breaker.backend_error_fail_open",
-                extra={
-                    "tenant_id": ctx.tenant_id if ctx is not None else None,
-                    "trace_id": ctx.trace_id if ctx is not None else None,
-                    "task_id": ctx.task_id if ctx is not None else None,
-                    "provider": self._provider,
-                    "requested_model": request.model,
-                    "error_type": type(exc).__name__,
-                },
-            )
-            first = None
-
-        if first is not None:
-            yield first
-        async for chunk in iterator:
-            yield chunk
 
     async def close(self) -> None:
         await self._inner.close()

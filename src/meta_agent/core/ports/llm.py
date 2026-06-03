@@ -13,7 +13,6 @@ platform.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
 from enum import StrEnum
 from typing import Literal
 
@@ -155,55 +154,6 @@ class LLMResponse(BaseModel):
     """Upstream response ID, useful when correlating against vendor logs."""
 
 
-class ToolCallDelta(BaseModel):
-    """Partial tool-call fragment observed in a streaming response.
-
-    Providers emit tool calls incrementally: the ``id`` and ``name``
-    arrive first, ``arguments_delta`` then accumulates a JSON string
-    fragment per chunk. Consumers MUST concatenate the deltas keyed
-    by ``index`` before parsing the final JSON.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    index: int = Field(..., ge=0)
-    id: str | None = None
-    name: str | None = None
-    arguments_delta: str = ""
-
-
-class LLMStreamChunk(BaseModel):
-    """One incremental delta in a streaming chat completion.
-
-    Every chunk MAY carry any subset of the four payload slots; an
-    empty chunk (heartbeat keepalive from the provider) is legal and
-    consumers should treat it as a no-op. The terminal chunk in a
-    stream sets :attr:`finish_reason` and SHOULD carry the final
-    :class:`LLMUsage` if the provider reported it.
-
-    ``content_delta`` is the assistant-text fragment (empty string
-    means no text in this chunk, distinct from ``None`` which means
-    the field was absent). ``tool_call_deltas`` is the per-index
-    accumulating partial tool calls — consumers reassemble by index.
-
-    The model is provider-agnostic: OpenRouter / Anthropic / OpenAI
-    all map their streaming wire formats to this shape inside their
-    respective adapters.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    content_delta: str = ""
-    tool_call_deltas: tuple[ToolCallDelta, ...] = ()
-    finish_reason: FinishReason | None = None
-    usage: LLMUsage | None = None
-    model: str | None = None
-    """Provider-reported model identity. Usually only present on the
-    first / terminal chunk; reflect the actual served model rather
-    than the requested one when the upstream rewrote the route."""
-    provider_response_id: str | None = None
-
-
 class LLMError(AgentError):
     """Base class for adapter-raised LLM errors.
 
@@ -276,90 +226,6 @@ class LLMClient(ABC):
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """Run a chat completion. Must raise an :class:`LLMError` on failure."""
 
-    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
-        """Run a chat completion in streaming mode.
-
-        Yields :class:`LLMStreamChunk` instances as the provider emits
-        them. The generator MUST exhaust before the caller closes the
-        stream; cancelling mid-stream is allowed but adapters are
-        responsible for cleanup of any inflight HTTP / transport
-        resources via the standard ``async for`` / try-finally
-        contract.
-
-        Errors raise :class:`LLMError` either before the first chunk
-        (pre-flight failures: auth, rate limit, budget) or as the
-        generator is iterated (mid-stream provider failures). A
-        well-behaved adapter MUST NOT swallow upstream errors as
-        silent stream truncation — consumers rely on the terminal
-        chunk's :attr:`LLMStreamChunk.finish_reason` to know the
-        stream completed successfully.
-
-        Phase δ-1 contract: ``complete`` and ``stream`` MUST produce
-        functionally equivalent results for the same request — a
-        caller can choose either based on UX needs without changing
-        the request shape or the request's downstream effects
-        (audit / metering / cost rows are written identically).
-
-        Default implementation calls :meth:`complete` and emits a
-        single terminal chunk; this lets in-memory test fakes /
-        scripted clients participate in the streaming API without
-        bespoke implementations. Production adapters (OpenRouter)
-        and every decorator that wraps them MUST override to
-        forward real provider-side chunks; otherwise downstream
-        streaming UX collapses to a one-shot blob even when the
-        base adapter could stream.
-        """
-
-        response = await self.complete(request)
-        yield _response_to_single_chunk(response)
-
     @abstractmethod
     async def close(self) -> None:
         """Release any underlying connection pool. Safe to call multiple times."""
-
-
-def _response_to_single_chunk(response: LLMResponse) -> LLMStreamChunk:
-    """Convert a :class:`LLMResponse` into a one-shot terminal stream chunk.
-
-    Used by :meth:`LLMClient.stream`'s default implementation and by
-    decorators that need a uniform stream view of a non-streaming
-    inner client. The chunk is terminal — it carries the finish
-    reason and usage — so a caller iterating the generator gets the
-    same observable shape as a real stream.
-    """
-
-    tool_call_deltas = tuple(
-        ToolCallDelta(
-            index=index,
-            id=tc.id,
-            name=tc.name,
-            # ``arguments`` is a dict on the typed model; we serialise
-            # to JSON here so the chunk shape matches what a real
-            # provider emits (string-formatted args).
-            arguments_delta=_dump_json(tc.arguments),
-        )
-        for index, tc in enumerate(response.tool_calls)
-    )
-    return LLMStreamChunk(
-        content_delta=response.content,
-        tool_call_deltas=tool_call_deltas,
-        finish_reason=response.finish_reason,
-        usage=response.usage,
-        model=response.model,
-        provider_response_id=response.provider_response_id,
-    )
-
-
-def _dump_json(arguments: dict[str, object]) -> str:
-    """Best-effort JSON dump for tool-call argument bridging.
-
-    Lives next to :func:`_response_to_single_chunk` because the
-    fall-back chunk synthesis is the only producer of this. Using
-    ``str(dict)`` would emit Python-syntax (``'``-quoted keys); we
-    want OpenAI-shaped JSON so client parsers don't fork on the
-    fake-vs-real boundary.
-    """
-
-    import json
-
-    return json.dumps(arguments, separators=(",", ":"))

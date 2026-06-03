@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from meta_agent.core.domain.audit import AuditEvent
@@ -34,7 +34,6 @@ from meta_agent.core.ports.llm import (
     LLMRateLimitedError,
     LLMRequest,
     LLMResponse,
-    LLMStreamChunk,
 )
 from meta_agent.core.ports.rate_limiter import RateLimiter, RateLimiterBackendError
 from meta_agent.infra.security.context import RequestContext, get_current
@@ -152,62 +151,6 @@ class RateLimitedLLMClient(LLMClient):
             )
 
         return await self._inner.complete(request)
-
-    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
-        """Same rate-limit gate as :meth:`complete`, applied before any chunk flows.
-
-        A denied stream raises :class:`LLMRateLimitedError` before the
-        first chunk is yielded — callers can rely on either both
-        ``acquire`` *and* the initial chunk succeeding, or no chunk
-        being yielded at all.
-        """
-
-        ctx = get_current()
-        key = self._key_factory(ctx, request)
-        try:
-            decision = await self._limiter.acquire(key)
-        except RateLimiterBackendError as exc:
-            if not self._fail_open:
-                raise
-            logger.warning(
-                "llm.rate_limited.backend_error_fail_open",
-                extra={
-                    "tenant_id": ctx.tenant_id if ctx is not None else None,
-                    "trace_id": ctx.trace_id if ctx is not None else None,
-                    "task_id": ctx.task_id if ctx is not None else None,
-                    "provider": self._provider,
-                    "requested_model": request.model,
-                    "error_type": type(exc).__name__,
-                },
-            )
-            async for chunk in self._inner.stream(request):
-                yield chunk
-            return
-
-        if not decision.allowed:
-            logger.info(
-                "llm.rate_limited.denied",
-                extra={
-                    "tenant_id": ctx.tenant_id if ctx is not None else None,
-                    "trace_id": ctx.trace_id if ctx is not None else None,
-                    "task_id": ctx.task_id if ctx is not None else None,
-                    "provider": self._provider,
-                    "requested_model": request.model,
-                    "retry_after_ms": decision.retry_after_ms,
-                    "remaining": decision.remaining,
-                },
-            )
-            await self._audit_deny(ctx, request, key, decision.retry_after_ms, decision.remaining)
-            retry_after = (
-                decision.retry_after_ms / 1000.0 if decision.retry_after_ms is not None else None
-            )
-            raise LLMRateLimitedError(
-                f"rate limit exceeded for {self._provider}",
-                retry_after=retry_after,
-            )
-
-        async for chunk in self._inner.stream(request):
-            yield chunk
 
     async def close(self) -> None:
         await self._inner.close()
