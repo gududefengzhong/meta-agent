@@ -1,9 +1,8 @@
 # meta-agent
 
-> **Bug Fix CLI Agent** — production-grade LLM workflow: plan → tool-use loop →
-> code edit → verify → PR. Built with multi-tenant audit / cost / reliability
-> patterns so the same shape ports cleanly to other automation domains (Test
-> Generation, CI failure triage, internal workflow agents).
+> **Backend-first Bug Fix Agent** — production-grade LLM workflow: accept a
+> repository-scoped bug report over HTTP, run an isolated tool-use loop, verify
+> the fix deterministically, and optionally open a PR.
 
 ## TL;DR
 
@@ -12,31 +11,13 @@
 | **What it does** | Takes a bug description + repo, drives a plan-act-observe agent loop that reads code, edits files, runs a verifier (lint / type-check / tests), produces a PR-ready patch. |
 | **How** | Custom state machine over a Tool Calling registry; tree-sitter-backed code retrieval; OpenRouter for LLM with per-step model routing |
 | **Why production-shape** | Multi-tenant audit + cost tracking + budget gate + circuit breaker + rate limiter + redaction layer + checkpoint resume — patterns required for enterprise deployment, present from day 1 |
-| **Architecture transferability** | The same graph + tool registry shape supports Test Generation Agent / CI Triage Agent / Workflow Automation Agents — swap the Tool set, keep the engine (see Roadmap) |
+| **Primary interface** | REST API. CLI exists as a local dev helper, but the product surface is API-first. |
 
-**Goal**: demonstrate ability to ship LLM-driven workflow systems with the
-production patterns enterprise deployment actually needs — auditing,
-observability, reliability, cost control, human-in-the-loop. Not a generic
-chatbot; not a research benchmark. A focused automation agent.
+**Goal**: demonstrate ability to ship a focused LLM-driven bug-fix system with
+the production patterns enterprise deployment actually needs — auditing,
+observability, reliability, cost control, human-in-the-loop.
 
-## Local Python environment
-
-The local CLI examples assume a project Python environment exists on the host.
-This repo targets `Python >=3.11` and uses `uv` for dependency sync.
-
-```bash
-# one-time per machine
-uv sync
-
-# optional: enter the venv explicitly
-source .venv/bin/activate
-```
-
-If you do not activate `.venv`, use `uv run ...` for every local CLI command so
-the command runs against the project environment instead of whatever `python`
-happens to be on your shell `PATH`.
-
-## Quick start (5 commands to first bug-fix task)
+## Quick start (API path)
 
 ```bash
 # 1. Configure
@@ -49,24 +30,29 @@ cp .env.example .env
 # 2. Start stack (postgres + redis + migrations + api + worker)
 docker compose up --build -d
 
-# 3. Wait ~20s for migrations, then submit a bug-fix task
-uv run python -m meta_agent.cli submit \
-    --task-type bug_fix \
-    --api-url http://localhost:8000 \
-    --token dev-token \
-    --payload '{
+# 3. Submit a bug-fix task
+curl -X POST http://localhost:8000/v1/tasks \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_type": "bug_fix",
+    "input_payload": {
       "issue_description": "Add input validation for discount_percent. Values below 0 or above 100 must raise ValueError, and the error message should mention discount_percent.",
       "repo_url": "https://github.com/gududefengzhong/meta-agent-smoke.git",
       "base_ref": "case/py-discount-validation",
       "target_files": ["discount.py", "tests/test_discount.py"],
       "verify_suite": "python_test",
       "model": "deepseek/deepseek-v4-pro"
-    }'
+    }
+  }'
 
-# 4. Tail it
-uv run python -m meta_agent.cli tail <task_id>
+# 4. Inspect state / result / trajectory
+curl -H "Authorization: Bearer dev-token" \
+     http://localhost:8000/v1/tasks/<task_id>
 
-# 5. Inspect audit + cost trail (any time after task starts)
+curl -H "Authorization: Bearer dev-token" \
+     http://localhost:8000/v1/tasks/<task_id>/result
+
 curl -H "Authorization: Bearer dev-token" \
      "http://localhost:8000/v1/tasks/<task_id>/trajectory"
 ```
@@ -215,7 +201,7 @@ The `-v` form deletes local Postgres and Redis data for this stack. Use it only 
 ## Run a bug-fix task
 
 The bug-fix product path is `task_type=bug_fix`. In the current worker
-bootstrap, that resolves to the built-in `bug_fix_v2` graph: provision a
+bootstrap, that resolves to the built-in `bug_fix` graph: provision a
 per-task git worktree, run the tool-use loop, verify the edit, optionally
 push, and persist the full trajectory.
 
@@ -258,38 +244,7 @@ push successfully unless the worker container also has working SSH keys.
 - `model`: override the routed LLM model for this task
 - `max_steps`: cap the inner shell-agent loop
 
-### CLI path
-
-If you want one command that both submits and tails the task, use `run`.
-Reuse the same payload shape as Quick start:
-
-```bash
-uv run python -m meta_agent.cli run \
-  --task-type bug_fix \
-  --api-url http://localhost:8000 \
-  --token dev-token \
-  --payload '<same JSON payload as Quick start>'
-```
-
-Useful follow-ups:
-
-```bash
-uv run python -m meta_agent.cli tail <task_id> \
-  --api-url http://localhost:8000 \
-  --token dev-token
-
-uv run python -m meta_agent.cli trace <task_id> \
-  --api-url http://localhost:8000 \
-  --token dev-token
-
-uv run python -m meta_agent.cli export-langfuse <task_id> \
-  --api-url http://localhost:8000 \
-  --token dev-token
-```
-
-### HTTP API path
-
-Submit directly to `POST /v1/tasks`. The `input_payload` body is the same as the CLI payload:
+### HTTP API
 
 ```bash
 curl -X POST http://localhost:8000/v1/tasks \
@@ -301,7 +256,7 @@ curl -X POST http://localhost:8000/v1/tasks \
   }'
 ```
 
-Then inspect state / result / trajectory:
+Then inspect state / result / observability / trajectory:
 
 ```bash
 curl -H "Authorization: Bearer dev-token" \
@@ -309,6 +264,9 @@ curl -H "Authorization: Bearer dev-token" \
 
 curl -H "Authorization: Bearer dev-token" \
   http://localhost:8000/v1/tasks/<task_id>/result
+
+curl -H "Authorization: Bearer dev-token" \
+  http://localhost:8000/v1/tasks/<task_id>/observability
 
 curl -H "Authorization: Bearer dev-token" \
   http://localhost:8000/v1/tasks/<task_id>/trajectory
@@ -322,11 +280,51 @@ and push status. If git push credentials are not configured, the task can still
 succeed locally; in that case expect `pushed=false` plus a `push_skip_reason`
 such as `no_token` or `no_repo_url`.
 
-## Auto PR
+### `/observability` fields
 
-`auto_pr` is not a top-level CLI flow today; it is a follow-up task chained
-from a successful `bug_fix` run. The chain only fires when the parent bug-fix
-task actually pushed its feature branch to the remote.
+`GET /v1/tasks/<task_id>/observability` is the task-level summary view used by
+the product API and the eval baseline. It derives a compact read model from
+`tasks.result_json`, `llm_usage_logs`, and `audit_events`.
+
+Core outcome fields:
+
+- `state`: current lifecycle state of the task row
+- `result_status`: terminal result status when present (`succeeded` / `failed`)
+- `verifier_passed`: whether the deterministic verifier passed
+- `failure_category`: stable failure class derived from result output / error
+- `attempts`: number of bug-fix attempts including one replan retry when it happened
+- `files_changed`: changed file list from the final patch
+- `patch_present`: whether the task produced a patch payload
+
+Cost and model fields:
+
+- `llm_calls`: number of persisted LLM calls for the task
+- `llm_failures`: number of LLM calls whose status was not `ok`
+- `total_tokens`: summed prompt + completion tokens
+- `total_cost_usd_micros`: summed LLM spend in micro-USD
+- `total_latency_ms`: summed LLM latency across calls
+- `cost_by_step_kind`: cost split by step kind such as `plan` / `edit`
+- `models`: unique models used during the task
+
+Tooling and human-loop fields:
+
+- `tool_events`: count of `tool.*` audit events
+- `tool_failures`: count of `tool.failed` audit events
+- `human_interventions`: count of human approval-related audit events
+- `budget_outcome`: one of `not_enabled`, `within_budget`, `awaiting_approval`, `approved`, `rejected`, `aborted`
+- `auto_pr_child_status`: one of `not_applicable`, `not_enqueued`, `enqueued`, `created`, `reused`, `skipped`, `failed`, `chain_failed`, `duplicate`
+
+Recommended interpretation order:
+
+1. `result` answers “what did the task produce?”
+2. `observability` answers “what did it cost, where did it fail, and what follow-up state did it reach?”
+3. `trajectory` answers “what happened step by step?”
+
+## Auto PR (optional follow-up)
+
+`auto_pr` is an optional follow-up task chained from a successful `bug_fix`
+run. The chain only fires when the parent bug-fix task actually pushed its
+feature branch to the remote.
 
 ### Preconditions
 
@@ -337,6 +335,15 @@ task actually pushed its feature branch to the remote.
 
 Without that configuration, `bug_fix` can still succeed locally, but no
 follow-up `AUTO_PR` task is enqueued.
+
+`auto_pr` is not part of the parent bug-fix success contract. A bug-fix task
+can succeed even when:
+
+- no follow-up `AUTO_PR` child is enqueued
+- the child task later returns `action=skipped`
+- the child task fails due to provider, credential, or remote-state issues
+
+Treat it as a separate, optional publication step.
 
 ### Minimal worker config
 
@@ -381,14 +388,16 @@ curl -H "Authorization: Bearer dev-token" \
 ```
 
 Successful `auto_pr` output includes the action (`created` or `reused`), PR
-URL, PR id, base/head refs, and commit SHA.
+URL, PR id, base/head refs, and commit SHA. A skipped child returns
+`action=skipped` with a machine-readable `reason` such as `no_repo_url`,
+`no_commit_sha`, or `verifier_failed`.
 
 ## Smoke Cases
 
 The shared smoke-case catalog lives in the separate
 `gududefengzhong/meta-agent-smoke` repository. That catalog is an eval /
-dogfood input source, so it is intentionally **not** wired into the main
-`meta_agent.cli` surface.
+dogfood input source, so it is intentionally **not** part of the main product
+surface.
 
 Use the standalone runner instead:
 
@@ -404,7 +413,7 @@ uv run python examples/smoke_case_runner.py --case case/py-safe-join-traversal -
 
 By default the runner reads the public GitHub raw catalog from
 `gududefengzhong/meta-agent-smoke` and reuses the same
-`META_AGENT_API_URL` / `META_AGENT_TOKEN` env vars as the main CLI. If
+`META_AGENT_API_URL` / `META_AGENT_TOKEN` env vars as the API client examples. If
 `META_AGENT_TOKEN` is not exported, pass `--token dev-token` explicitly:
 
 ```bash
@@ -420,12 +429,11 @@ If you need to test a local draft catalog, pass it explicitly with `--catalog`.
 
 ```mermaid
 flowchart LR
-    CLI[meta_agent.cli<br/>submit / tail / run]
+    CLIENT[HTTP client<br/>curl / app / internal service]
 
     subgraph API [API Layer]
         AUTH[Auth Middleware<br/>Bearer token → RequestContext]
         ROUTER[Routers<br/>tasks / audits / usages / trajectory]
-        SSE[SSE Streams<br/>llm-stream / events / permissions]
     end
 
     subgraph Q [Queue]
@@ -434,7 +442,7 @@ flowchart LR
 
     subgraph Worker [Worker]
         DISPATCH[Dispatcher<br/>consumer-group]
-        GRAPHS[Graph Registry<br/>bug_fix_v2 / code_review / auto_pr / shell_agent]
+        GRAPHS[Graph Registry<br/>bug_fix / auto_pr / shell_agent]
         TOOLS[Tool Registry<br/>FS / Edit / Shell / Test / code_search / WebFetch]
         SBX[WorkspaceManager<br/>Docker container + git worktree]
     end
@@ -451,10 +459,9 @@ flowchart LR
         REDIS[(Redis<br/>queue / rate-limit / breaker stats)]
     end
 
-    CLI -->|HTTP + SSE| API
+    CLIENT -->|HTTP| API
     AUTH --> ROUTER
     ROUTER -->|enqueue| STREAMS
-    SSE -.->|live stream| CLI
     STREAMS -->|pop| DISPATCH
     DISPATCH --> GRAPHS
     GRAPHS --> TOOLS
@@ -473,7 +480,7 @@ flowchart LR
 |---|---|---|
 | Custom state machine, not LangChain/LangGraph | Type-safe Pydantic state; async-first; Port pattern for multi-tenant LLM/Tool/Workspace; no framework dictating audit shape | Maintain our own engine; can't drop in LangChain plugins |
 | `step_kind` model routing | Cheap models for planning, capable for editing, dedicated for review — measurable per-step cost | Extra routing config; needs benchmarking per step type |
-| Multi-tenant from day 1 (`tenant_id` everywhere) | Production code agents must be safe across users; isolating after the fact is a refactor disaster | Slightly more verbose schemas; one-tenant demo mode for now |
+| Multi-tenant from day 1 (`tenant_id` everywhere) | Production bug-fix agents must be safe across users; isolating after the fact is a refactor disaster | Slightly more verbose schemas; one-tenant demo mode for now |
 | Container sandbox + git worktree per task | Agent can run untrusted shell commands; tasks isolated from each other | Slower startup (docker pull / exec overhead) |
 | Outbox + webhook for async notifications | Long human-in-the-loop pauses without holding worker resources | Extra storage; eventual-consistency between webhook and API |
 | **No** LangSmith / proprietary SaaS observability | Audit + usage tables are source of truth; Langfuse is an optional analysis layer with auto export + manual re-export | We still need task-centric dashboard views in our own product surface |
@@ -483,10 +490,9 @@ flowchart LR
 
 ### L1 graphs (`src/meta_agent/core/orchestration/graphs/`)
 
-- **`bug_fix_v2`** — plan / patch / verify / push / finalize. shell_agent loop with deterministic verify; multi-language (Python ruff+pytest, TypeScript tsc+vitest). Replans once on verify failure with prior plan + diff + verifier output as feedback.
-- **`code_review`** — pure-LLM structured review (Pydantic schema: verdict / findings[] / confidence). No workspace required.
+- **`bug_fix`** — the main bug-fix graph. Runs plan / patch / verify / push / finalize over an isolated workspace; deterministic verify; multi-language (Python ruff+pytest, TypeScript tsc+vitest). Replans once on verify failure with prior plan + diff + verifier output as feedback.
 - **`auto_pr`** — publishes a feature-branch commit as PR via `GitProvider` Port (FakeGitProvider + GitHubGitProvider). `BUG_FIX → AUTO_PR` follow-up chain.
-- **`shell_agent`** — underlying plan → tool_call → observe loop. Used by bug_fix_v2; available as `system_shell_agent` for ad-hoc tool use.
+- **`shell_agent`** — internal reusable execution graph that powers the tool loop inside `bug_fix`.
 
 ### Tool registry
 
@@ -497,34 +503,40 @@ flowchart LR
 - **Auth**: `TokenValidator` Port (env CSV + DB-backed); `Authorization: Bearer <token>` → `RequestContext`
 - **Rate limit**: Redis token bucket, tenant × model × tool dimensions
 - **Circuit breaker**: `pybreaker` + Redis shared stats; explicit fallback
-- **Budget**: per-task + per-tenant; `BudgetPolicy` ∈ {none, gate, abort}
+- **Budget**: explicit task-level threshold (`budget_policy` + `budget_threshold_micros`) plus a separate tenant-level monthly guard in the LLM client
 - **Audit**: `audit_events` table writes every graph decision (rate limited, redacted, signed by `step_kind`)
 - **Cost tracking**: `llm_usage_logs` per LLM call (model / tokens / cost / step_kind / prompt_version)
 - **Prompt observability**: `llm_usage_logs.prompt_excerpt` stores a redacted, bounded request preview; Langfuse exports it as generation input
 - **Tool failure observability**: `tool.failed` audit rows carry a redacted `error_excerpt`
 - **Checkpoint resume**: worker restart picks up RUNNING tasks from `task_checkpoints`
-- **Human-in-the-loop**: `PermissionMode` ∈ {auto, approve_before_push, approve_each_tool, plan}
+- **Human-in-the-loop**: public REST contract supports `permission_mode ∈ {auto, approve_before_push}`; inline per-tool / per-plan gating remains internal-only for now
 - **Trajectory replay**: `GET /v1/tasks/{id}/trajectory` joins audit + checkpoints + usage
 - **Prompt redaction**: LLM request + response scanned for secrets / PII before logging
 - **Async notification**: Outbox + webhook with HMAC + retry + dedupe + dead-letter
 
-## Roadmap
+## Scope boundary
 
-The same graph + tool registry pattern can be reused for adjacent agents such
-as test generation, CI failure triage, and richer PR review. Those are domain
-shifts in tool surface and prompts, not engine rewrites.
+This repository is intentionally scoped as a **bug-fix agent**.
+
+- Primary path: `bug_fix`
+- Optional follow-up: `auto_pr`
+- Evaluation support: external smoke catalog + runner
+
+The repository still contains auxiliary runtime pieces and some historical
+graphs, but the product surface, README examples, and dogfood baseline all
+optimize for bug-fix.
 
 ## Project structure
 
 ```
 src/meta_agent/
-├── api/              # FastAPI + routers (tasks / sessions / audits / usages / trajectory / SSE streams)
-├── cli/              # submit / tail / run subcommands
+├── api/              # FastAPI + routers (tasks / sessions / audits / usages / trajectory)
+├── cli/              # optional local dev helper around the HTTP API
 ├── core/
 │   ├── domain/       # Task / TaskResult / Permission / Outbox / Webhook (Pydantic models)
 │   ├── ports/        # LLMClient / RateLimiter / CircuitBreaker / WorkspaceManager / GitProvider / etc.
 │   └── orchestration/
-│       ├── graphs/   # bug_fix_v2 / code_review / auto_pr / shell_agent / echo / git_inspect
+│       ├── graphs/   # bug_fix / auto_pr / shell_agent
 │       └── ...       # GraphRegistry / GraphRunner / state machine primitives
 ├── infra/            # Port implementations
 │   ├── llm/          # OpenRouter adapter + decorators (Redact / Budget / RateLimit / Breaker / Metered / Router)
@@ -545,7 +557,7 @@ These are explicit future slices, not current product claims:
 - K8s Helm chart / Prometheus / OTel exporter / SSO / RBAC / Web UI (Phase ε)
 - gVisor / Firecracker sandbox (Phase ζ)
 - AGENTS.md project memory / PR review feedback / BYO LLM config UI / MCP Server (Phase δ-3)
-- VS Code plugin (was built; removed because the focused product is CLI)
+- VS Code plugin (was built; removed because the focused product is API-first bug fix)
 - Multi-agent orchestration / hooks / plugins (L2 platform layer, beyond focused agent scope)
 
 ## Tech stack
@@ -567,3 +579,8 @@ ruff check . && ruff format --check .
 - `docs/specs/INFRA_SELECTION_MATRIX.md` — Redis Streams vs alternatives, etc.
 - `docs/specs/CONTEXT_PROPAGATION.md` — trace_id / tenant_id propagation contract
 - `CLAUDE.md` — development collaboration rules
+
+## Developer helpers
+
+The repo still ships a local CLI and smoke runner for development / debugging.
+They are intentionally not the primary product interface.

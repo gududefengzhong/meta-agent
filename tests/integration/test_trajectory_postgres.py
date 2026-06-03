@@ -100,7 +100,7 @@ async def test_merges_three_sources_in_timestamp_order(db_pool: DatabasePool) ->
                 cost_usd_micros=1234,
                 latency_ms=420,
                 status=LLMUsageStatus.OK,
-                prompt_id="bug_fix_v2.system",
+                prompt_id="bug_fix.system",
                 prompt_version=1,
                 step_kind="plan",
                 created_at=t_usage,
@@ -127,7 +127,7 @@ async def test_merges_three_sources_in_timestamp_order(db_pool: DatabasePool) ->
     assert page.truncated is False
     # Usage item carries the γ-A / β+ provenance columns.
     usage_item = next(i for i in page.items if i.kind == "usage")
-    assert usage_item.prompt_id == "bug_fix_v2.system"
+    assert usage_item.prompt_id == "bug_fix.system"
     assert usage_item.prompt_version == 1
     assert usage_item.step_kind == "plan"
     # Checkpoint item projects the snapshot, doesn't inline full state.

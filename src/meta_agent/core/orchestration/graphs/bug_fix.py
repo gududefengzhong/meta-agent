@@ -1,87 +1,88 @@
-"""Built-in BUG_FIX graph: minimal code-touching business flow.
+"""Built-in BUG_FIX graph: minimal tool-use bug-fix loop.
 
-Five nodes — ``plan`` → ``patch`` → ``verify`` → ``push`` → ``finalize``
-— that turn an issue description + a caller-supplied file allow-list
-into a committed (and optionally pushed) change on the per-task
-worktree provisioned by the worker.
+The bug-fix agent delegates edit mechanics to the generic
+``shell_agent`` loop and its tool surface.
 
-Scope (P1.x first cut):
+Current scope:
 
-* The graph never proposes which files to touch; ``target_files`` is
-  a strict allow-list supplied by the caller. Patches outside it are
-  rejected as a graph error.
-* The LLM emits whole-file new contents as JSON, not a unified diff —
-  diff parsing is brittle and adds nothing of value at this scale.
-* Verification runs ``ruff check`` on the modified files. A ruff
-  failure is reported as ``output.verifier_passed=False`` but does
-  NOT mark the task as failed; the task succeeds with a patch the
-  caller can choose to discard. ``state.error`` fail-fast routing
-  for business failures is deferred to a future iteration.
-* On a failed verify the graph routes back to ``plan`` once
-  (``_MAX_REPLAN_ATTEMPTS``) with the prior plan, diff summary and
-  verifier output fed back as context. The replan's new patch lands
-  as an additional commit on top of the failed one — no reset / squash
-  — so the worktree history transparently records both attempts.
-  ``output.attempts`` exposes whether a replan happened (``1`` or ``2``).
-* ``push`` is best-effort: it skips when the worktree was provisioned
-  without a remote, when verification failed, or when no credentials
-  were configured. PR creation lives in the separate ``AUTO_PR`` graph;
-  this node only makes the commit reachable on origin.
-
-Hard ceilings (``_MAX_FILES`` / ``_MAX_FILE_BYTES``) bound cost-runaway
-risk during the initial rollout. Raise once real telemetry exists.
+* Runs on the Phase β tool stack (`fs_*`, `edit_*`, `shell_run`,
+  `test_run`) and works with both ``local_git`` and ``docker``
+  workspace backends.
+* Verification is deterministic via ``test_run``. The default suite is
+  ``python_test`` so bug-fix success is gated by tests rather than
+  lint alone; callers may override with suites such as
+  ``python_lint``, ``typescript_typecheck`` or ``typescript_test``.
+* A failed verify triggers at most one replan. The worktree is *not*
+  reset between attempts, so task history remains transparent across
+  retries.
+* On a successful verify the graph stages and commits the workspace
+  diff locally. Push stays best-effort: no remote or no token yields a
+  local-only commit with ``push_skip_reason`` explaining why.
+* ``TaskType.BUG_FIX`` resolves to this graph when the worker is
+  bootstrapped with the required tool stack.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 from pathlib import Path
 from string import Template
 
-from meta_agent.core.orchestration.budget_gate import check_budget_policy
+from meta_agent.core.capabilities.executor import ToolExecutor
 from meta_agent.core.orchestration.deps import GraphDeps
+from meta_agent.core.orchestration.failure_explain import failure_explanation
 from meta_agent.core.orchestration.graph import Graph, GraphError, NodeResult
-from meta_agent.core.orchestration.human_gate import HUMAN_FEEDBACK_KEY, build_human_gate
-from meta_agent.core.orchestration.llm_streaming import aggregate_stream_to_response
-from meta_agent.core.orchestration.state import END, TaskRunState
-from meta_agent.core.orchestration.step_kinds import STEP_EDIT, STEP_PLAN
-from meta_agent.core.ports.llm import (
-    ChatMessage,
-    LLMClient,
-    LLMRequest,
-    MessageRole,
+from meta_agent.core.orchestration.graphs.shell_agent import (
+    SHELL_AGENT_GRAPH_ID,
+    build_shell_agent_graph,
 )
+from meta_agent.core.orchestration.human_gate import HUMAN_FEEDBACK_KEY
+from meta_agent.core.orchestration.state import END, TaskRunState
 from meta_agent.core.ports.prompt_registry import PromptRegistry
+from meta_agent.core.ports.tools import ToolCall, ToolContext
 
 BUG_FIX_GRAPH_ID = "builtin.bug_fix"
-BUG_FIX_PLAN_PROMPT_ID = "bug_fix.plan.system"
-BUG_FIX_PATCH_PROMPT_ID = "bug_fix.patch.system"
+BUG_FIX_SYSTEM_PROMPT_ID = "bug_fix.system"
 
-_MAX_FILES = 3
-_MAX_FILE_BYTES = 10 * 1024
 _MAX_REPLAN_ATTEMPTS = 1
-"""Maximum number of times ``verify`` may route back to ``plan``. A
-value of ``1`` means the graph runs at most two patch attempts before
-moving on to ``push`` (with whatever the final verifier said)."""
+_DEFAULT_MAX_STEPS = 8
 _GIT_TIMEOUT_SECONDS = 30.0
-_RUFF_TIMEOUT_SECONDS = 60.0
 _GIT_PUSH_TIMEOUT_SECONDS = 120.0
 _PUSH_TOKEN_ENV = "AGENT_GIT_PUSH_TOKEN"
-"""Env var used to ferry the push token from this process to the
-``git`` subprocess via a one-shot credential helper. Naming it here
-keeps the test suite from having to guess; the value itself is never
-logged or echoed."""
 
-_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*?)\n```\s*$", re.DOTALL)
+_TOOL_FS_READ = "fs_read"
+_TOOL_FS_LIST_DIR = "fs_list_dir"
+_TOOL_FS_GREP = "fs_grep"
+_TOOL_EDIT_WRITE = "edit_write"
+_TOOL_EDIT_PATCH_APPLY = "edit_patch_apply"
+_TOOL_SHELL_RUN = "shell_run"
+_TOOL_TEST_RUN = "test_run"
+_DEFAULT_VERIFY_SUITE = "python_test"
+_MAX_VERIFIER_EXCERPT_CHARS = 1000
+_DEFAULT_TOOL_NAMES = [
+    _TOOL_FS_READ,
+    _TOOL_FS_LIST_DIR,
+    _TOOL_FS_GREP,
+    _TOOL_EDIT_WRITE,
+    _TOOL_EDIT_PATCH_APPLY,
+    _TOOL_SHELL_RUN,
+    _TOOL_TEST_RUN,
+]
 _CREDENTIAL_URL_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]*@")
+_VERIFIER_ENV_FAILURE_PATTERNS = (
+    "command not found",
+    "no such file or directory",
+    "not installed",
+    "module not found",
+    "permission denied",
+    "environment unavailable",
+    "failed to import",
+)
 
 
 def _redact_credentials(text: str) -> str:
-    """Strip ``user:pass`` from URLs so error / log surfaces stay safe."""
-
     return _CREDENTIAL_URL_RE.sub(r"\g<scheme><redacted>@", text)
 
 
@@ -92,26 +93,27 @@ def _required_str(state: TaskRunState, key: str) -> str:
     return raw
 
 
+def _optional_str(state: TaskRunState, key: str) -> str | None:
+    raw = state.data.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise GraphError(f"bug_fix: state.data[{key!r}] must be a str or null")
+    return raw or None
+
+
 def _target_files(state: TaskRunState) -> list[str]:
     raw = state.data.get("target_files")
-    if not isinstance(raw, list) or not raw:
-        raise GraphError("bug_fix: state.data['target_files'] must be a non-empty list of paths")
-    out: list[str] = []
-    for item in raw:
-        if not isinstance(item, str) or not item:
-            raise GraphError("bug_fix: 'target_files' entries must be non-empty strings")
-        path = Path(item)
-        if path.is_absolute() or ".." in path.parts:
-            raise GraphError(f"bug_fix: target_files entry {item!r} must be repo-relative")
-        out.append(item)
-    if len(out) > _MAX_FILES:
-        raise GraphError(f"bug_fix: target_files exceeds max_files={_MAX_FILES}")
-    return out
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or not all(isinstance(item, str) and item for item in raw)
+    ):
+        raise GraphError("bug_fix: state.data['target_files'] must be a non-empty list[str]")
+    return list(raw)
 
 
 def _read_snapshot(workspace: Path, files: list[str]) -> dict[str, str]:
-    """Read each allow-listed file; missing files map to ``''``."""
-
     snapshot: dict[str, str] = {}
     for rel in files:
         path = workspace / rel
@@ -124,14 +126,68 @@ def _read_snapshot(workspace: Path, files: list[str]) -> dict[str, str]:
     return snapshot
 
 
-def _strip_fence(text: str) -> str:
-    match = _FENCE_RE.match(text.strip())
-    return match.group(1) if match else text
+def _replan_attempts(state: TaskRunState) -> int:
+    raw = state.data.get("_replan_attempts", 0)
+    return raw if isinstance(raw, int) and raw >= 0 else 0
 
 
-async def _run_subprocess(
-    args: list[str], cwd: str | Path, *, timeout: float
-) -> tuple[int, str, str]:
+def _route_after_verify(state: TaskRunState) -> str:
+    raw_report = state.data.get("_verify")
+    passed = isinstance(raw_report, dict) and bool(raw_report.get("passed"))
+    retryable = isinstance(raw_report, dict) and bool(raw_report.get("retryable"))
+    if passed or not retryable or _replan_attempts(state) >= _MAX_REPLAN_ATTEMPTS:
+        return "push"
+    return "prepare"
+
+
+def _render_system_prompt(template: str, targets: list[str]) -> str:
+    """Apply the ``$allow_list`` placeholder of the seed template.
+
+    Uses :class:`string.Template` rather than ``str.format`` so seed
+    text containing literal ``{`` / ``}`` (JSON schema snippets,
+    f-string-looking braces) does not need escaping in the registry.
+    """
+
+    listing = ", ".join(repr(path) for path in targets)
+    return Template(template).safe_substitute(allow_list=listing)
+
+
+def _user_prompt(
+    *,
+    issue: str,
+    targets: list[str],
+    snapshot: dict[str, str],
+    prior_verifier_output: str | None,
+    prior_diff_stat: str | None,
+    human_feedback: str | None = None,
+) -> str:
+    parts: list[str] = [f"Issue:\n{issue}", "\nAllowed files:"]
+    for rel in targets:
+        content = snapshot.get(rel, "")
+        parts.append(f"\n--- {rel} ---\n{content}")
+    if prior_verifier_output:
+        parts.append(
+            "\nThe previous attempt failed verification. Read the feedback below, "
+            "adjust the edit, and avoid repeating the same mistake."
+        )
+        parts.append(f"\nVerifier output:\n{prior_verifier_output}")
+        if prior_diff_stat:
+            parts.append(f"\nPrevious diff stat:\n{prior_diff_stat}")
+    if human_feedback:
+        # Phase γ-C "approve with edits": forward operator-supplied
+        # free-text guidance into the next iteration. Distinct from
+        # the verifier section so the model can tell apart machine
+        # failure feedback from human authorial intent.
+        parts.append(
+            "\nA human reviewer left the following guidance. Treat it "
+            "as authoritative; if it conflicts with the verifier "
+            "feedback above, prefer the human guidance."
+        )
+        parts.append(f"\nHuman feedback:\n{human_feedback}")
+    return "\n".join(parts)
+
+
+async def _run_subprocess(args: list[str], cwd: Path, *, timeout: float) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=str(cwd),
@@ -139,136 +195,16 @@ async def _run_subprocess(
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
         proc.kill()
         await proc.wait()
         raise GraphError(f"bug_fix: {args[0]} timed out after {timeout}s") from None
     return (
         proc.returncode or 0,
-        stdout_bytes.decode("utf-8", errors="replace"),
-        stderr_bytes.decode("utf-8", errors="replace"),
+        stdout_b.decode("utf-8", errors="replace"),
+        stderr_b.decode("utf-8", errors="replace"),
     )
-
-
-def _plan_messages(
-    system: str,
-    issue: str,
-    files: dict[str, str],
-    prior_attempt: dict[str, str] | None = None,
-    human_feedback: str | None = None,
-) -> tuple[ChatMessage, ...]:
-    parts: list[str] = [f"Issue:\n{issue}", "Current files:"]
-    for path, content in files.items():
-        parts.append(f"\n--- {path} ---\n{content}")
-    if prior_attempt is not None:
-        parts.append(
-            "\nThe previous attempt failed verification. Read the feedback "
-            "below and plan a different fix; do not repeat the same mistake."
-        )
-        parts.append(f"\nPrevious plan:\n{prior_attempt['plan']}")
-        parts.append(f"\nPrevious diff summary:\n{prior_attempt['diff_stat']}")
-        parts.append(f"\nVerifier output:\n{prior_attempt['verifier_output']}")
-    if human_feedback:
-        # Phase γ-C "approve with edits": an operator rejected a prior
-        # patch and supplied free-text guidance for the next iteration.
-        # Render the feedback distinctly from verifier output so the
-        # model can tell apart "the tests failed" from "the human
-        # wants this done differently".
-        parts.append(
-            "\nA human reviewer left the following guidance for the "
-            "next iteration. Treat it as authoritative; if it conflicts "
-            "with the verifier feedback above, prefer the human guidance."
-        )
-        parts.append(f"\nHuman feedback:\n{human_feedback}")
-    return (
-        ChatMessage(role=MessageRole.SYSTEM, content=system),
-        ChatMessage(role=MessageRole.USER, content="\n".join(parts)),
-    )
-
-
-def _replan_attempts(state: TaskRunState) -> int:
-    """Narrow ``state.data['_replan_attempts']`` to a non-negative int."""
-
-    raw = state.data.get("_replan_attempts", 0)
-    return raw if isinstance(raw, int) and raw >= 0 else 0
-
-
-_PRE_PUSH_GATE_ID = "before_push"
-
-
-def _route_after_verify(state: TaskRunState) -> str:
-    """Conditional edge out of ``verify``: pass → push (or gate), fail → replan / push.
-
-    The router is pure: it only reads the verifier report and the
-    replan counter. The counter itself is bumped inside ``plan`` on
-    entry, so this function is safe to call any number of times.
-
-    When the task's ``_permission_mode`` is ``approve_before_push``
-    *and* the verifier passed, the router redirects to the
-    ``human_gate`` node so the operator approves the push step;
-    other modes go straight to ``push``.
-    """
-
-    report = state.data.get("_verifier_report")
-    passed = isinstance(report, dict) and bool(report.get("passed"))
-    permission_mode = state.data.get("_permission_mode")
-    if passed:
-        if permission_mode == "approve_before_push":
-            return "human_gate"
-        return "push"
-    if _replan_attempts(state) >= _MAX_REPLAN_ATTEMPTS:
-        return "push"
-    return "plan"
-
-
-def _patch_messages(
-    system: str, issue: str, plan: str, files: dict[str, str]
-) -> tuple[ChatMessage, ...]:
-    parts: list[str] = [f"Issue:\n{issue}", f"\nPlan:\n{plan}", "\nCurrent files:"]
-    for path, content in files.items():
-        parts.append(f"\n--- {path} ---\n{content}")
-    return (
-        ChatMessage(role=MessageRole.SYSTEM, content=system),
-        ChatMessage(role=MessageRole.USER, content="\n".join(parts)),
-    )
-
-
-def _parse_patch(raw: str, allow_list: set[str]) -> list[tuple[str, str]]:
-    cleaned = _strip_fence(raw)
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise GraphError(f"bug_fix: patch response is not valid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise GraphError("bug_fix: patch response must be a JSON object")
-    files = payload.get("files")
-    if not isinstance(files, list) or not files:
-        raise GraphError("bug_fix: patch response must contain non-empty 'files' list")
-    if len(files) > _MAX_FILES:
-        raise GraphError(f"bug_fix: patch response exceeds max_files={_MAX_FILES}")
-    out: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for entry in files:
-        if not isinstance(entry, dict):
-            raise GraphError("bug_fix: patch entries must be JSON objects")
-        path = entry.get("path")
-        content = entry.get("content")
-        if not isinstance(path, str) or not path:
-            raise GraphError("bug_fix: patch entry missing 'path'")
-        if not isinstance(content, str):
-            raise GraphError(f"bug_fix: patch entry for {path!r} missing 'content' string")
-        if path not in allow_list:
-            raise GraphError(f"bug_fix: patch entry {path!r} not in target_files allow-list")
-        if path in seen:
-            raise GraphError(f"bug_fix: patch entry {path!r} appears more than once")
-        if len(content.encode("utf-8")) > _MAX_FILE_BYTES:
-            raise GraphError(
-                f"bug_fix: patch entry {path!r} exceeds max_file_bytes={_MAX_FILE_BYTES}"
-            )
-        seen.add(path)
-        out.append((path, content))
-    return out
 
 
 async def _git(args: list[str], cwd: Path) -> str:
@@ -280,22 +216,152 @@ async def _git(args: list[str], cwd: Path) -> str:
     return stdout
 
 
-async def _commit_patch(
+async def _diff_stat(workspace: Path) -> str:
+    _code, stdout, _stderr = await _run_subprocess(
+        ["git", "diff", "--stat"], workspace, timeout=30.0
+    )
+    return stdout.strip()
+
+
+async def _diff_patch(workspace: Path) -> str:
+    _code, stdout, _stderr = await _run_subprocess(["git", "diff"], workspace, timeout=30.0)
+    return stdout
+
+
+def _verify_suite(state: TaskRunState) -> str:
+    raw = state.data.get("verify_suite")
+    if raw is None:
+        return _DEFAULT_VERIFY_SUITE
+    if not isinstance(raw, str) or not raw:
+        raise GraphError("bug_fix: state.data['verify_suite'] must be a non-empty str")
+    return raw
+
+
+def _output_excerpt(text: str) -> str:
+    return text[:_MAX_VERIFIER_EXCERPT_CHARS]
+
+
+def _split_verifier_output(content: str) -> tuple[str, str]:
+    stdout_marker = "\nstdout:\n"
+    stderr_marker = "\nstderr:\n"
+    stdout = ""
+    stderr = ""
+    if stdout_marker in content and stderr_marker in content:
+        _prefix, remainder = content.split(stdout_marker, 1)
+        stdout, stderr = remainder.split(stderr_marker, 1)
+    return stdout, stderr
+
+
+def _verifier_failure_kind(*, output: str, exit_code: int | None, timed_out: bool) -> str:
+    if timed_out:
+        return "timeout"
+    combined = output.lower()
+    if exit_code == 127 or any(pattern in combined for pattern in _VERIFIER_ENV_FAILURE_PATTERNS):
+        return "env_failed"
+    return "test_failed"
+
+
+def _build_verifier_report_from_tool_result(
+    *,
+    suite: str,
+    output: str,
+    exit_code: int | None,
+    timed_out: bool,
+    passed: bool,
+) -> dict[str, object]:
+    stdout, stderr = _split_verifier_output(output)
+    failure_kind: str | None = None
+    retryable = False
+    if not passed:
+        failure_kind = _verifier_failure_kind(
+            output=output,
+            exit_code=exit_code,
+            timed_out=timed_out,
+        )
+        retryable = failure_kind in {"test_failed", "no_diff"}
+    return {
+        "passed": passed,
+        "output": output,
+        "suite": suite,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "stdout_excerpt": _output_excerpt(stdout),
+        "stderr_excerpt": _output_excerpt(stderr),
+        "failure_kind": failure_kind,
+        "retryable": retryable,
+    }
+
+
+async def _verify_with_test_tool(
+    state: TaskRunState,
+    changed: list[str],
+    *,
     workspace: Path,
-    patches: list[tuple[str, str]],
+    tool_executor: ToolExecutor,
+) -> dict[str, object]:
+    suite = _verify_suite(state)
+    if not changed:
+        return {
+            "passed": False,
+            "suite": suite,
+            "exit_code": None,
+            "timed_out": False,
+            "stdout_excerpt": "",
+            "stderr_excerpt": "no files changed; agent produced no workspace diff",
+            "failure_kind": "no_diff",
+            "retryable": True,
+            "output": "no files changed; agent produced no workspace diff",
+        }
+    cap = state.data.get("output_byte_cap", 65536)
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+        raise GraphError("bug_fix: output_byte_cap must be a positive int")
+    result = await tool_executor.execute(
+        ToolCall(
+            id=f"verify-{state.task_id}",
+            name=_TOOL_TEST_RUN,
+            arguments={"suite": suite, "targets": list(changed)},
+        ),
+        ToolContext(
+            tenant_id=state.tenant_id,
+            task_id=state.task_id,
+            trace_id=state.trace_id,
+            workspace_path=workspace,
+            output_byte_cap=cap,
+        ),
+    )
+    exit_code_raw = result.metadata.get("exit_code")
+    exit_code = int(exit_code_raw) if isinstance(exit_code_raw, str) and exit_code_raw else None
+    timed_out = result.metadata.get("timed_out") == "true"
+    return _build_verifier_report_from_tool_result(
+        suite=suite,
+        output=result.content,
+        exit_code=exit_code,
+        timed_out=timed_out,
+        passed=not result.is_error,
+    )
+
+
+def _files_changed(baseline: dict[str, str], current: dict[str, str]) -> list[str]:
+    changed: list[str] = []
+    for path, before in baseline.items():
+        if current.get(path, "") != before:
+            changed.append(path)
+    return changed
+
+
+async def _commit_workspace(
+    workspace: Path,
+    *,
     issue: str,
     branch: str,
+    files_changed: list[str],
 ) -> tuple[str | None, str, list[str]]:
-    """Write patches, stage, commit. Return (sha, diff_stat, files_changed)."""
-
-    for rel, content in patches:
-        target = workspace / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-    await _git(["add", "--", *[rel for rel, _ in patches]], workspace)
-    staged = await _git(["diff", "--cached", "--name-only"], workspace)
-    files_changed = [line for line in staged.splitlines() if line]
     if not files_changed:
+        return None, "", []
+    await _git(["add", "--", *files_changed], workspace)
+    staged = await _git(["diff", "--cached", "--name-only"], workspace)
+    committed = [line for line in staged.splitlines() if line]
+    if not committed:
         return None, "", []
     first_line = issue.splitlines()[0] if issue.strip() else "bug fix"
     title = first_line[:72]
@@ -314,18 +380,10 @@ async def _commit_patch(
     )
     sha = (await _git(["rev-parse", "HEAD"], workspace)).strip() or None
     diff_stat = (await _git(["show", "--stat", "--format=", "HEAD"], workspace)).strip()
-    return sha, diff_stat, files_changed
+    return sha, diff_stat, committed
 
 
 async def _git_push(workspace: Path, branch: str, *, token: str) -> None:
-    """Push ``branch`` to ``origin`` using a one-shot credential helper.
-
-    The token value is passed through the subprocess environment, never
-    on the command line, so it cannot leak into process tables, audit
-    logs or shell history. The helper script is inlined as a ``-c``
-    config override so we do not have to write any state to disk.
-    """
-
     helper = f'!f() {{ echo username=x-access-token; echo "password=${_PUSH_TOKEN_ENV}"; }}; f'
     args = [
         "git",
@@ -361,15 +419,114 @@ async def _git_push(workspace: Path, branch: str, *, token: str) -> None:
         raise GraphError(f"bug_fix: git push failed (exit={proc.returncode}): {detail}")
 
 
-def build_bug_fix_graph(deps: GraphDeps) -> Graph:
-    """Return a fresh, compiled BUG_FIX graph bound to ``deps.llm``."""
+def _push_skip(
+    reason: str,
+    *,
+    commit_sha: str | None,
+    diff_stat: str,
+    files_changed: list[str],
+) -> dict[str, object]:
+    return {
+        "commit_sha": commit_sha,
+        "diff_stat": diff_stat,
+        "files_changed": files_changed,
+        "pushed": False,
+        "skip_reason": reason,
+    }
 
-    llm: LLMClient = deps.llm
+
+def _bug_fix_failure_explanation(
+    *,
+    verify_report: dict[str, object],
+    attempts: int,
+    files_changed: list[str],
+    agent_output: dict[str, object],
+) -> dict[str, object] | None:
+    verifier_passed = bool(verify_report.get("passed", False))
+    if not verifier_passed:
+        suite = str(verify_report.get("suite") or "unknown")
+        failure_kind = str(verify_report.get("failure_kind") or "test_failed")
+        retryable = bool(verify_report.get("retryable"))
+        verifier_output = str(verify_report.get("output", ""))
+        if failure_kind == "no_diff":
+            summary = (
+                "Verifier did not run successfully because the agent produced no workspace diff."
+            )
+            hints = [
+                "Inspect the assistant message and tool events to see why no edit was made.",
+                "Check target_files and the prompt allow-list.",
+            ]
+        elif failure_kind == "timeout":
+            summary = f"Verifier suite {suite!r} timed out after {attempts} attempt(s)."
+            hints = [
+                "Inspect verifier_output for the command that timed out.",
+                "Check whether the selected verify_suite is too expensive for this workspace.",
+            ]
+        elif failure_kind == "env_failed":
+            summary = (
+                f"Verifier suite {suite!r} could not run successfully because the verification "
+                "environment failed."
+            )
+            hints = [
+                "Inspect verifier_output for missing tools, dependencies, or environment setup errors.",
+                "Retry only after fixing the verifier environment.",
+            ]
+        else:
+            summary = f"Verifier suite {suite!r} failed after {attempts} attempt(s)."
+            hints = [
+                "Inspect verifier_output for the concrete failing command/test.",
+                "Inspect tool events immediately before verification for the edit that produced the failure.",
+            ]
+        return failure_explanation(
+            category="verifier_failed",
+            summary=summary,
+            retryable=retryable,
+            hints=hints,
+            details={
+                "failure_kind": failure_kind,
+                "verify_suite": suite,
+                "attempts": attempts,
+                "files_changed": files_changed,
+                "exit_code": verify_report.get("exit_code"),
+                "timed_out": bool(verify_report.get("timed_out", False)),
+                "stdout_excerpt": str(verify_report.get("stdout_excerpt", "")),
+                "stderr_excerpt": str(verify_report.get("stderr_excerpt", "")),
+                "verifier_output_excerpt": _output_excerpt(verifier_output),
+            },
+        )
+    if bool(agent_output.get("truncated_by_token_budget")):
+        return failure_explanation(
+            category="budget_exceeded",
+            summary="Bug-fix agent stopped because the inner tool-use loop reached max_total_tokens.",
+            retryable=True,
+            hints=[
+                "Increase max_total_tokens for this task.",
+                "Narrow target_files or issue context before retrying.",
+            ],
+            details={"attempts": attempts, "files_changed": files_changed},
+        )
+    if bool(agent_output.get("truncated_by_max_steps")):
+        return failure_explanation(
+            category="max_steps_truncated",
+            summary="Bug-fix agent stopped because the inner tool-use loop reached max_steps.",
+            retryable=True,
+            hints=[
+                "Increase max_steps if this task requires more tool turns.",
+                "Inspect tool-call audit events for repeated or ineffective actions.",
+            ],
+            details={"attempts": attempts, "files_changed": files_changed},
+        )
+    return None
+
+
+def build_bug_fix_graph(deps: GraphDeps) -> Graph:
+    """Build the compiled :data:`BUG_FIX_GRAPH_ID` graph."""
+
+    inner_shell_graph = build_shell_agent_graph(deps)
     push_token: str | None = deps.git_push_token
-    # Capture deps.prompt_registry lazily — the registry guard fires at
-    # node execution time, not build time, so legacy bootstraps that
-    # pre-date Phase β+ (no PromptRegistry wired) can still materialise
-    # the registry mapping without exploding.
+    if deps.tool_executor is None:
+        raise GraphError("bug_fix requires deps.tool_executor")
+    tool_executor = deps.tool_executor
 
     def _require_prompt_registry() -> PromptRegistry:
         if deps.prompt_registry is None:
@@ -379,218 +536,252 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
             )
         return deps.prompt_registry
 
-    async def plan(state: TaskRunState) -> NodeResult:
-        # Phase γ-C: per-task budget enforcement runs *first*. The
-        # check is no-op when the task has no policy, no threshold, or
-        # is still under budget. ``gate_on_threshold`` returns an
-        # ``awaiting_approval`` signal (worker pauses the task);
-        # ``abort_on_threshold`` routes to END.
-        gate_result = await check_budget_policy(state, llm_usage=deps.llm_usage, this_node="plan")
-        if gate_result is not None:
-            return gate_result
+    async def prepare(state: TaskRunState) -> NodeResult:
         issue = _required_str(state, "issue_description")
-        targets = _target_files(state)
         workspace = Path(_required_str(state, "_workspace_path"))
+        targets = _target_files(state)
         if not workspace.is_dir():
             raise GraphError(f"bug_fix: workspace {workspace!s} does not exist")
         snapshot = _read_snapshot(workspace, targets)
-        # Detect a replan: a prior failed verifier report in the
-        # scratch space means the verify router sent us back. Bump the
-        # counter here (rather than in the router, which must stay
-        # pure) and feed the previous attempt's summary into the prompt.
-        prior_report = state.data.get("_verifier_report")
-        prior_patch = state.data.get("_patch")
-        prior_attempt: dict[str, str] | None = None
-        attempts_so_far = _replan_attempts(state)
-        if (
-            isinstance(prior_report, dict)
-            and not bool(prior_report.get("passed"))
-            and isinstance(prior_patch, dict)
-        ):
-            prior_attempt = {
-                "plan": str(state.data.get("_plan", "")),
-                "diff_stat": str(prior_patch.get("diff_stat") or ""),
-                "verifier_output": str(prior_report.get("output", "")),
-            }
-            attempts_so_far += 1
-        # Phase γ-C: if we landed here because an operator rejected
-        # the prior patch with feedback (the gate routes ``reject``
-        # back to plan when configured for "approve with edits"), bump
-        # the replan counter so the gate's loop is bounded by the
-        # same ``_MAX_REPLAN_ATTEMPTS`` ceiling as verifier-driven
-        # replans, and surface the feedback to ``_plan_messages``.
+        baseline_raw = state.data.get("_baseline_snapshot")
+        baseline = baseline_raw if isinstance(baseline_raw, dict) else snapshot
+        prior_report = state.data.get("_verify")
+        prior_verifier_output = None
+        prior_diff_stat = None
+        attempts = _replan_attempts(state)
+        if isinstance(prior_report, dict) and not bool(prior_report.get("passed")):
+            attempts += 1
+            raw_output = prior_report.get("output")
+            prior_verifier_output = raw_output if isinstance(raw_output, str) else None
+            raw_diff = state.data.get("_diff_stat")
+            prior_diff_stat = raw_diff if isinstance(raw_diff, str) else None
+        # Consume operator feedback from a prior reject. The task-level
+        # approval path writes the slot into checkpoint state before
+        # requeueing the task; the next prepare step folds it into the
+        # prompt so the retry follows human guidance.
         human_feedback: str | None = None
         if bool(state.data.get("_rejected_with_feedback")):
             raw_feedback = state.data.get(HUMAN_FEEDBACK_KEY)
             human_feedback = (
                 raw_feedback if isinstance(raw_feedback, str) and raw_feedback else None
             )
-            attempts_so_far += 1
-        plan_prompt = await _require_prompt_registry().fetch(
-            BUG_FIX_PLAN_PROMPT_ID, tenant_id=state.tenant_id
+            attempts += 1
+        tool_names_raw = state.data.get("tool_names")
+        tool_names = (
+            tool_names_raw
+            if isinstance(tool_names_raw, list)
+            and all(isinstance(name, str) for name in tool_names_raw)
+            else _DEFAULT_TOOL_NAMES
         )
-        response = await aggregate_stream_to_response(
-            llm,
-            LLMRequest(
-                messages=_plan_messages(
-                    plan_prompt.content,
-                    issue,
-                    snapshot,
-                    prior_attempt,
+        prompt_asset = await _require_prompt_registry().fetch(
+            BUG_FIX_SYSTEM_PROMPT_ID, tenant_id=state.tenant_id
+        )
+        inner_state = TaskRunState(
+            task_id=state.task_id,
+            tenant_id=state.tenant_id,
+            trace_id=state.trace_id,
+            graph_id=SHELL_AGENT_GRAPH_ID,
+            data={
+                "system_prompt": _render_system_prompt(prompt_asset.content, targets),
+                "system_prompt_id": prompt_asset.prompt_id,
+                "system_prompt_version": prompt_asset.version,
+                "user_prompt": _user_prompt(
+                    issue=issue,
+                    targets=targets,
+                    snapshot=snapshot,
+                    prior_verifier_output=prior_verifier_output,
+                    prior_diff_stat=prior_diff_stat,
                     human_feedback=human_feedback,
                 ),
-                prompt_id=plan_prompt.prompt_id,
-                prompt_version=plan_prompt.version,
-                step_kind=STEP_PLAN,
-            ),
+                "tool_names": list(tool_names),
+                "max_steps": state.data.get("max_steps", _DEFAULT_MAX_STEPS),
+                "max_total_tokens": state.data.get("max_total_tokens"),
+                "output_byte_cap": state.data.get("output_byte_cap", 65536),
+                "_workspace_path": str(workspace),
+                "model": state.data.get("model"),
+                "temperature": state.data.get("temperature"),
+                "max_tokens": state.data.get("max_tokens"),
+            },
         )
-        # Clear the consumed feedback so subsequent iterations do not
-        # double-render it; the next reject cycle writes a fresh value.
         return NodeResult(
             data_update={
-                "_plan": response.content,
-                "_replan_attempts": attempts_so_far,
+                "_baseline_snapshot": baseline,
+                "_replan_attempts": attempts,
+                "_inner_state": inner_state.model_dump(mode="json"),
+                # Clear feedback once consumed so a subsequent reject
+                # cycle starts from a clean slot.
                 "_rejected_with_feedback": False,
                 HUMAN_FEEDBACK_KEY: None,
             }
         )
 
-    async def patch(state: TaskRunState) -> NodeResult:
-        issue = _required_str(state, "issue_description")
-        plan_text = _required_str(state, "_plan")
-        branch = _required_str(state, "_workspace_branch")
-        targets = _target_files(state)
-        workspace = Path(_required_str(state, "_workspace_path"))
-        snapshot = _read_snapshot(workspace, targets)
-        patch_prompt = await _require_prompt_registry().fetch(
-            BUG_FIX_PATCH_PROMPT_ID, tenant_id=state.tenant_id
-        )
-        rendered_system = Template(patch_prompt.content).safe_substitute(
-            allow_list=", ".join(repr(p) for p in snapshot),
-            max_files=_MAX_FILES,
-            max_file_bytes=_MAX_FILE_BYTES,
-        )
-        response = await aggregate_stream_to_response(
-            llm,
-            LLMRequest(
-                messages=_patch_messages(rendered_system, issue, plan_text, snapshot),
-                prompt_id=patch_prompt.prompt_id,
-                prompt_version=patch_prompt.version,
-                step_kind=STEP_EDIT,
-            ),
-        )
-        patches = _parse_patch(response.content, allow_list=set(targets))
-        sha, diff_stat, files_changed = await _commit_patch(workspace, patches, issue, branch)
+    async def agent(state: TaskRunState) -> NodeResult:
+        raw = state.data.get("_inner_state")
+        if not isinstance(raw, dict):
+            raise GraphError("bug_fix: prepare did not emit _inner_state")
+        inner_state = TaskRunState.model_validate(raw)
+        final = await inner_shell_graph.run(inner_state)
+        output = final.data.get("output")
+        if not isinstance(output, dict):
+            raise GraphError("bug_fix: inner shell_agent did not emit output")
         return NodeResult(
             data_update={
-                "_patch": {
-                    "commit_sha": sha,
-                    "diff_stat": diff_stat,
-                    "files_changed": files_changed,
-                }
+                "_agent_output": output,
+                "_agent_state": final.model_dump(mode="json"),
             }
         )
 
     async def verify(state: TaskRunState) -> NodeResult:
-        raw_patch = state.data.get("_patch")
-        if not isinstance(raw_patch, dict):
-            raise GraphError("bug_fix: verify reached without _patch from prior node")
-        raw_changed = raw_patch.get("files_changed")
-        files_changed = [str(p) for p in raw_changed] if isinstance(raw_changed, list) else []
-        if not files_changed:
-            return NodeResult(
-                data_update={
-                    "_verifier_report": {
-                        "passed": False,
-                        "output": "no files changed; patch produced an empty diff",
-                    }
-                }
-            )
-        workspace = _required_str(state, "_workspace_path")
-        code, stdout, stderr = await _run_subprocess(
-            ["ruff", "check", "--", *files_changed],
-            cwd=workspace,
-            timeout=_RUFF_TIMEOUT_SECONDS,
+        workspace = Path(_required_str(state, "_workspace_path"))
+        targets = _target_files(state)
+        baseline_raw = state.data.get("_baseline_snapshot")
+        if not isinstance(baseline_raw, dict):
+            raise GraphError("bug_fix: missing baseline snapshot")
+        baseline = {str(k): str(v) for k, v in baseline_raw.items()}
+        current = _read_snapshot(workspace, targets)
+        changed = _files_changed(baseline, current)
+        report = await _verify_with_test_tool(
+            state,
+            changed,
+            workspace=workspace,
+            tool_executor=tool_executor,
         )
-        combined = (stdout + stderr).strip()
         return NodeResult(
             data_update={
-                "_verifier_report": {
-                    "passed": code == 0,
-                    "output": "" if code == 0 else combined,
-                }
+                "_files_changed": changed,
+                "_verify": report,
+                "_diff_stat": await _diff_stat(workspace),
+                "_patch": await _diff_patch(workspace),
             }
         )
 
     async def push(state: TaskRunState) -> NodeResult:
-        raw_patch = state.data.get("_patch")
-        raw_report = state.data.get("_verifier_report")
-        if not isinstance(raw_patch, dict) or not isinstance(raw_report, dict):
-            raise GraphError("bug_fix: push reached with malformed scratch state")
-        repo_url = state.data.get("repo_url")
-        commit_sha = raw_patch.get("commit_sha")
-        # Skip order is intentional: a missing remote means there is
-        # nowhere to push regardless of the other checks; an unverified
-        # patch must not reach origin even if a token is present; the
-        # token check comes last so the prior signals stay visible in
-        # the output for downstream graphs.
-        if not isinstance(repo_url, str) or not repo_url:
-            return NodeResult(data_update={"_push": _push_skip("no_repo_url")})
-        if not isinstance(commit_sha, str) or not commit_sha:
-            return NodeResult(data_update={"_push": _push_skip("no_commit")})
-        if not bool(raw_report.get("passed")):
-            return NodeResult(data_update={"_push": _push_skip("verifier_failed")})
-        if not push_token:
-            return NodeResult(data_update={"_push": _push_skip("no_token")})
+        raw_verify = state.data.get("_verify")
+        raw_changed = state.data.get("_files_changed")
+        if not isinstance(raw_verify, dict):
+            raise GraphError("bug_fix: push reached without verifier report")
+        files_changed = [str(item) for item in raw_changed] if isinstance(raw_changed, list) else []
+        if not files_changed:
+            return NodeResult(
+                data_update={
+                    "_push": _push_skip(
+                        "no_commit", commit_sha=None, diff_stat="", files_changed=[]
+                    )
+                }
+            )
+        if not bool(raw_verify.get("passed")):
+            return NodeResult(
+                data_update={
+                    "_push": _push_skip(
+                        "verifier_failed",
+                        commit_sha=None,
+                        diff_stat=str(state.data.get("_diff_stat", "")),
+                        files_changed=files_changed,
+                    )
+                }
+            )
         workspace = Path(_required_str(state, "_workspace_path"))
         branch = _required_str(state, "_workspace_branch")
+        issue = _required_str(state, "issue_description")
+        commit_sha, diff_stat, committed = await _commit_workspace(
+            workspace,
+            issue=issue,
+            branch=branch,
+            files_changed=files_changed,
+        )
+        if not isinstance(commit_sha, str) or not commit_sha:
+            return NodeResult(
+                data_update={
+                    "_push": _push_skip(
+                        "no_commit", commit_sha=None, diff_stat="", files_changed=[]
+                    )
+                }
+            )
+        repo_url = state.data.get("repo_url")
+        if not isinstance(repo_url, str) or not repo_url:
+            return NodeResult(
+                data_update={
+                    "_push": _push_skip(
+                        "no_repo_url",
+                        commit_sha=commit_sha,
+                        diff_stat=diff_stat,
+                        files_changed=committed,
+                    )
+                }
+            )
+        if not push_token:
+            return NodeResult(
+                data_update={
+                    "_push": _push_skip(
+                        "no_token",
+                        commit_sha=commit_sha,
+                        diff_stat=diff_stat,
+                        files_changed=committed,
+                    )
+                }
+            )
         await _git_push(workspace, branch, token=push_token)
-        return NodeResult(data_update={"_push": {"pushed": True, "skip_reason": None}})
+        return NodeResult(
+            data_update={
+                "_push": {
+                    "commit_sha": commit_sha,
+                    "diff_stat": diff_stat,
+                    "files_changed": committed,
+                    "pushed": True,
+                    "skip_reason": None,
+                }
+            }
+        )
 
     async def finalize(state: TaskRunState) -> NodeResult:
-        raw_patch = state.data.get("_patch")
-        raw_report = state.data.get("_verifier_report")
+        raw_output = state.data.get("_agent_output")
+        agent_output = raw_output if isinstance(raw_output, dict) else {}
+        raw_verify = state.data.get("_verify")
+        verify = raw_verify if isinstance(raw_verify, dict) else {}
         raw_push = state.data.get("_push")
-        if (
-            not isinstance(raw_patch, dict)
-            or not isinstance(raw_report, dict)
-            or not isinstance(raw_push, dict)
-        ):
-            raise GraphError("bug_fix: finalize reached with malformed scratch state")
-        branch = _required_str(state, "_workspace_branch")
-        raw_changed = raw_patch.get("files_changed")
-        files_changed = [str(p) for p in raw_changed] if isinstance(raw_changed, list) else []
-        commit_sha = raw_patch.get("commit_sha")
+        push = raw_push if isinstance(raw_push, dict) else {}
+        raw_changed = push.get("files_changed")
+        changed = [str(item) for item in raw_changed] if isinstance(raw_changed, list) else []
+        commit_sha = push.get("commit_sha")
         commit_sha_str = commit_sha if isinstance(commit_sha, str) else None
-        repo_url = state.data.get("repo_url")
-        base_ref = state.data.get("base_ref")
-        push_skip_reason = raw_push.get("skip_reason")
-        replan_count = _replan_attempts(state)
+        push_skip_reason = push.get("skip_reason")
+        verifier_output = str(verify.get("output", ""))
+        verifier_passed = bool(verify.get("passed", False))
+        attempts = _replan_attempts(state) + 1
+        failure = _bug_fix_failure_explanation(
+            verify_report=verify,
+            attempts=attempts,
+            files_changed=changed,
+            agent_output=agent_output,
+        )
         return NodeResult(
             data_update={
                 "output": {
-                    # Legacy fields kept for in-tree consumers that
-                    # predate the auto-pr handoff contract.
-                    "branch": branch,
+                    "assistant_message": str(agent_output.get("assistant_message", "")),
+                    "steps": int(agent_output.get("steps", 0) or 0),
+                    "tool_invocations": int(agent_output.get("tool_invocations", 0) or 0),
+                    "truncated_by_max_steps": bool(
+                        agent_output.get("truncated_by_max_steps", False)
+                    ),
+                    "truncated_by_token_budget": bool(
+                        agent_output.get("truncated_by_token_budget", False)
+                    ),
+                    "usage": agent_output.get("usage", {}),
+                    "files_changed": changed,
+                    "patch": str(state.data.get("_patch", "")),
+                    "diff_stat": str(push.get("diff_stat") or state.data.get("_diff_stat", "")),
+                    "verifier_passed": verifier_passed,
+                    "verifier_output": verifier_output,
+                    "verifier": verify,
+                    "failure_explanation": failure,
+                    "attempts": attempts,
+                    "branch": _optional_str(state, "_workspace_branch"),
                     "commit_sha": commit_sha_str,
-                    "files_changed": files_changed,
-                    "diff_stat": str(raw_patch.get("diff_stat") or ""),
-                    "verifier_passed": bool(raw_report.get("passed")),
-                    "verifier_output": str(raw_report.get("output", "")),
-                    # Number of patch attempts the graph made before
-                    # giving up or succeeding. ``1`` means the first
-                    # verify passed; ``2`` means the verify router
-                    # routed back to ``plan`` once.
-                    "attempts": replan_count + 1,
-                    # Handoff fields consumed by ``builtin.auto_pr``:
-                    # exporting them here means a follow-up AUTO_PR task
-                    # can be enqueued with this exact output as its
-                    # input payload without any field renaming.
-                    "repo_url": repo_url if isinstance(repo_url, str) else None,
-                    "base_ref": base_ref if isinstance(base_ref, str) else None,
-                    "head_branch": branch,
+                    "repo_url": _optional_str(state, "repo_url"),
+                    "base_ref": _optional_str(state, "base_ref"),
+                    "head_branch": _optional_str(state, "_workspace_branch"),
                     "head_commit_sha": commit_sha_str,
-                    "pushed": bool(raw_push.get("pushed")),
+                    "pushed": bool(push.get("pushed")),
                     "push_skip_reason": (
                         str(push_skip_reason) if isinstance(push_skip_reason, str) else None
                     ),
@@ -599,43 +790,16 @@ def build_bug_fix_graph(deps: GraphDeps) -> Graph:
         )
 
     g = Graph(BUG_FIX_GRAPH_ID)
-    g.add_node("plan", plan)
-    g.add_node("patch", patch)
+    g.add_node("prepare", prepare)
+    g.add_node("agent", agent)
     g.add_node("verify", verify)
-    # Phase γ-A: a single ``human_gate`` between verify and push. The
-    # router only sends the state here when ``permission_mode``
-    # requires it; ``auto`` tasks bypass the gate entirely. γ-C makes
-    # the gate "approve with edits"-capable: a reject routes back to
-    # ``plan`` with the operator's feedback merged into the next
-    # iteration's prompt (the plan node bumps ``_replan_attempts`` so
-    # the existing ``_MAX_REPLAN_ATTEMPTS`` ceiling still bounds the
-    # loop).
-    g.add_node(
-        "human_gate",
-        build_human_gate(
-            gate_id=_PRE_PUSH_GATE_ID,
-            next_node_when_approved="push",
-            next_node_when_rejected="plan",
-        ),
-    )
     g.add_node("push", push)
     g.add_node("finalize", finalize)
-    g.set_entry("plan")
-    g.add_edge("plan", "patch")
-    g.add_edge("patch", "verify")
-    # ``verify`` is the only conditional edge: pass → push (or gate
-    # if ``permission_mode=approve_before_push``), fail → back to
-    # plan up to ``_MAX_REPLAN_ATTEMPTS`` times, then push.
+    g.set_entry("prepare")
+    g.add_edge("prepare", "agent")
+    g.add_edge("agent", "verify")
     g.add_conditional("verify", _route_after_verify)
-    # The gate node always overrides its next_node at runtime (push
-    # on approve, END on reject). The declared edge is the compile-
-    # time fallback, never reached at runtime.
-    g.add_edge("human_gate", "push")
     g.add_edge("push", "finalize")
     g.add_edge("finalize", END)
     g.compile()
     return g
-
-
-def _push_skip(reason: str) -> dict[str, object]:
-    return {"pushed": False, "skip_reason": reason}

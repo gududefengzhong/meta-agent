@@ -78,8 +78,8 @@ class PgAuditRepository(AuditRepository):
         limit: int = 100,
     ) -> list[AuditEvent]:
         """ASC stream of audit events for one task, keyset-paginated by
-        ``(occurred_at, event_id)`` so the γ-D SSE endpoint never
-        re-emits an event the client has already seen."""
+        ``(occurred_at, event_id)`` so callers can replay without
+        re-emitting an event they've already seen."""
 
         check_tenant(tenant_id)
         params: list[Any] = [tenant_id, task_id]

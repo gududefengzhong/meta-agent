@@ -130,6 +130,7 @@ class LangfuseTrajectoryExporter:
             "state": _string_or_none(task.get("state")),
             "result_status": _string_or_none(task.get("result_status")),
             "failure_category": _string_or_none(task.get("failure_category")),
+            "failure_kind": _string_or_none(task.get("failure_kind")),
             "error_code": _string_or_none(task.get("error_code")),
             "node_sequence": _int_or_none(task.get("node_sequence")),
             "permission_mode": _string_or_none(task.get("permission_mode")),

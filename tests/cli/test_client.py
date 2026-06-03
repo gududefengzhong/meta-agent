@@ -1,7 +1,7 @@
 """Unit tests for the CLI HTTP client.
 
 Drives :class:`TaskClient` against ``httpx.MockTransport`` so the
-SSE / submit / get paths can be exercised without any sockets.
+submit / query paths can be exercised without sockets.
 """
 
 from __future__ import annotations
@@ -132,80 +132,34 @@ async def test_get_trajectory_fetches_task_timeline_with_limit() -> None:
     assert req.url.params["limit_per_source"] == "42"
 
 
-async def test_stream_llm_chunks_yields_parsed_payloads() -> None:
+async def test_get_result_returns_parsed_payload() -> None:
     def handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            content=_sse_body(
-                [
-                    '{"content_delta":"he"}',
-                    '{"content_delta":"llo"}',
-                    '{"finish_reason":"stop"}',
-                    "[DONE]",
-                ]
-            ),
-            headers={"content-type": "text/event-stream"},
+            json={
+                "task_id": "t-1",
+                "status": "succeeded",
+                "graph_id": "builtin.bug_fix",
+                "output": {"files_changed": ["src/a.py"]},
+                "error": None,
+                "node_sequence": 3,
+                "started_at": "2026-06-23T00:00:00+00:00",
+                "finished_at": "2026-06-23T00:00:03+00:00",
+            },
         )
 
-    chunks = []
     async with _client(handler) as client:
-        async for chunk in client.stream_llm_chunks("t-1"):
-            chunks.append(chunk)
-
-    assert [c.get("content_delta") for c in chunks if "content_delta" in c] == ["he", "llo"]
-    assert chunks[-1].get("finish_reason") == "stop"
+        result = await client.get_result("t-1")
+    assert result["status"] == "succeeded"
+    assert result["output"] == {"files_changed": ["src/a.py"]}
 
 
-async def test_stream_events_yields_parsed_payloads() -> None:
-    def handler(_req: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            content=_sse_body(
-                [
-                    '{"event_id":"e-1","action":"task.node_started"}',
-                    '{"state":"succeeded"}',
-                ]
-            ),
-            headers={"content-type": "text/event-stream"},
-        )
-
-    events = []
-    async with _client(handler) as client:
-        async for ev in client.stream_events("t-1"):
-            events.append(ev)
-
-    actions = [e.get("action") for e in events if "action" in e]
-    states = [e.get("state") for e in events if "state" in e]
-    assert actions == ["task.node_started"]
-    assert states == ["succeeded"]
-
-
-async def test_stream_llm_chunks_4xx_raises_before_yielding() -> None:
+async def test_get_result_4xx_raises_cli_error() -> None:
     def handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"detail": "task not found"})
 
     async with _client(handler) as client:
         with pytest.raises(CLIError) as excinfo:
-            async for _ in client.stream_llm_chunks("missing"):
-                pass
+            await client.get_result("missing")
     assert excinfo.value.exit_code == EXIT_USAGE
     assert "HTTP 404" in excinfo.value.message
-
-
-async def test_stream_skips_non_data_lines_and_malformed_json() -> None:
-    def handler(_req: httpx.Request) -> httpx.Response:
-        body = (
-            b": heartbeat\n\n"
-            b"event: ping\n"
-            b'data: {"content_delta":"a"}\n\n'
-            b"data: not valid json\n\n"
-            b'data: {"content_delta":"b"}\n\n'
-            b"data: [DONE]\n\n"
-        )
-        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
-
-    chunks = []
-    async with _client(handler) as client:
-        async for chunk in client.stream_llm_chunks("t-1"):
-            chunks.append(chunk)
-    assert [c.get("content_delta") for c in chunks] == ["a", "b"]

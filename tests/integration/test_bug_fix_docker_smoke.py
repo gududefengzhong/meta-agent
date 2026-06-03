@@ -1,11 +1,11 @@
-"""Integration smokes for ``builtin.bug_fix_v2`` on the Docker backend.
+"""Integration smokes for ``builtin.bug_fix`` on the Docker backend.
 
 These tests use the real Postgres/Redis adapters plus the worker loop,
 but keep the LLM deterministic via :class:`FakeLLMClient`.
 
 Scope:
 
-* Exercise the default ``TaskType.BUG_FIX -> builtin.bug_fix_v2`` route
+* Exercise the default ``TaskType.BUG_FIX -> builtin.bug_fix`` route
   when tool capabilities are present.
 * Provision a Docker-backed workspace, execute the tool stack inside the
   companion container, and persist the final :class:`TaskResult`.
@@ -26,7 +26,7 @@ from redis.asyncio import Redis
 from meta_agent.core.domain.outbox import OutboxEvent, OutboxStatus
 from meta_agent.core.domain.task import Task, TaskState, TaskType
 from meta_agent.core.orchestration import GraphRegistry
-from meta_agent.core.orchestration.graphs import BUG_FIX_V2_GRAPH_ID
+from meta_agent.core.orchestration.graphs import BUG_FIX_GRAPH_ID
 from meta_agent.core.ports.tools import ToolCall
 from meta_agent.infra.persistence import (
     DatabasePool,
@@ -168,7 +168,7 @@ def _registry_for_docker_workspace(llm: FakeLLMClient, workspace_root: Path) -> 
             tool_executor=tool_executor,
         )
     )
-    assert registry.resolve(TaskType.BUG_FIX).graph_id == BUG_FIX_V2_GRAPH_ID
+    assert registry.resolve(TaskType.BUG_FIX).graph_id == BUG_FIX_GRAPH_ID
     return registry
 
 
@@ -254,7 +254,7 @@ async def _run_bug_fix_task(
     return task, event, task_repo, outbox_repo
 
 
-async def test_bug_fix_v2_python_repo_end_to_end_in_docker_backend(
+async def test_bug_fix_python_repo_end_to_end_in_docker_backend(
     db_pool: DatabasePool,
     redis_client: Redis,
     tmp_path: Path,
@@ -304,7 +304,7 @@ async def test_bug_fix_v2_python_repo_end_to_end_in_docker_backend(
         fetched = await task_repo.get(task.tenant_id, task.task_id)
     assert result is not None
     assert result.status == "succeeded"
-    assert result.graph_id == BUG_FIX_V2_GRAPH_ID
+    assert result.graph_id == BUG_FIX_GRAPH_ID
     assert result.output is not None
     output = result.output
     assert output["verifier_passed"] is True
@@ -321,7 +321,7 @@ async def test_bug_fix_v2_python_repo_end_to_end_in_docker_backend(
     assert relayed is not None and relayed.status == OutboxStatus.DISPATCHED
 
 
-async def test_bug_fix_v2_typescript_repo_end_to_end_in_docker_backend(
+async def test_bug_fix_typescript_repo_end_to_end_in_docker_backend(
     db_pool: DatabasePool,
     redis_client: Redis,
     tmp_path: Path,
@@ -372,7 +372,7 @@ async def test_bug_fix_v2_typescript_repo_end_to_end_in_docker_backend(
         fetched = await task_repo.get(task.tenant_id, task.task_id)
     assert result is not None
     assert result.status == "succeeded"
-    assert result.graph_id == BUG_FIX_V2_GRAPH_ID
+    assert result.graph_id == BUG_FIX_GRAPH_ID
     assert result.output is not None
     output = result.output
     assert output["verifier_passed"] is True

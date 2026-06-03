@@ -1,8 +1,8 @@
-"""HTTP client + SSE helpers for the CLI.
+"""HTTP client helpers for the CLI.
 
 A thin layer over ``httpx`` that knows the meta-agent task API
-shape: submit a task, tail the lifecycle events stream, tail the
-LLM token stream. Kept separate from the argparse dispatch so the
+shape: submit a task, poll task state, and fetch results/trajectory.
+Kept separate from the argparse dispatch so the
 network surface can be unit-tested against an ASGI app + mock
 transport.
 
@@ -26,9 +26,7 @@ auth header / base URL.
 
 from __future__ import annotations
 
-import json
 import os
-from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -71,7 +69,7 @@ class CLIConfig:
         env: dict[str, str] | None = None,
     ) -> CLIConfig:
         e = env if env is not None else os.environ
-        resolved_url = api_url or e.get(_API_URL_ENV, _DEFAULT_API_URL)
+        resolved_url = api_url or e.get(_API_URL_ENV) or _DEFAULT_API_URL
         resolved_token = token or e.get(_TOKEN_ENV, "")
         if not resolved_token:
             raise CLIError(
@@ -94,7 +92,7 @@ class TaskClient:
         self._client = httpx.AsyncClient(
             base_url=config.api_url,
             headers={"Authorization": f"Bearer {config.token}"},
-            timeout=httpx.Timeout(30.0, read=None),  # no read timeout on SSE
+            timeout=httpx.Timeout(30.0),
             transport=transport,
         )
 
@@ -144,6 +142,16 @@ class TaskClient:
             ) from exc
         return _decode_or_raise(resp)
 
+    async def get_result(self, task_id: str) -> dict[str, Any]:
+        try:
+            resp = await self._client.get(f"/v1/tasks/{task_id}/result")
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise CLIError(
+                EXIT_NETWORK,
+                f"network error reaching {self._config.api_url}: {exc!s}",
+            ) from exc
+        return _decode_or_raise(resp)
+
     async def get_trajectory(self, task_id: str, *, limit_per_source: int = 1000) -> dict[str, Any]:
         try:
             resp = await self._client.get(
@@ -154,71 +162,6 @@ class TaskClient:
             raise CLIError(
                 EXIT_NETWORK,
                 f"network error reaching {self._config.api_url}: {exc!s}",
-            ) from exc
-        return _decode_or_raise(resp)
-
-    async def stream_llm_chunks(self, task_id: str) -> AsyncIterator[dict[str, Any]]:
-        """Yield parsed chunks from /v1/tasks/{id}/llm-stream."""
-        path = f"/v1/tasks/{task_id}/llm-stream"
-        try:
-            async with self._client.stream("GET", path) as resp:
-                if resp.status_code != 200:
-                    await resp.aread()
-                    raise _http_error(resp, expected="200 SSE")
-                async for chunk in _iter_sse_data(resp):
-                    yield chunk
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise CLIError(
-                EXIT_NETWORK,
-                f"llm-stream transport error: {exc!s}",
-            ) from exc
-
-    async def stream_events(self, task_id: str) -> AsyncIterator[dict[str, Any]]:
-        """Yield parsed lifecycle events from /v1/tasks/{id}/events."""
-        path = f"/v1/tasks/{task_id}/events"
-        try:
-            async with self._client.stream("GET", path) as resp:
-                if resp.status_code != 200:
-                    await resp.aread()
-                    raise _http_error(resp, expected="200 SSE")
-                async for event in _iter_sse_data(resp):
-                    yield event
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise CLIError(
-                EXIT_NETWORK,
-                f"events stream transport error: {exc!s}",
-            ) from exc
-
-    async def stream_permission_prompts(self, task_id: str) -> AsyncIterator[dict[str, Any]]:
-        """Yield parsed permission prompts from /v1/tasks/{id}/permissions/stream."""
-        path = f"/v1/tasks/{task_id}/permissions/stream"
-        try:
-            async with self._client.stream("GET", path) as resp:
-                if resp.status_code != 200:
-                    await resp.aread()
-                    raise _http_error(resp, expected="200 SSE")
-                async for prompt in _iter_sse_data(resp):
-                    yield prompt
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise CLIError(
-                EXIT_NETWORK,
-                f"permission stream transport error: {exc!s}",
-            ) from exc
-
-    async def decide_permission(
-        self, task_id: str, prompt_id: str, *, allow: bool, reason: str | None = None
-    ) -> dict[str, Any]:
-        """POST /v1/tasks/{id}/permissions/{prompt_id}/decide."""
-        body: dict[str, Any] = {"allow": allow}
-        if reason is not None:
-            body["reason"] = reason
-        path = f"/v1/tasks/{task_id}/permissions/{prompt_id}/decide"
-        try:
-            resp = await self._client.post(path, json=body)
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise CLIError(
-                EXIT_NETWORK,
-                f"network error posting decision: {exc!s}",
             ) from exc
         return _decode_or_raise(resp)
 
@@ -256,31 +199,5 @@ def _http_error(resp: httpx.Response, *, expected: str | None = None) -> CLIErro
     )
 
 
-async def _iter_sse_data(resp: httpx.Response) -> AsyncIterator[dict[str, Any]]:
-    """Parse SSE ``data:`` payloads as JSON; skip framing-only lines.
-
-    Each event arrives as ``data: {json}\n\n``. We deliberately
-    ignore ``event:`` / ``id:`` / comment lines — the caller cares
-    about the JSON body and reconstructs event type from the
-    payload itself when needed.
-    """
-    async for line in resp.aiter_lines():
-        if not line.startswith("data:"):
-            continue
-        payload = line[len("data:") :].strip()
-        if not payload or payload == "[DONE]":
-            continue
-        try:
-            obj = json.loads(payload)
-        except ValueError:
-            continue  # malformed event — skip rather than abort
-        if isinstance(obj, dict):
-            yield obj
-
-
 def is_terminal_state(state: str | None) -> bool:
     return state is not None and state in _TERMINAL_STATES
-
-
-ChunkHandler = Callable[[dict[str, Any]], None]
-EventHandler = Callable[[dict[str, Any]], None]

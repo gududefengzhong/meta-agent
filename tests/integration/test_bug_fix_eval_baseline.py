@@ -1,7 +1,7 @@
-"""Small real-LLM eval baseline for the Bug Fix CLI Agent.
+"""Small real-LLM eval baseline for the Bug Fix Agent.
 
 This is deliberately not SWE-bench. It is a small, repo-local baseline
-that answers whether the current ``bug_fix_v2`` loop can repeatedly
+that answers whether the current ``bug_fix`` loop can repeatedly
 solve simple bug-fix tasks while producing comparable observability
 signals: verifier result, attempts, tool calls, token/cost, and failure
 classification.
@@ -25,8 +25,14 @@ from typing import Any
 import pytest
 from redis.asyncio import Redis
 
+from meta_agent.api.services.task_observability import build_task_observability
 from meta_agent.core.domain.outbox import OutboxEvent
 from meta_agent.core.domain.task import Task, TaskState, TaskType
+from meta_agent.core.domain.task_observability import (
+    TaskObservabilitySummary,
+    build_eval_aggregate,
+    summary_to_json_dict,
+)
 from meta_agent.core.orchestration import GraphRegistry
 from meta_agent.core.ports.llm import LLMClient
 from meta_agent.infra.llm.config import OpenRouterConfig
@@ -47,7 +53,7 @@ from meta_agent.infra.redaction import Redactor
 from meta_agent.infra.security.context import RequestContext, bind_context
 from meta_agent.infra.workspace import DockerWorkspaceManager
 from meta_agent.worker.runner import WorkerConfig, WorkerLoop
-from tests.integration.test_bug_fix_v2_real_llm import (
+from tests.integration.test_bug_fix_real_llm import (
     _registry_for_docker_workspace,
     _workspace_manager,
 )
@@ -390,7 +396,7 @@ async def _run_eval_task(
 
 
 @pytest.mark.asyncio
-async def test_bug_fix_v2_real_llm_eval_baseline(
+async def test_bug_fix_real_llm_eval_baseline(
     db_pool: DatabasePool,
     redis_client: Redis,
     tmp_path: Path,
@@ -411,6 +417,7 @@ async def test_bug_fix_v2_real_llm_eval_baseline(
     workspaces = _workspace_manager(workspace_root, workspace_image)
 
     rows: list[dict[str, Any]] = []
+    summaries: list[TaskObservabilitySummary] = []
     for case in _CASES:
         repo = case.make_repo(tmp_path)
         task, task_repo = await _run_eval_task(
@@ -435,57 +442,43 @@ async def test_bug_fix_v2_real_llm_eval_baseline(
             request_id=task.task_id,
         )
         with bind_context(ctx):
-            result = await task_repo.get_result(task.tenant_id, task.task_id)
             fetched = await task_repo.get(task.tenant_id, task.task_id)
         assert fetched is not None
         assert fetched.state in {TaskState.SUCCEEDED, TaskState.FAILED}
-        assert result is not None
-        output = result.output or {}
-        usage = await _usage_summary(db_pool, task.tenant_id, task.task_id)
-        audit = await _audit_summary(db_pool, task.tenant_id, task.task_id)
-        failure = output.get("failure_explanation")
-        failure_category = failure.get("category") if isinstance(failure, dict) else None
-        verifier_passed = bool(output.get("verifier_passed", False))
-        rows.append(
+        summary = await build_task_observability(
+            tenant_id=task.tenant_id,
+            task=fetched,
+            tasks=task_repo,
+            audits=audit_repo,
+            llm_usage=usage_repo,
+        )
+        row = summary_to_json_dict(summary)
+        row.update(
             {
                 "case_id": case.case_id,
                 "language": case.language,
                 "task_state": fetched.state.value,
-                "result_status": result.status,
-                "verifier_passed": verifier_passed,
-                "verifier_failed": not verifier_passed,
-                "failure_category": failure_category,
-                "files_changed": output.get("files_changed", []),
-                "attempts": _int_or_zero(output.get("attempts")),
-                "tool_invocations": _int_or_zero(output.get("tool_invocations")),
-                "patch_present": bool(output.get("patch")),
-                **usage,
-                **audit,
+                "verifier_failed": summary.verifier_passed is False,
             }
         )
+        rows.append(row)
+        summaries.append(summary)
 
-    total_tokens = sum(_int_or_zero(row["tokens"]) for row in rows)
-    total_cost = sum(_int_or_zero(row["cost_usd_micros"]) for row in rows)
+    total_tokens = sum(_int_or_zero(row["total_tokens"]) for row in rows)
+    total_cost = sum(_int_or_zero(row["total_cost_usd_micros"]) for row in rows)
     passed = sum(1 for row in rows if row["verifier_passed"])
     cases = len(rows)
-    summary = {
+    report = {
         "cases": cases,
         "passed": passed,
         "failed": cases - passed,
         "total_tokens": total_tokens,
         "total_cost_usd_micros": total_cost,
-        "jd_metrics": {
-            "success_rate": passed / cases if cases else 0.0,
-            "average_tokens_per_case": total_tokens / cases if cases else 0.0,
-            "average_cost_usd_micros_per_case": total_cost / cases if cases else 0.0,
-            "tool_failures": sum(_int_or_zero(row["tool_failures"]) for row in rows),
-            "verifier_failures": sum(1 for row in rows if row["verifier_failed"]),
-            "human_interventions": sum(_int_or_zero(row["human_interventions"]) for row in rows),
-        },
+        "jd_metrics": build_eval_aggregate(summaries),
         "rows": rows,
     }
     print("\nBUG_FIX_V2_EVAL_BASELINE_JSON")
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    print(json.dumps(report, indent=2, sort_keys=True))
     captured = capsys.readouterr()
     if captured.out:
         import sys
@@ -495,46 +488,6 @@ async def test_bug_fix_v2_real_llm_eval_baseline(
     assert len(rows) == len(_CASES)
     assert all(row["llm_calls"] > 0 for row in rows)
     assert all(row["tool_events"] > 0 for row in rows)
-
-
-async def _usage_summary(
-    db_pool: DatabasePool,
-    tenant_id: str,
-    task_id: str,
-) -> dict[str, int]:
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT total_tokens, cost_usd_micros FROM llm_usage_logs "
-            "WHERE tenant_id=$1 AND task_id=$2",
-            tenant_id,
-            task_id,
-        )
-    return {
-        "llm_calls": len(rows),
-        "tokens": sum(_int_or_zero(row["total_tokens"]) for row in rows),
-        "cost_usd_micros": sum(_int_or_zero(row["cost_usd_micros"]) for row in rows),
-    }
-
-
-async def _audit_summary(
-    db_pool: DatabasePool,
-    tenant_id: str,
-    task_id: str,
-) -> dict[str, int]:
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT action FROM audit_events WHERE tenant_id=$1 AND task_id=$2",
-            tenant_id,
-            task_id,
-        )
-    tool_rows = [row for row in rows if str(row["action"]).startswith("tool.")]
-    return {
-        "tool_events": len(tool_rows),
-        "tool_failures": sum(1 for row in tool_rows if row["action"] == "tool.failed"),
-        "human_interventions": sum(
-            1 for row in rows if row["action"] in {"task.awaiting_approval", "permission.prompted"}
-        ),
-    }
 
 
 def _int_or_zero(value: object) -> int:

@@ -3,8 +3,8 @@
 Outbound webhooks turn the worker's existing audit events into HTTP
 notifications so operators don't have to poll for state changes (the
 canonical case being ``task.awaiting_approval`` — without a webhook,
-the human-in-the-loop story devolves into "client polls SSE
-forever", which doesn't survive a real reviewer's day).
+the human-in-the-loop story devolves into ad-hoc task polling, which
+doesn't survive a real reviewer's day).
 
 Two aggregates cohabit here:
 

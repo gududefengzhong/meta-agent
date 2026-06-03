@@ -77,6 +77,7 @@ def test_export_task_maps_trajectory_to_langfuse_observations() -> None:
             "state": "succeeded",
             "result_status": "succeeded",
             "failure_category": None,
+            "failure_kind": None,
             "node_sequence": 4,
         },
         trajectory={
@@ -95,7 +96,7 @@ def test_export_task_maps_trajectory_to_langfuse_observations() -> None:
                     "cost_usd_micros": 123,
                     "latency_ms": 456,
                     "status": "ok",
-                    "prompt_id": "bug_fix_v2.system",
+                    "prompt_id": "bug_fix.system",
                     "prompt_version": 1,
                     "prompt_excerpt": "SYSTEM: fix bug\n\nUSER: hi",
                     "step_kind": "plan",
@@ -165,6 +166,7 @@ def test_export_task_keeps_error_excerpt_but_not_raw_tool_output() -> None:
             "state": "failed",
             "result_status": "failed",
             "failure_category": "tool_failed",
+            "failure_kind": "env_failed",
             "node_sequence": 2,
         },
         trajectory={
@@ -188,6 +190,8 @@ def test_export_task_keeps_error_excerpt_but_not_raw_tool_output() -> None:
     )
 
     tool_metadata = fake.calls[1]["metadata"]
+    root_metadata = fake.calls[0]["metadata"]
+    assert root_metadata["failure_kind"] == "env_failed"
     assert tool_metadata["error_excerpt"] == "[REDACTED:authorization_header] patch failed"
     assert tool_metadata["metadata.exit_code"] == 1
     assert "output" not in tool_metadata

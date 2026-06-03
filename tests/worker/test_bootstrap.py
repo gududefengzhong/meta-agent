@@ -16,9 +16,7 @@ import pytest
 from meta_agent.core.domain.task import TaskType
 from meta_agent.core.orchestration import GraphDeps
 from meta_agent.core.orchestration.graphs import (
-    BUG_FIX_V2_GRAPH_ID,
-    ECHO_GRAPH_ID,
-    GIT_INSPECT_GRAPH_ID,
+    BUG_FIX_GRAPH_ID,
     SHELL_AGENT_GRAPH_ID,
 )
 from meta_agent.infra.budget.llm_usage_aggregator import (
@@ -230,21 +228,8 @@ async def test_build_worker_settings_from_env_file_backend_folds_secrets(
 
 
 def test_build_registry_registers_builtin_graphs_and_routes_defaults() -> None:
-    registry = build_registry(GraphDeps(llm=FakeLLMClient()))
-    assert registry.is_materialized
-    assert registry.get(ECHO_GRAPH_ID).graph_id == ECHO_GRAPH_ID
-    assert registry.get(GIT_INSPECT_GRAPH_ID).graph_id == GIT_INSPECT_GRAPH_ID
-    assert registry.resolve(TaskType.BUG_FIX).graph_id == "builtin.bug_fix"
-    assert registry.resolve(TaskType.SYSTEM_ECHO).graph_id == ECHO_GRAPH_ID
-    assert registry.resolve(TaskType.SYSTEM_GIT_INSPECT).graph_id == GIT_INSPECT_GRAPH_ID
-    # The git-inspect graph requires a workspace; the other built-in
-    # smoke graphs must not pull the worker into provisioning a worktree.
-    assert registry.requires_workspace(GIT_INSPECT_GRAPH_ID) is True
-    assert registry.requires_workspace(ECHO_GRAPH_ID) is False
-    # Without a tool stack in deps, ``shell_agent`` must stay
-    # unregistered so legacy callers (smoke harnesses, unit tests)
-    # keep working without paying for the tool surface.
-    assert registry.default_graph_id(TaskType.SYSTEM_SHELL_AGENT) is None
+    with pytest.raises(ValueError, match=r"build_registry requires deps\.tool_registry"):
+        build_registry(GraphDeps(llm=FakeLLMClient()))
 
 
 def test_build_local_tool_stack_exposes_default_fs_edit_tools() -> None:
@@ -367,9 +352,8 @@ def test_build_registry_registers_shell_agent_when_tool_caps_present() -> None:
     registry = build_registry(deps)
     assert registry.is_materialized
     assert registry.get("builtin.bug_fix").graph_id == "builtin.bug_fix"
-    assert registry.get(BUG_FIX_V2_GRAPH_ID).graph_id == BUG_FIX_V2_GRAPH_ID
     assert registry.get(SHELL_AGENT_GRAPH_ID).graph_id == SHELL_AGENT_GRAPH_ID
-    assert registry.resolve(TaskType.BUG_FIX).graph_id == BUG_FIX_V2_GRAPH_ID
+    assert registry.resolve(TaskType.BUG_FIX).graph_id == BUG_FIX_GRAPH_ID
     assert registry.resolve(TaskType.SYSTEM_SHELL_AGENT).graph_id == SHELL_AGENT_GRAPH_ID
     # The shell_agent loop touches the workspace through its FS/Edit
     # tools, so the worker must provision a per-task worktree before

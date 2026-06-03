@@ -124,11 +124,10 @@ class InMemoryPermissionGate(PermissionGate):
 class _PromptSubscription:
     """Async iterator over one subscriber's prompt queue with explicit cleanup.
 
-    Mirrors the pattern used by :class:`InMemoryChunkBroadcaster`'s
-    subscription type: an async-generator-shaped iterator would
-    leak the queue registration when ``aclose`` runs before the
-    first ``__anext__`` (PEP 525 skips the ``finally`` block of an
-    unstarted generator).
+    Uses an explicit subscription object because an async-generator-
+    shaped iterator would leak the queue registration when ``aclose``
+    runs before the first ``__anext__`` (PEP 525 skips the
+    ``finally`` block of an unstarted generator).
     """
 
     def __init__(

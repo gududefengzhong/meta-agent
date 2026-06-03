@@ -9,9 +9,8 @@ workflow:
   to hours later. Right for high-stakes long-running async reviews
   (PR-style sign-off).
 * δ-1 inline: the agent is mid-loop, hits a sensitive action,
-  emits a prompt to the connected client, blocks for *seconds* on
-  a decision, then continues. Right for interactive code-agent UX
-  (VS Code / CLI users asked "run ``rm -rf foo/``? [allow/deny]").
+  emits a prompt to a connected client, blocks for *seconds* on a
+  decision, then continues.
 
 The two coexist — operators pick per ``PermissionMode``.
 """
@@ -36,11 +35,11 @@ class PermissionPrompt(BaseModel):
     * ``payload`` — JSON-shaped tool arguments (already redacted by
       :class:`RedactingLLMClient`), so the client can show the
       details that drove the decision
-    * ``prompt_id`` — opaque identifier the client uses to POST the
-      decision back to /v1/tasks/{task_id}/permissions/{prompt_id}/decide
+    * ``prompt_id`` — opaque identifier the client uses to correlate
+      the later decision with this prompt
 
     Frozen so producers can pass the same instance to multiple
-    consumers (audit emission, broadcaster, in-process gate) without
+    consumers (audit emission, in-process gate) without
     accidental mutation.
     """
 
